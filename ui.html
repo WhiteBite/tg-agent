@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TG-агент · индекс</title>
+<style>
+  :root{
+    --bg:#17212b; --bg2:#0e1621; --hover:#202b36; --active:#2b5278;
+    --line:#101921; --text:#f5f5f5; --muted:#708499; --muted2:#8fa3b5;
+    --accent:#5eb5f7; --badge:#3f8dbf; --star:#f7c04a; --bubble:#182533;
+    --green:#4fae4e; --red:#e06c75;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  html,body{height:100%}
+  body{background:var(--bg2); color:var(--text);
+       font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  #app{display:grid; grid-template-columns:58px 330px 300px 1fr; height:100vh}
+
+  /* ------- рейка фильтров ------- */
+  #rail{background:var(--bg); border-right:1px solid var(--line);
+        display:flex; flex-direction:column; align-items:center; padding:10px 0; gap:6px}
+  #rail .logo{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#2b5278,#5eb5f7);
+        display:flex;align-items:center;justify-content:center;font-weight:700;margin-bottom:8px}
+  #rail button{width:44px;height:44px;border:none;border-radius:10px;background:transparent;
+        color:var(--muted);cursor:pointer;font-size:11px;display:flex;flex-direction:column;
+        align-items:center;justify-content:center;gap:2px}
+  #rail button i{font-style:normal;font-size:16px}
+  #rail button.on{background:var(--active);color:#fff}
+  #rail button:hover{background:var(--hover);color:#fff}
+
+  .col{background:var(--bg); border-right:1px solid var(--line);
+       display:flex; flex-direction:column; min-width:0}
+  .col header{padding:10px 12px; border-bottom:1px solid var(--line)}
+  .col header h2{font-size:15px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .col header .sub{color:var(--muted); font-size:12px; margin-top:2px;
+        white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .list{flex:1; overflow-y:auto; overscroll-behavior:contain}
+  .list::-webkit-scrollbar{width:5px} .list::-webkit-scrollbar-thumb{background:#2c3a47;border-radius:3px}
+
+  .row{display:flex; gap:10px; padding:8px 10px; cursor:pointer; align-items:center; position:relative}
+  .row:hover{background:var(--hover)}
+  .row.sel{background:var(--active)}
+  .ava{width:46px;height:46px;border-radius:50%;flex:none;display:flex;align-items:center;
+       justify-content:center;font-weight:600;font-size:16px;color:#fff}
+  .ava.sm{width:38px;height:38px;font-size:13px}
+  .grow{flex:1; min-width:0}
+  .t1{display:flex; align-items:center; gap:6px}
+  .t1 b{font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .t1 .time{margin-left:auto; color:var(--muted); font-size:11px; flex:none}
+  .t2{color:var(--muted2); font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px}
+  .pill{flex:none; min-width:20px; height:20px; padding:0 6px; border-radius:10px; background:#37475766;
+        color:var(--muted); font-size:11px; display:flex; align-items:center; justify-content:center}
+  .pill.new{background:var(--badge); color:#fff}
+  .forum-ico{color:var(--accent); font-size:12px}
+
+  .star{flex:none; width:26px; height:26px; border:none; background:transparent; color:var(--muted);
+        font-size:16px; cursor:pointer; border-radius:6px; opacity:.25}
+  .row:hover .star{opacity:1}
+  .star.on{color:var(--star); opacity:1}
+  .dot{width:10px;height:10px;border-radius:50%;flex:none}
+
+  /* ------- шапки и кнопки ------- */
+  input[type=text],input[type=search]{width:100%; background:var(--bg2); border:1px solid #24313d;
+        border-radius:8px; color:var(--text); padding:7px 10px; font-size:13px; outline:none}
+  input:focus{border-color:var(--accent)}
+  .btn{border:none; border-radius:8px; background:#24313d; color:var(--text); padding:6px 10px;
+       cursor:pointer; font-size:12px}
+  .btn:hover{background:#2e3f4f}
+  .btn.accent{background:var(--active)}
+  .btnrow{display:flex; gap:6px; align-items:center; margin-top:8px; flex-wrap:wrap}
+  #status{color:var(--muted); font-size:11px; margin-top:6px; min-height:14px;
+       white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+
+  /* ------- сообщения ------- */
+  #msgs{background:var(--bg2); display:flex; flex-direction:column; min-width:0}
+  #msgs header{padding:10px 14px; background:var(--bg); border-bottom:1px solid var(--line)}
+  #msglist{flex:1; overflow-y:auto; padding:14px 12%; }
+  @media (max-width:1400px){#msglist{padding:14px 6%}}
+  .day{ text-align:center; margin:14px 0 8px}
+  .day span{background:#1c2a38cc; color:var(--muted2); font-size:11px; padding:3px 10px; border-radius:10px}
+  .msg{display:flex; gap:10px; margin:3px 0; }
+  .msg .body{background:var(--bubble); border-radius:12px; padding:6px 12px 7px; max-width:78%; min-width:0}
+  .msg.service{justify-content:center}
+  .msg.service .body{background:transparent; color:var(--muted); font-size:12px; padding:2px 0}
+  .who{font-weight:600; font-size:13px}
+  .when{color:var(--muted); font-size:11px; margin-left:8px}
+  .txt{white-space:pre-wrap; word-break:break-word; margin-top:1px}
+  mark{background:#5eb5f744; color:#bfe1ff; border-radius:3px; padding:0 2px}
+  #older{margin:10px auto; display:block}
+  .empty{color:var(--muted); text-align:center; margin-top:18vh}
+  .hitmeta{color:var(--muted); font-size:11px}
+  .searchbar{display:flex; gap:6px}
+  .watched-tag{color:var(--star); font-size:12px}
+  .chip{background:#24313d; border-radius:8px; padding:2px 8px; color:var(--muted2); font-size:11px}
+  .pin{margin-top:8px;background:#2b241680;border:1px solid #5a4a1f66;border-radius:10px;
+       padding:6px 10px;font-size:12px;color:var(--muted2)}
+  .pin summary{cursor:pointer}
+  .pinitem{margin-top:6px}
+  .pinitem .txt{white-space:pre-wrap}
+  .cpy{border:none;background:transparent;color:var(--muted);cursor:pointer;
+       font-size:12px;margin-left:6px;opacity:0}
+  .msg .body:hover .cpy{opacity:1}
+  .body.selmark{outline:2px solid var(--accent)}
+  #selbar{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);
+       background:var(--active);border-radius:12px;padding:8px 14px;display:none;
+       gap:10px;align-items:center;z-index:9;box-shadow:0 4px 18px #0008}
+  #selbar.on{display:flex}
+  details.pre{margin-top:8px; color:var(--muted); font-size:11px}
+  details.pre pre{margin-top:6px; white-space:pre-wrap; max-height:160px; overflow:auto;
+        background:var(--bg2); padding:8px; border-radius:8px}
+</style>
+</head>
+<body>
+<div id="app">
+  <nav id="rail">
+    <div class="logo">TG</div>
+    <div id="railbtns" style="display:flex;flex-direction:column;gap:6px;align-items:center"></div>
+  </nav>
+
+  <section class="col" id="chats">
+    <header>
+      <div class="searchbar">
+        <input id="q" type="search" placeholder="Поиск по чатам">
+        <button class="btn" id="sync" title="sync.py --watched">⟳</button>
+      </div>
+      <div id="status"></div>
+    </header>
+    <div class="list" id="chatlist"></div>
+  </section>
+
+  <section class="col" id="topics">
+    <header>
+      <h2 id="ct">—</h2>
+      <div class="sub" id="csub"></div>
+      <div class="btnrow" id="cbtns" hidden>
+        <button class="btn accent" id="watchall">★ отметить все темы</button>
+      </div>
+    </header>
+    <div class="list" id="topiclist"></div>
+  </section>
+
+  <main id="msgs">
+    <header>
+      <div class="t1">
+        <b id="mt" style="font-size:15px">Выберите тему</b>
+        <span id="msub" class="chip" hidden></span>
+        <button class="star" id="mstar" hidden title="отметить / снять">☆</button>
+        <button class="btn" id="mread" hidden>✓ прочитано</button>
+      </div>
+      <div class="btnrow" id="mrow2" hidden>
+        <input id="alias" type="text" placeholder="алиас для агента (например «Релизы»)" style="max-width:260px">
+        <input id="mdate" type="date" title="прыгнуть к дате" style="max-width:150px">
+        <div class="searchbar" style="flex:1">
+          <input id="mq" type="search" placeholder="поиск по истории (FTS)">
+        </div>
+      </div>
+      <div id="pinbox"></div>
+    </header>
+    <div class="list" id="msglist"><div class="empty">Слева — чаты, дальше — темы.<br>
+      Отмечайте темы звёздочкой: агент в opencode увидит их в tg_watch.</div></div>
+  </main>
+</div>
+<div id="selbar"><span id="selcount"></span>
+  <button class="btn accent" id="selcopy">⧉ markdown для агента</button>
+  <button class="btn" id="selclear">✕</button>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s??"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const COLORS = ["#e17076","#eda86c","#a695e7","#7bc862","#6ec9cb","#65aadd","#ee7aae"];
+const color = id => COLORS[(Math.abs(id|0)) % COLORS.length];
+const initials = t => (t||"?").trim().split(/\s+/).slice(0,2).map(w=>w[0]||"").join("").toUpperCase();
+const hhmm = ts => ts ? new Date(ts*1000).toLocaleTimeString("ru",{hour:"2-digit",minute:"2-digit"}) : "";
+const dstr = ts => ts ? new Date(ts*1000).toLocaleDateString("ru",{day:"numeric",month:"long"}) : "";
+const fulld = ts => ts ? new Date(ts*1000).toLocaleDateString("ru",{day:"2-digit",month:"2-digit",year:"2-digit"})+" "+hhmm(ts) : "";
+
+let STATE = {chats:[], stats:{}};
+let SEL = {chat:null, topic:null, filter:"all", search:"", msearch:""};
+let busy = false;
+
+const TOK = new URLSearchParams(location.search).get("token") || "";
+const api = (p, o) => fetch(p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOK), o).then(r => r.json());
+const post = (p, b) => api(p, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b)});
+
+async function loadState(){
+  STATE = await api("/api/state");
+  renderRail(); renderChats(); renderTopics(); renderMsgHeader(); renderPins();
+  const s = STATE.stats;
+  setStatus(`индекс: ${s.messages} сообщений · ${s.chats} чатов · отмечено тем: ${s.watched}`);
+}
+function setStatus(t){ $("#status").textContent = t; }
+
+const FILTERS = [["all","☰","все"],["watch","★","мои"],["forum","💬","форум"],["chan","📣","кан."]];
+function renderRail(){
+  $("#railbtns").innerHTML =
+    FILTERS.map(([f,i,t])=>`<button data-f="${f}" class="${SEL.filter===f?"on":""}" title="${t}"><i>${i}</i>${t}</button>`).join("") +
+    (STATE.folders||[]).map(fo=>`<button data-f="f${fo.id}" class="${SEL.filter==="f"+fo.id?"on":""}"
+       title="папка Telegram: ${esc(fo.title)}"><i>📁</i>${esc((fo.title||"?").split(" ")[0].slice(0,7))}</button>`).join("");
+}
+function chatMatches(c){
+  if (SEL.search && !((c.title||"")+(c.username||"")).toLowerCase().includes(SEL.search)) return false;
+  if (SEL.filter==="watch") return c.watched.length>0;
+  if (SEL.filter==="forum") return !!c.is_forum;
+  if (SEL.filter==="chan")  return c.kind==="channel";
+  if (SEL.filter.startsWith("f")){
+    const fo = (STATE.folders||[]).find(x=>x.id===+SEL.filter.slice(1));
+    return !!fo && fo.chat_ids.includes(c.id);
+  }
+  return true;
+}
+function renderChats(){
+  const list = STATE.chats.filter(chatMatches)
+    .sort((a,b)=> ((b.watched.length?2:0)+(b.new_total?1:0)) - ((a.watched.length?2:0)+(a.new_total?1:0))
+                  || (b.last_ts||0)-(a.last_ts||0));
+  $("#chatlist").innerHTML = list.map(c=>{
+    const newB = c.new_total>0 ? `<span class="pill new">${c.new_total}</span>`
+               : `<span class="pill">${c.msg_count||0}</span>`;
+    return `<div class="row ${SEL.chat===c.id?"sel":""}" data-chat="${c.id}">
+      <div class="ava" style="background:${color(c.id)}">${esc(initials(c.title))}</div>
+      <div class="grow">
+        <div class="t1">${c.is_forum?'<span class="forum-ico" title="форум">💬</span>':""}
+          <b>${esc(c.title||c.id)}</b>
+          ${c.watched.length?'<span class="watched-tag" title="есть отмеченные темы">★</span>':""}
+          <span class="time">${hhmm(c.last_ts)}</span></div>
+        <div class="t2">${esc(c.last_sender? c.last_sender+": ":"")}${esc((c.last_text||"").slice(0,90))}</div>
+      </div>${newB}</div>`;
+  }).join("") || `<div class="empty">ничего не найдено</div>`;
+}
+
+function curChat(){ return STATE.chats.find(c=>c.id===SEL.chat); }
+function curWatched(topic){ const c=curChat(); return c && c.watched.find(w=>w.topic_id===topic); }
+
+function renderTopics(){
+  const c = curChat();
+  $("#ct").textContent = c ? (c.title||c.id) : "—";
+  $("#csub").textContent = c ? `${c.kind==="channel"?"канал":c.is_forum?"группа с темами":"группа"} · ${c.members??"?"} уч. · ${c.msg_count||0} сообщений в индексе` : "";
+  $("#cbtns").hidden = !c;
+  if(!c){ $("#topiclist").innerHTML=""; return; }
+  $("#topiclist").innerHTML = c.topics.map(t=>{
+    const w = curWatched(t.topic_id);
+    const badge = w ? (w.new_since_read>0 ? `<span class="pill new">${w.new_since_read}</span>` : `<span class="pill">${t.local_count||t.messages||0}</span>`)
+                    : `<span class="pill">${t.local_count||t.messages||0}</span>`;
+    return `<div class="row ${SEL.topic===t.topic_id?"sel":""}" data-topic="${t.topic_id}">
+      <span class="dot" style="background:${color(t.topic_id*7+3)}"></span>
+      <div class="grow">
+        <div class="t1"><b>${esc(w&&w.alias? w.alias+"  ·  "+t.title : t.title)}</b>
+          ${t.closed?'<span class="chip">закрыта</span>':""}</div>
+      </div>${badge}
+      <button class="star ${w?"on":""}" data-star="${t.topic_id}" title="отметить для агента">${w?"★":"☆"}</button>
+    </div>`;
+  }).join("") || `<div class="empty">тем пока нет — синхронизируйте чат<br>(⟳ или sync.py --chat …)</div>`;
+}
+
+function renderMsgHeader(){
+  const c = curChat(); const w = curWatched(SEL.topic);
+  const t = c && c.topics.find(x=>x.topic_id===SEL.topic);
+  const on = !!t;
+  $("#mt").textContent = t ? (w?.alias || t.title) : "Выберите тему";
+  $("#msub").hidden = !t; if(t) $("#msub").textContent = `${c.title} · тема ${t.topic_id}`;
+  $("#mstar").hidden = !t;
+  $("#mstar").textContent = w ? "★" : "☆";
+  $("#mstar").classList.toggle("on", !!w);
+  $("#mread").hidden = !w;
+  $("#mrow2").hidden = !t;
+  $("#alias").value = w?.alias || "";
+  $("#alias").disabled = !w;
+}
+
+async function loadMessages(before=0){
+  const p = `/api/messages?chat_id=${SEL.chat}&topic_id=${SEL.topic}&limit=60&before=${before}`;
+  const r = await api(p);
+  return r;
+}
+let MSGCACHE = new Map();
+let SELMSG = new Set();
+function msgHtml(m){
+  MSGCACHE.set(m.msg_id, m);
+  if (m.is_service) return `<div class="msg service"><div class="body">${esc(m.text||"сервисное сообщение")}</div></div>`;
+  return `<div class="msg"><div class="body ${SELMSG.has(m.msg_id)?"selmark":""}" data-bid="${m.msg_id}">
+    <span class="who" style="color:${color(m.sender_id||0)}">${esc(m.sender_name||"…")}</span>
+    <span class="when">${fulld(m.ts)}</span>
+    <button class="cpy" data-cpy="${m.msg_id}" title="в выделение для агента">⧉</button>
+    <div class="txt">${esc(m.text)}${m.media?` <span class="chip">📎 ${esc(m.media)}</span>`:""}</div>
+  </div></div>`;
+}
+function selbar(){
+  $("#selcount").textContent = SELMSG.size ? `выделено: ${SELMSG.size}` : "";
+  $("#selbar").classList.toggle("on", SELMSG.size>0);
+}
+function copySelection(){
+  const lines = [...SELMSG].sort((a,b)=>a-b).map(id=>MSGCACHE.get(id)).filter(Boolean)
+    .map(m=>`- **${m.sender_name||"?"}** (${fulld(m.ts)}): ${m.text||""}`);
+  const md = `> Выдержка из «${curChat()?.title||""}» / тема ${SELMSG_TOPIC} для агента:\n` + lines.join("\n");
+  const done = ()=>{ $("#selcopy").textContent="✓ скопировано"; setTimeout(()=>$("#selcopy").textContent="⧉ markdown для агента",1500); };
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(md).then(done).catch(()=>fallbackCopy(md,done));
+  else fallbackCopy(md,done);
+}
+function fallbackCopy(text,done){
+  const ta=document.createElement("textarea"); ta.value=text; document.body.appendChild(ta);
+  ta.select(); try{document.execCommand("copy");done();}catch(e){prompt("Скопируй вручную:",text);} ta.remove();
+}
+function renderPins(){
+  const c = curChat(); const box = $("#pinbox");
+  if (!c || SEL.topic == null){ box.innerHTML = ""; return; }
+  const tid = SEL.topic === 0 ? 1 : SEL.topic;
+  let pins = (c.pins || []).filter(p => (p.topic_id ?? 1) === tid);
+  if (!pins.length) pins = c.pins || [];
+  if (!pins.length){ box.innerHTML = ""; return; }
+  box.innerHTML = `<details class="pin"><summary>📌 закреп (${pins.length}) — readme темы</summary>` +
+    pins.map(p => `<div class="pinitem">
+      <span class="who">${esc(p.sender_name || "")}</span>
+      <span class="when">${fulld(p.ts)}</span>
+      <div class="txt">${esc(p.text)}</div></div>`).join("") + `</details>`;
+}
+
+async function openTopic(){
+  $("#msglist").innerHTML = `<div class="empty">…</div>`;
+  const r = await loadMessages();
+  let html = ""; let lastDay = null;
+  for (const m of r.messages){
+    const d = dstr(m.ts);
+    if (d!==lastDay){ html += `<div class="day"><span>${d}</span></div>`; lastDay=d; }
+    html += msgHtml(m);
+  }
+  html = (r.count ? `<button class="btn" id="older" data-before="${r.oldest}">↑ показать старее</button>` : `<div class="empty">сообщений нет</div>`) + html;
+  $("#msglist").innerHTML = html;
+  $("#msglist").scrollTop = $("#msglist").scrollHeight;
+  bindOlder();
+}
+
+async function doSearch(){
+  const q = $("#mq").value.trim();
+  if (!q){ openTopic(); return; }
+  const r = await api(`/api/search?q=${encodeURIComponent(q)}&chat_id=${SEL.chat}&topic_id=${SEL.topic}`);
+  const hits = r.hits||[];
+  $("#msglist").innerHTML = `<div class="day"><span>поиск «${esc(q)}» · ${r.engine} · найдено ${r.count}</span></div>` +
+    hits.map(h=>{
+      const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"ig");
+      const txt = esc(h.text||"").replace(re, m=>`<mark>${m}</mark>`);
+      return `<div class="msg"><div class="body" style="max-width:90%">
+        <span class="who" style="color:${color(h.sender_id||0)}">${esc(h.sender_name||"…")}</span>
+        <span class="when">${fulld(h.ts)}</span>
+        <div class="txt">${txt}</div></div></div>`;
+    }).join("") || `<div class="empty">ничего не нашлось</div>`;
+}
+
+/* ---------------- события ---------------- */
+$("#chatlist").onclick = e=>{
+  const row = e.target.closest("[data-chat]"); if(!row) return;
+  SEL.chat = +row.dataset.chat; SEL.topic = null; SEL.msearch="";
+  renderChats(); renderTopics(); renderMsgHeader(); renderPins();
+  $("#msglist").innerHTML = `<div class="empty">выберите тему</div>`;
+};
+$("#topiclist").onclick = async e=>{
+  const st = e.target.closest("[data-star]");
+  if (st){
+    const tid = +st.dataset.star; const w = curWatched(tid);
+    if (w) await post("/api/unwatch",{chat_id:SEL.chat, topic_id:tid});
+    else   await post("/api/watch",{chat_id:SEL.chat, topic_id:tid});
+    await loadState(); return;
+  }
+  const row = e.target.closest("[data-topic]"); if(!row) return;
+  SEL.topic = +row.dataset.topic;
+  renderTopics(); renderMsgHeader(); renderPins(); openTopic();
+};
+$("#watchall").onclick = async ()=>{
+  const c = curChat(); if(!c) return;
+  for (const t of c.topics) await post("/api/watch",{chat_id:c.id, topic_id:t.topic_id});
+  await loadState();
+};
+$("#mstar").onclick = async ()=>{
+  const w = curWatched(SEL.topic);
+  if (w) await post("/api/unwatch",{chat_id:SEL.chat, topic_id:SEL.topic});
+  else   await post("/api/watch",{chat_id:SEL.chat, topic_id:SEL.topic});
+  await loadState();
+};
+$("#mread").onclick = async ()=>{
+  await post("/api/mark_read",{chat_id:SEL.chat, topic_id:SEL.topic});
+  await loadState();
+};
+$("#alias").onchange = async ()=>{
+  if (!curWatched(SEL.topic)) return;
+  await post("/api/alias",{chat_id:SEL.chat, topic_id:SEL.topic, alias:$("#alias").value.trim()});
+  await loadState();
+};
+let SELMSG_TOPIC = null;
+$("#msglist").addEventListener("click", e=>{
+  const b = e.target.closest("[data-cpy]"); if(!b) return;
+  const id = +b.dataset.cpy;
+  SELMSG.has(id) ? SELMSG.delete(id) : SELMSG.add(id);
+  SELMSG_TOPIC = SEL.topic;
+  b.closest(".body").classList.toggle("selmark", SELMSG.has(id));
+  selbar();
+});
+$("#selcopy").onclick = copySelection;
+$("#selclear").onclick = ()=>{ SELMSG.clear(); selbar();
+  document.querySelectorAll(".selmark").forEach(x=>x.classList.remove("selmark")); };
+$("#mdate").onchange = async e=>{
+  if (!e.target.value || SEL.chat==null || SEL.topic==null) return;
+  const ts = Math.floor(new Date(e.target.value+"T23:59:59").getTime()/1000);
+  const r = await api(`/api/messages?chat_id=${SEL.chat}&topic_id=${SEL.topic}&limit=100&around=${ts}`);
+  $("#msglist").innerHTML = `<div class="day"><span>до ${esc(e.target.value)}</span></div>` +
+    r.messages.map(msgHtml).join("") + `<button class="btn" id="older" data-before="${r.oldest||0}">↑ показать старее</button>`;
+  bindOlder();
+};
+function bindOlder(){
+  bindOlder();
+}
+$("#mq").oninput = e=>{ clearTimeout(window.__t); window.__t=setTimeout(doSearch, 350); };
+$("#q").oninput = e=>{ SEL.search = e.target.value.trim().toLowerCase(); renderChats(); };
+$("#rail").onclick = e=>{
+  const b = e.target.closest("button[data-f]"); if(!b) return;
+  SEL.filter = b.dataset.f;
+  document.querySelectorAll("#rail button").forEach(x=>x.classList.toggle("on", x===b));
+  renderChats();
+};
+$("#sync").onclick = async ()=>{
+  setStatus("синхронизация…");
+  await post("/api/sync",{});
+  pollSync();
+};
+function pollSync(){
+  const t = setInterval(async ()=>{
+    const s = await api("/api/sync_status");
+    if (s.running){ setStatus("синхронизация: "+(s.lines.at(-1)||"…")); return; }
+    clearInterval(t);
+    setStatus(s.code===0 ? "синхронизация завершена ✓" : `синхронизация: ошибка (код ${s.code}) — нужны креды Telegram`);
+    if (s.code!==0 && s.lines.length){ console.warn(s.lines.join("\n")); }
+    await loadState();
+  }, 1500);
+}
+let LASTPOLL = Math.floor(Date.now()/1000);
+setInterval(async ()=>{
+  try{
+    const r = await api(`/api/poll?since=${LASTPOLL}`);
+    LASTPOLL = Math.floor(Date.now()/1000);
+    if (!r.messages.length) return;
+    await loadState();  // бейджи/папки/счётчики обновились
+    if (SEL.chat!=null && SEL.topic!=null){
+      const tid = SEL.topic===0?1:SEL.topic;
+      const add = r.messages.filter(m=>m.chat_id===SEL.chat && (m.topic_id??1)===tid);
+      if (add.length){
+        const list=$("#msglist");
+        const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 120;
+        if (atBottom){ list.insertAdjacentHTML("beforeend", add.map(msgHtml).join("")); list.scrollTop=list.scrollHeight; }
+      }
+    }
+  }catch(e){ /* ui ещё не поднялся или база пересоздаётся */ }
+}, 4000);
+loadState();
+</script>
+</body>
+</html>

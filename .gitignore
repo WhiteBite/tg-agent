@@ -1,0 +1,17 @@
+# секреты и персональные данные — никогда в git
+.env
+*.session
+*.session-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ОС
+.DS_Store
+Thumbs.db
