@@ -13,6 +13,7 @@ sync.py --watched в фоне (нужны креды, без них покаже
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import subprocess
@@ -33,7 +34,23 @@ TOKEN = os.environ.get("TG_UI_TOKEN", "")
 
 
 def _authed(q) -> bool:
-    return (not TOKEN) or (q.get("token", [""])[0] == TOKEN)
+    if not TOKEN:
+        return True
+    given = q.get("token", [""])[0]
+    try:
+        return hmac.compare_digest(given, TOKEN)
+    except TypeError:
+        return False
+
+
+def _allowed_hosts() -> set[str]:
+    hosts = {f"{HOST}:{PORT}"}
+    if HOST in ("127.0.0.1", "localhost"):
+        hosts |= {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+    return hosts
+
+
+ALLOWED_HOSTS = _allowed_hosts()
 
 _sync = {"running": False, "lines": [], "code": None}
 _lock = threading.Lock()
@@ -99,6 +116,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # тихо
         pass
 
+    def _bad_host(self) -> bool:
+        # DNS-rebinding: чужой домен, зарезолвленный на 127.0.0.1, шлёт свой Host
+        if TOKEN:
+            return False
+        host = (self.headers.get("Host") or "").lower()
+        return host not in ALLOWED_HOSTS
+
     def _send(self, data: bytes, ctype: str, code: int = 200) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -120,6 +144,9 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self) -> None:
+        if self._bad_host():
+            self._json({"error": "чужой Host отклонён"}, code=403)
+            return
         u = urlparse(self.path)
         q = parse_qs(u.query)
         if u.path.startswith("/api/") and not _authed(q):
@@ -194,9 +221,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
+        if self._bad_host():
+            self._json({"error": "чужой Host отклонён"}, code=403)
+            return
         u = urlparse(self.path)
         if u.path.startswith("/api/") and not _authed(parse_qs(u.query)):
             self._json({"error": "нужен ?token=<TG_UI_TOKEN>"}, code=401)
+            return
+        # без этого чужая страница могла бы слать POST из html-формы (CSRF)
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._json({"error": "нужен Content-Type: application/json"}, code=415)
             return
         b = self._body()
         try:
@@ -247,6 +282,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    if HOST not in ("127.0.0.1", "localhost") and not TOKEN:
+        raise SystemExit(
+            f"HOST={HOST} смотрит наружу, а TG_UI_TOKEN не задан — "
+            "индекс переписки будет открыт; задай токен или HOST=127.0.0.1")
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"TG-агент визуал: http://{HOST}:{PORT}  (индекс: {DB_PATH})")
     srv.serve_forever()

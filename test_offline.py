@@ -1043,6 +1043,77 @@ def test_marked_ids(db_path: Path) -> None:
               str(mid["chat_id"] if mid else None))
 
 
+def test_ui_security(db_path: Path) -> None:
+    print("=== UI: Host-гейт, Content-Type на POST, 0.0.0.0 без токена ===")
+    import socket
+    import urllib.error as urlerr
+    import urllib.request as urlreq
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {**os.environ, "TG_DB": str(db_path), "PORT": str(port), "HOST": "127.0.0.1"}
+    proc = subprocess.Popen([sys.executable, "ui.py"], env=env,
+                            cwd=str(Path(__file__).parent),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):  # ждём подъёма
+            try:
+                urlreq.urlopen(f"http://127.0.0.1:{port}/api/poll?since=0", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+
+        # подменённый Host (DNS-rebinding/CSRF) отклоняется
+        req = urlreq.Request(f"http://127.0.0.1:{port}/api/state",
+                             headers={"Host": "evil.example"})
+        try:
+            urlreq.urlopen(req, timeout=2)
+            code = 200
+        except urlerr.HTTPError as e:
+            code = e.code
+        check(code == 403, "ui: чужой Host -> 403", str(code))
+
+        # POST не-JSON (form) — как из чужой формы в браузере
+        data = "chat_id=-100222&topic_id=1".encode()
+        req2 = urlreq.Request(f"http://127.0.0.1:{port}/api/watch", data=data,
+                              headers={"Content-Type": "application/x-www-form-urlencoded"})
+        try:
+            urlreq.urlopen(req2, timeout=2)
+            code2 = 200
+        except urlerr.HTTPError as e:
+            code2 = e.code
+        check(code2 == 415, "ui: POST без application/json -> 415", str(code2))
+
+        # легальный JSON POST работает и откатывается
+        body = json.dumps({"chat_id": -100222, "topic_id": 1}).encode()
+        req3 = urlreq.Request(f"http://127.0.0.1:{port}/api/watch", data=body,
+                              headers={"Content-Type": "application/json"})
+        got = json.loads(urlreq.urlopen(req3, timeout=2).read())
+        body_u = json.dumps({"chat_id": -100222, "topic_id": 1}).encode()
+        req4 = urlreq.Request(f"http://127.0.0.1:{port}/api/unwatch", data=body_u,
+                              headers={"Content-Type": "application/json"})
+        un = json.loads(urlreq.urlopen(req4, timeout=2).read())
+        check(got.get("ok") and un.get("ok"),
+              "ui: JSON POST работает (watch + unwatch)", f"{got}/{un}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    # HOST=0.0.0.0 без токена — подниматься отказывается
+    env2 = {**os.environ, "TG_DB": str(db_path), "PORT": str(port), "HOST": "0.0.0.0"}
+    proc2 = subprocess.Popen([sys.executable, "ui.py"], env=env2,
+                             cwd=str(Path(__file__).parent),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, encoding="utf-8")
+    out = proc2.communicate(timeout=20)[0] or ""
+    check(proc2.returncode != 0 and "TG_UI_TOKEN" in out,
+          "ui: отказ поднимать 0.0.0.0 без TG_UI_TOKEN", out.strip()[:70])
+
+
 def main() -> int:
     import tempfile
     try:
@@ -1064,6 +1135,7 @@ def main() -> int:
     test_strict_and_doctor(db_path)
     test_live_tools_flag(db_path)
     test_mcp_server(db_path)
+    test_ui_security(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
