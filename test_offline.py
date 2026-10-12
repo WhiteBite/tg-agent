@@ -915,6 +915,47 @@ def test_mcp_server(db_path: Path) -> None:
             proc.kill()
 
 
+def test_live_tools_flag(db_path: Path) -> None:
+    print("=== TG_ALLOW_LIVE: инструменты живого доступа ===")
+    env = dict(os.environ, TG_DB=str(db_path), TG_ALLOW_LIVE="1")
+    proc = subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "server.py")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", env=env,
+    )
+    try:
+        rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "offline-test", "version": "0"}}})
+        wait_for(proc, lambda m: m.get("id") == 1)
+        rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+        rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        tools = wait_for(proc, lambda m: m.get("id") == 2)
+        names = {t["name"] for t in tools["result"]["tools"]}
+        check({"tg_live_topics", "tg_live_history"} <= names,
+              "MCP: TG_ALLOW_LIVE=1 добавляет tg_live_* инструменты",
+              str(sorted(names)))
+
+        # вызов живого инструмента без кредов — внятная ошибка, а не зависание
+        rpc(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                   "params": {"name": "tg_live_history",
+                              "arguments": {"chat_id": -100111, "limit": 5}}})
+        resp = wait_for(proc, lambda m: m.get("id") == 3)
+        body = json.loads(resp["result"]["content"][0]["text"])
+        check("error" in body,
+              "MCP: tg_live без кредов возвращает JSON-ошибку, а не молчит",
+              str(body.get("error", ""))[:80])
+        rpc(proc, {"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
+        alive = wait_for(proc, lambda m: m.get("id") == 4)
+        check(alive.get("id") == 4, "MCP: сервер жив после ошибки live-инструмента")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def main() -> int:
     import tempfile
     try:
@@ -932,6 +973,7 @@ def main() -> int:
     test_live_and_poll(db_path)
     test_gates(db_path)
     test_strict_and_doctor(db_path)
+    test_live_tools_flag(db_path)
     test_mcp_server(db_path)
     print()
     if FAILURES:

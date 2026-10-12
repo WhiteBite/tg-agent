@@ -392,29 +392,31 @@ if ALLOW_LIVE:
         name="tg_live_topics",
         description="ЖИВОЙ запрос к Telegram: актуальный список тем форума (в индексе может быть устаревший).",
     )
-    def tg_live_topics(chat_id: int) -> str:
-        async def go() -> Any:
+    async def tg_live_topics(chat_id: int) -> str:
+        try:
             cl = await _live()
             entity = await cl.get_entity(chat_id)
             res = await cl(functions.messages.GetForumTopicsRequest(
                 peer=entity, offset_date=None, offset_id=0, offset_topic=0, limit=100))
-            return [{"topic_id": t.id, "title": getattr(t.title, "text", None),
-                     "closed": bool(t.closed), "top_message": getattr(t, "top_message", None)}
-                    for t in (res.topics or [])]
-        return _j(asyncio.run(go()))
+            return _j([{"topic_id": t.id, "title": getattr(t.title, "text", None),
+                        "closed": bool(t.closed), "top_message": getattr(t, "top_message", None)}
+                       for t in (res.topics or [])])
+        except Exception as exc:
+            return _j({"error": f"live: {exc}"})
 
     @mcp.tool(
         name="tg_live_history",
         description="ЖИВОЙ запрос к Telegram: последние сообщения группы/темы, включая то, чего нет в индексе.",
     )
-    def tg_live_history(chat_id: int, topic_id: Optional[int] = None, limit: int = 50) -> str:
-        async def go() -> Any:
+    async def tg_live_history(chat_id: int, topic_id: Optional[int] = None, limit: int = 50) -> str:
+        try:
             cl = await _live()
             kwargs = {"reply_to": topic_id} if topic_id else {}
-            return [{"id": m.id, "date": m.date.isoformat() if m.date else None,
-                     "sender_id": m.sender_id, "text": (m.message or "")[:1000]}
-                    async for m in cl.iter_messages(chat_id, limit=limit, **kwargs)]
-        return _j(asyncio.run(go()))
+            return _j([{"id": m.id, "date": m.date.isoformat() if m.date else None,
+                        "sender_id": m.sender_id, "text": (m.message or "")[:1000]}
+                       async for m in cl.iter_messages(chat_id, limit=limit, **kwargs)])
+        except Exception as exc:
+            return _j({"error": f"live: {exc}"})
 
 
 def _tool_list() -> list:
