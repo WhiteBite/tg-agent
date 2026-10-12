@@ -475,10 +475,33 @@ def test_reads(db_path: Path) -> None:
         check(ok["ok"] and ok["rows"][0]["n"] == 6 and ok["columns"] == ["topic_id", "n"],
               "run_sql: SELECT работает", str(ok["rows"]))
         for bad in ["DELETE FROM messages", "PRAGMA table_info(messages)",
-                    "SELECT 1; DROP TABLE messages", "UPDATE messages SET text='x'"]:
+                    "SELECT 1; DROP TABLE messages", "UPDATE messages SET text='x'",
+                    "ATTACH DATABASE 'probe_att.sqlite' AS p"]:
             res = run_sql(db, bad)
             check(res["ok"] is False, f"run_sql: заблокировано {bad[:28]!r}",
                   res.get("error", ""))
+
+        # keyword-гейт не должен ловить слова внутри строковых литералов
+        fp = run_sql(db, "SELECT COUNT(*) n FROM messages WHERE text LIKE '%update%'")
+        check(fp["ok"] is True and fp["rows"][0]["n"] == 0,
+              "run_sql: слово в LIKE-литерале не блокируется", fp.get("error", ""))
+
+        # сырой текст legacy-строк маскируется при выдаче
+        db.conn.execute(
+            "INSERT OR IGNORE INTO messages(chat_id, msg_id, topic_id, ts, text) "
+            "VALUES(-100222, 999, 1, 1, 'legacy ghp_" + "c" * 40 + "')")
+        db.conn.commit()
+        leg = run_sql(db, "SELECT text FROM messages WHERE chat_id=-100222 AND msg_id=999")
+        check(leg["ok"] and "ghp_" not in leg["rows"][0]["text"],
+              "run_sql: выдача маскирует сырой текст", repr(leg["rows"][0]["text"][:50]))
+        rid = db.conn.execute(
+            "SELECT rowid FROM messages WHERE chat_id=-100222 AND msg_id=999").fetchone()["rowid"]
+        db.conn.execute("DELETE FROM messages WHERE chat_id=-100222 AND msg_id=999")
+        db.conn.commit()
+        fts_left = db.conn.execute(
+            "SELECT COUNT(*) FROM messages_fts WHERE rowid=?", (rid,)).fetchone()[0]
+        check(fts_left == 0, "fts: удаление сообщения чистит индекс (триггёр trg_msg_ad)",
+              str(fts_left))
 
 
 # --------------------------------------------------- 4. watch-лист

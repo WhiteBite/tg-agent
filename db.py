@@ -145,9 +145,9 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_ai AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, chat_id, topic_id, text)
     VALUES (new.rowid, new.chat_id, new.topic_id, COALESCE(new.text, ''));
 END;
+-- messages_fts — обычная fts5 (не contentless): чистим прямым DELETE, а не ('delete', ...)
 CREATE TRIGGER IF NOT EXISTS trg_msg_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, chat_id, topic_id, text)
-    VALUES ('delete', old.rowid, old.chat_id, old.topic_id, COALESCE(old.text, ''));
+    DELETE FROM messages_fts WHERE rowid = old.rowid;
 END;
 """
 
@@ -162,6 +162,8 @@ class DB:
         self.conn.execute("PRAGMA busy_timeout=5000")  # live.py + sync.py + ui.py могут писать одновременно
         self.conn.executescript(SCHEMA)
         try:
+            # IF NOT EXISTS не обновляет триггер в старых базах — дропаем принудительно
+            self.conn.execute("DROP TRIGGER IF EXISTS trg_msg_ad")
             self.conn.executescript(FTS_SCHEMA)
             self.fts = True
         except sqlite3.OperationalError:
@@ -812,32 +814,41 @@ def extract_refs(text: Optional[str], fwd_channel_id: Optional[int] = None) -> l
 # ------------------- безопасный SQL для агента -------------------
 
 _ALLOWED = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
-_FORBIDDEN = re.compile(
-    r"\b(ATTACH|DETACH|PRAGMA|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|VACUUM|REINDEX|"
-    r"ANALYZE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|LOAD_EXTENSION|IMPORT|EXPORT|GRANT)\b",
-    re.IGNORECASE,
-)
+
+# коды действий authorizer: 20 READ / 21 SELECT / 31 FUNCTION / 33 RECURSIVE
+_READONLY_ACTIONS = {20, 21, 31, 33}
+
+
+def _read_only_authorizer(action: int, arg1: Any, arg2: Any, db_name: Any, trigger: Any) -> int:
+    return 0 if action in _READONLY_ACTIONS else 1
 
 
 def run_sql(db: DB, sql: str, params: tuple = (), limit: int = 200) -> dict:
-    """Read-only SQL поверх индекса. Режет всё, что не SELECT/WITH."""
+    """Read-only SQL поверх индекса: только SELECT/WITH, отдельное соединение
+    с PRAGMA query_only и authorizer, отклоняющим всё кроме чтения."""
     if not _ALLOWED.match(sql):
         return {"ok": False, "error": "только SELECT / WITH"}
-    if _FORBIDDEN.search(sql):
-        bad = sorted({m.group(0).upper() for m in _FORBIDDEN.finditer(sql)})
-        return {"ok": False, "error": f"запрещённые ключевые слова: {', '.join(bad)}"}
-    if ";" in sql.rstrip().rstrip(";"):
-        return {"ok": False, "error": "по одному запросу за раз"}
+    conn = sqlite3.connect(str(db.path))
+    conn.row_factory = sqlite3.Row
     try:
-        cur = db.conn.execute(sql, params)
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_authorizer(_read_only_authorizer)
+        cur = conn.execute(sql, params)
         columns = [d[0] for d in (cur.description or [])]
         rows = cur.fetchmany(limit)
     except sqlite3.Error as exc:
         return {"ok": False, "error": f"SQL: {exc}"}
+    finally:
+        conn.close()
+    masked = [
+        {k: (redact(v)[0] if isinstance(v, str) else v) for k, v in dict(r).items()}
+        for r in rows
+    ]
     return {
         "ok": True,
         "columns": columns,
-        "rows": [dict(r) for r in rows],
-        "row_count": len(rows),
-        "truncated": len(rows) == limit,
+        "rows": masked,
+        "row_count": len(masked),
+        "truncated": len(masked) == limit,
     }
