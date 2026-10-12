@@ -13,8 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -273,7 +275,7 @@ def test_sync(db_path: Path) -> None:
     check(sync_mod.is_group(client.groups[-100333]["entity"]) is False,
           "is_group: канал-вещание НЕ группа (берётся только если назван явно)")
 
-    probe = Path("/tmp/tg_agent_test/probe.sqlite")
+    probe = db_path.parent / "probe.sqlite"
     rd = asyncio.run(sync_mod.run(db_path=str(probe), client=client, dry_run=True))
     with DB(probe) as pdb:
         check(pdb.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0,
@@ -522,17 +524,26 @@ def rpc(proc: subprocess.Popen, payload: dict) -> None:
 
 
 def read_msg(proc: subprocess.Popen, timeout: float = 60.0) -> dict:
-    import select
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        r, _, _ = select.select([proc.stdout], [], [], 1.0)
-        if r:
-            line = proc.stdout.readline()
-            if not line:
-                raise RuntimeError("сервер закрыл stdout: " + (proc.stderr.read() or ""))
-            if line.strip():
-                return json.loads(line)
-    raise TimeoutError("нет ответа от MCP-сервера")
+    q = getattr(proc, "_lines", None)
+    if q is None:
+        q = queue.Queue()
+
+        def pump() -> None:
+            for line in proc.stdout:
+                q.put(line)
+            q.put(None)
+
+        proc._lines = q
+        threading.Thread(target=pump, daemon=True).start()
+    while True:
+        try:
+            line = q.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError("нет ответа от MCP-сервера")
+        if line is None:
+            raise RuntimeError("сервер закрыл stdout: " + (proc.stderr.read() or ""))
+        if line.strip():
+            return json.loads(line)
 
 
 def wait_for(proc: subprocess.Popen, pred) -> dict:
@@ -675,7 +686,7 @@ def test_strict_and_doctor(db_path: Path) -> None:
     proc = subprocess.Popen(
         [sys.executable, str(Path(__file__).parent / "server.py")],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, env=env,
+        text=True, encoding="utf-8", env=env,
     )
     try:
         rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -734,7 +745,7 @@ def test_mcp_server(db_path: Path) -> None:
     proc = subprocess.Popen(
         [sys.executable, str(Path(__file__).parent / "server.py")],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, env=env,
+        text=True, encoding="utf-8", env=env,
     )
     try:
         rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -848,7 +859,12 @@ def test_mcp_server(db_path: Path) -> None:
 
 
 def main() -> int:
-    db_path = Path("/tmp/tg_agent_test/tg_index.sqlite")
+    import tempfile
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    db_path = Path(tempfile.gettempdir()) / "tg_agent_test" / "tg_index.sqlite"
     if db_path.parent.exists():
         for f in db_path.parent.iterdir():
             f.unlink()
