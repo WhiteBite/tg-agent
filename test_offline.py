@@ -308,6 +308,14 @@ def test_sync(db_path: Path) -> None:
     check(sync_mod.is_group(client.groups[-100333]["entity"]) is False,
           "is_group: канал-вещание НЕ группа (берётся только если назван явно)")
 
+    # list_topics честно называет поле top_message, а не «messages»
+    async def _list_topics() -> list[dict]:
+        return await sync_mod.list_topics(client, client.groups[-100111]["entity"])
+
+    tops = asyncio.run(_list_topics())
+    check(tops and all("top_message" in t and "messages" not in t for t in tops),
+          "list_topics: поле называется top_message, не messages", str(tops[0]))
+
     probe = db_path.parent / "probe.sqlite"
     rd = asyncio.run(sync_mod.run(db_path=str(probe), client=client, dry_run=True))
     with DB(probe) as pdb:
@@ -507,6 +515,15 @@ def test_reads(db_path: Path) -> None:
               "refs: url извлечён", str(refs.get("url")))
         check(refs.get("forward", [{}])[0].get("value") == "777",
               "refs: канал-источник пересланного", str(refs.get("forward")))
+
+        # t.me/служебные-пути не должны превращаться в mention
+        from db import extract_refs
+        rr = extract_refs("инвайт t.me/joinchat/Ab12, шер t.me/share/xyz, "
+                          "стикеры t.me/addstickers/Cat, юзер t.me/realuser")
+        mentions = {v for k, v in rr if k == "mention"}
+        check(mentions == {"realuser"}, "refs: служебные пути t.me не попадают в mention",
+              str(mentions))
+        check(("invite", "joinchat/Ab12") in set(rr), "refs: joinchat остаётся инвайтом")
 
         # пины: закреп лёг в таблицу с темой и текстом
         pins = db.pins(-100222)

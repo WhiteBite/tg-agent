@@ -24,14 +24,14 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from db import DB
 
 
 def _fmt_ts(ts: Optional[int]) -> str:
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "—"
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d") if ts else "—"
 
 
 async def cmd_topics(args) -> None:
@@ -57,9 +57,9 @@ async def cmd_topics(args) -> None:
 
     if sync_mod.is_forum(entity):
         topics = await sync_mod.list_topics(client, entity)
-        print(f"\n{'topic_id':>10}  {'сообщ.':>7}  {'последнее':>10}  {'':>2} название")
-        for t in sorted(topics, key=lambda x: -(x["messages"] or 0)):
-            print(f"{t['topic_id']:>10}  {t['messages'] or 0:>7}  "
+        print(f"\n{'topic_id':>10}  {'посл. id':>9}  {'':>10}  название")
+        for t in sorted(topics, key=lambda x: -(x["top_message"] or 0)):
+            print(f"{t['topic_id']:>10}  {t['top_message'] or 0:>9}  "
                   f"{'закрыта' if t['closed'] else '':>10}  {t['title']}")
         print(f"\n      1  (General: сообщения без темы — всегда есть)")
     else:

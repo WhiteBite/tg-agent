@@ -11,6 +11,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install telethon "mcp>=2,<3"
+        run: pip install -r requirements.txt
       - name: Run offline test suite (no Telegram account needed)
         run: python test_offline.py

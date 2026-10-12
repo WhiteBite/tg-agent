@@ -421,11 +421,11 @@ class DB:
         )
         self.conn.commit()
 
-    def recount_topics(self, chat_id: int, general_id: int = 0) -> None:
+    def recount_topics(self, chat_id: int, general_id: int = 1) -> None:
         """Пересчитывает счётчики тем по фактическим сообщениям.
 
-        general_id: в форуме сообщения без reply_to относятся к General (id 1),
-        в обычной группе — к псевдотеме 0.
+        general_id=1 всегда: в форуме это General (id 1), в группе без тем все
+        сообщения живут в той же псевдотеме 1 — watch-слой считает 0 и 1 одним.
         """
         self.conn.execute(
             """
@@ -835,7 +835,8 @@ class DB:
 
 #regexp портированы из 0xMRK95/telegram-mcp-server (extract_refs, MIT)
 _REF_MENTION = re.compile(r"@([A-Za-z][A-Za-z0-9_]{3,31})")
-_REF_TME_PUBLIC = re.compile(r"t\.me/([A-Za-z][A-Za-z0-9_]{3,31})")
+_REF_TME_PUBLIC = re.compile(
+    r"t\.me/(?!joinchat/|\+|share/|addstickers/|proxy/|socks/)([A-Za-z][A-Za-z0-9_]{3,31})")
 _REF_INVITE = re.compile(r"t\.me/(\+[\w-]+|joinchat/[\w-]+)")
 _REF_URL = re.compile(r"https?://[^\s<>\"']+")
 

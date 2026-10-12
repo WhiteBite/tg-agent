@@ -233,7 +233,7 @@ async def list_topics(client: Any, entity: Any) -> list[dict]:
                     "topic_id": int(t.id),
                     "title": title or str(t.id),
                     "closed": bool(getattr(t, "closed", False)),
-                    "messages": getattr(t, "top_message", None) or 0,
+                    "top_message": int(getattr(t, "top_message", 0) or 0),
                 }
             )
         if len(got) < 100:
