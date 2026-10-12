@@ -421,6 +421,22 @@ def test_reads(db_path: Path) -> None:
         check("ghp_" not in sec["text"] and "[скрыто: github-token]" in sec["text"],
               "redact: токен в выдаче замаскирован", repr(sec["text"][:70]))
 
+        # маскировка на инджесте: сырого токена нет нигде в базе
+        raw = db.conn.execute(
+            "SELECT text, raw_json FROM messages WHERE chat_id=-100222 AND msg_id=37").fetchone()
+        check(raw is not None and "ghp_" not in (raw["text"] or "")
+              and "ghp_" not in (raw["raw_json"] or ""),
+              "ingest: токен не доезжает до messages.text/raw_json")
+        check("[скрыто: github-token]" in (raw["text"] or ""),
+              "ingest: текст в базе уже замаскирован", repr((raw["text"] or "")[:60]))
+        n_refs = db.conn.execute(
+            "SELECT COUNT(*) c FROM refs WHERE value LIKE '%ghp_%'").fetchone()["c"]
+        check(n_refs == 0, "ingest: refs не содержат сырой токен", str(n_refs))
+        like_hits = db.search("токен", chat_id=-100222)
+        check(like_hits and all("ghp_" not in (h.get("text") or "") for h in like_hits),
+              "search(LIKE-фолбэк): текст уже замаскирован в базе",
+              str(len(like_hits)))
+
         # топ по реакциям
         tr = st["top_reactions"]
         check(bool(tr) and tr[0]["msg_id"] == 38 and tr[0]["score"] == 9,

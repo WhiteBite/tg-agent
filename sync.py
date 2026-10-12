@@ -25,7 +25,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from db import DB, extract_refs
+from db import DB, clean_text, extract_refs
+from sanitize import sanitize_name
 
 try:  # Telethon нужен только для реального прогона, не для офлайн-тестов
     from telethon import TelegramClient
@@ -170,6 +171,11 @@ def message_row(msg: Any, chat_id: int, topic_id: Optional[int], client: Any) ->
     text = getattr(msg, "message", None)
     if text is None and service:
         text = f"[service:{_label(getattr(msg, 'action', None) or '')}]"
+    if text:
+        text = clean_text(text)
+    name = sender_name(msg, client)
+    if name:
+        name = sanitize_name(name)
     fwd = getattr(msg, "fwd_from", None)
     fwd_cid = None
     if fwd is not None:
@@ -182,7 +188,7 @@ def message_row(msg: Any, chat_id: int, topic_id: Optional[int], client: Any) ->
         "ts": ts,
         "date_iso": date.isoformat() if date is not None else None,
         "sender_id": getattr(msg, "sender_id", None),
-        "sender_name": sender_name(msg, client),
+        "sender_name": name,
         "is_out": bool(getattr(msg, "out", False)),
         "is_service": service,
         "text": text,

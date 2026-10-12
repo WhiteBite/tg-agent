@@ -12,19 +12,20 @@ import json
 import re
 import sqlite3
 import time
+from pathlib import Path
+from typing import Any, Iterable, Optional
 
 from sanitize import sanitize_name, sanitize_user_content
 from redact import redact
 
 
-def _clean(text: Optional[str], max_chars: int = 4096) -> Optional[str]:
-    """sanitize (control/invisible chars) + redact (secrets) — in this order."""
+def clean_text(text: Optional[str], max_chars: int = 4096) -> Optional[str]:
+    """redact (secrets) + sanitize (control/invisible chars) — in this order:
+    сначала маскируем, потом обрезаем, чтобы обрезка не оголила хвост секрета."""
     if not text:
         return text
-    masked, _ = redact(sanitize_user_content(text, max_chars))
-    return masked
-from pathlib import Path
-from typing import Any, Iterable, Optional
+    masked, _ = redact(text)
+    return sanitize_user_content(masked, max_chars)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chats (
@@ -295,12 +296,11 @@ class DB:
 
     def insert_pin(self, chat_id: int, msg_id: int, topic_id: Optional[int],
                    ts: Optional[int], sender_name: Optional[str], text: Optional[str]) -> None:
-        from sanitize import sanitize_user_content
         self.conn.execute(
             "INSERT OR REPLACE INTO pins(chat_id, msg_id, topic_id, ts, sender_name, text) "
             "VALUES(?,?,?,?,?,?)",
             (chat_id, msg_id, topic_id, ts, sanitize_name(sender_name) if sender_name else None,
-             _clean(text) if text else None),
+             clean_text(text) if text else None),
         )
 
     def pins(self, chat_id: int, topic_id: Optional[int] = None, limit: int = 5) -> list[dict]:
@@ -476,7 +476,7 @@ class DB:
         for r in self.conn.execute(sql, args):
             d = dict(r)
             if d.get("text"):
-                d["text"] = _clean(d["text"], max_chars)
+                d["text"] = clean_text(d["text"], max_chars)
             if d.get("sender_name"):
                 d["sender_name"] = sanitize_name(d["sender_name"])
             d.pop("raw_json", None)
@@ -704,7 +704,7 @@ class DB:
             d = dict(r)
             d.pop("raw_json", None)
             if d.get("text"):
-                d["text"] = _clean(d["text"], max_chars)
+                d["text"] = clean_text(d["text"], max_chars)
             if d.get("sender_name"):
                 d["sender_name"] = sanitize_name(d["sender_name"])
             out.append(d)
@@ -766,7 +766,7 @@ class DB:
                     d = dict(m)
                     d.pop("raw_json", None)
                     if d.get("text"):
-                        d["text"] = _clean(d["text"])
+                        d["text"] = clean_text(d["text"])
                     d["rank"] = r["rank"]
                     hits.append(d)
                 return {"engine": "fts5", "query": query, "count": len(hits), "hits": hits}
