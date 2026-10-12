@@ -155,7 +155,9 @@ def tg_watch() -> str:
 def tg_new(chat_id: int, topic_id: int, limit: int = 100, max_chars: int = 1200) -> str:
     with _db() as db:
         res = db.watch_new(chat_id, topic_id, limit=limit, max_chars=max_chars)
-    res["messages"], res["truncated"] = _fit(res.get("messages") or [], 30000, keep="head")
+    msgs, fit_truncated = _fit(res.get("messages") or [], 30000, keep="head")
+    res["messages"] = msgs
+    res["truncated"] = res.get("truncated") or fit_truncated
     if res.get("error"):
         return _j(res)
     res["note"] = (
@@ -230,7 +232,7 @@ def tg_find(
             only_ids = None
         res = db.search_fts(query, chat_id=chat_id, topic_id=topic_id, limit=limit,
                             chat_ids=only_ids)
-        hits = res.get("_fallback") or res.get("hits") or []
+        hits = res.get("hits") or []
         if context:
             for h in hits:
                 h["context_before"] = db._around(h, context, before=True)

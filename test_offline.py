@@ -409,6 +409,16 @@ def test_reads(db_path: Path) -> None:
         check(scoped["count"] == 7, "search_fts: фильтр по chat_id работает",
               f"count={scoped['count']}")
 
+        # LIKE-фолбэк при недоступном FTS5 отдаёт тот же контракт
+        db.fts = False
+        fb = db.search_fts("двухлетней")
+        check(fb["engine"] == "like" and fb["count"] == 1
+              and fb["hits"][0]["chat_id"] == -100333,
+              "search_fts: LIKE-фолбэк возвращает те же engine/count/hits",
+              f"{fb.get('engine')} {fb.get('count')}")
+        check("_fallback" not in fb, "search_fts: без служебного поля _fallback")
+        db.fts = True
+
         st = db.stats(-100111)
         check(st["total_messages"] == 10, "db.stats: всего 10 сообщений в форум-группе",
               f"total={st['total_messages']}")
@@ -826,6 +836,10 @@ def test_mcp_server(db_path: Path) -> None:
         check([m["msg_id"] for m in new["messages"]] == [16, 39],
               "MCP tg_new: только новое с момента прочтения",
               str([m["msg_id"] for m in new["messages"]]))
+        one = call("tg_new", {"chat_id": -100111, "topic_id": 5, "limit": 1}, 4)
+        check(one["truncated"] is True,
+              "MCP tg_new: truncated не сбрасывается, когда отдали не всё",
+              f"returned={one['returned']} pending={one['pending_total']} truncated={one.get('truncated')}")
 
         hist = call("tg_read", {"chat_id": -100111, "topic_id": 5, "limit": 10}, 5)
         check(hist["count"] == 6, "MCP tg_read(topic=5): 6 сообщений", f"{hist['count']}")
@@ -880,6 +894,10 @@ def test_mcp_server(db_path: Path) -> None:
         check(rd["truncated"] is True and rd["count"] < 6 and "next_before" in rd,
               "MCP tg_read: budget_chars режет выдачу + next_before",
               f"count={rd['count']} truncated={rd['truncated']}")
+        # before_id листает строго старше — вырезанное бюджетом не теряется
+        check(rd["next_before"] == 16,
+              "MCP tg_read: next_before позволяет добрать вырезанное бюджетом",
+              f"next_before={rd['next_before']} count={rd['count']}")
         rd2 = call("tg_read", {"chat_id": -100111, "topic_id": 5, "before_id": 13}, 9)
         check(bool(rd2["messages"]) and all(m["msg_id"] < 13 for m in rd2["messages"]),
               "MCP tg_read: before_id листает в прошлое",

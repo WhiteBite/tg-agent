@@ -167,7 +167,7 @@ class Handler(BaseHTTPRequestHandler):
                     topic_id=int(topic) if topic else None,
                     limit=min(int(q.get("limit", ["50"])[0]), 200),
                 )
-            hits = res.get("_fallback") or res.get("hits") or []
+            hits = res.get("hits") or []
             self._json({"engine": res.get("engine"), "query": query,
                         "count": len(hits), "hits": hits})
         elif u.path == "/api/poll":

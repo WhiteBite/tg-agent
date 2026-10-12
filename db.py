@@ -773,14 +773,9 @@ class DB:
                     hits.append(d)
                 return {"engine": "fts5", "query": query, "count": len(hits), "hits": hits}
         like = "%" + " ".join(words) + "%"
-        return {
-            "engine": "like",
-            "query": query,
-            "count": 0,
-            "hits": [],
-            "_fallback": self.search(query, chat_id=chat_id, topic_id=topic_id,
-                                     limit=limit, chat_ids=chat_ids),
-        }
+        hits = self.search(like, chat_id=chat_id, topic_id=topic_id, limit=limit,
+                           chat_ids=chat_ids)
+        return {"engine": "like", "query": query, "count": len(hits), "hits": hits}
 
 
 
