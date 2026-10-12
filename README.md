@@ -256,7 +256,7 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 144 офлайн-проверки (без аккаунта Telegram), гоняются в CI |
+| `test_offline.py` | 155 офлайн-проверок (без аккаунта Telegram), гоняются в CI |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -305,7 +305,7 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **144 проверки, все зелёные** (работают и на Linux,
+`python3 test_offline.py` — **155 проверки, все зелёные** (работают и на Linux,
 и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
