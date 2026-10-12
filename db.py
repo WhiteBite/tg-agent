@@ -467,6 +467,20 @@ class DB:
         )
         return [dict(r) for r in rows]
 
+    def all_topics(self) -> dict[int, list[dict]]:
+        """Все темы одним запросом, сгруппированные по chat_id."""
+        out: dict[int, list[dict]] = {}
+        for r in self.conn.execute(
+            """
+            SELECT t.*, (SELECT COUNT(*) FROM messages m
+                         WHERE m.chat_id = t.chat_id
+                           AND COALESCE(m.topic_id, 1) = t.topic_id) AS local_count
+            FROM topics t ORDER BY t.chat_id, t.topic_id
+            """
+        ):
+            out.setdefault(r["chat_id"], []).append(dict(r))
+        return out
+
     def history(
         self,
         chat_id: int,
@@ -546,6 +560,8 @@ class DB:
         for r in self.conn.execute(sql, args):
             d = dict(r)
             d.pop("raw_json", None)
+            if d.get("text"):
+                d["text"] = clean_text(d["text"])
             if context:
                 d["context_before"] = self._around(d, context, before=True)
                 d["context_after"] = self._around(d, context, before=False)
@@ -788,17 +804,23 @@ class DB:
             except sqlite3.OperationalError:
                 rids = None
             if rids is not None:
+                by_rid: dict[int, dict] = {}
+                if rids:
+                    marks = ",".join("?" * len(rids))
+                    for m in self.conn.execute(
+                        f"SELECT rowid, * FROM messages WHERE rowid IN ({marks})",
+                        [r["rid"] for r in rids],
+                    ):
+                        d = dict(m)
+                        d.pop("raw_json", None)
+                        if d.get("text"):
+                            d["text"] = clean_text(d["text"])
+                        by_rid[m["rowid"]] = d
                 hits = []
                 for r in rids:
-                    m = self.conn.execute(
-                        "SELECT * FROM messages WHERE rowid = ?", (r["rid"],)
-                    ).fetchone()
-                    if not m:
+                    d = by_rid.get(r["rid"])
+                    if not d:
                         continue
-                    d = dict(m)
-                    d.pop("raw_json", None)
-                    if d.get("text"):
-                        d["text"] = clean_text(d["text"])
                     d["rank"] = r["rank"]
                     hits.append(d)
                 return {"engine": "fts5", "query": query, "count": len(hits), "hits": hits}

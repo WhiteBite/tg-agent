@@ -23,7 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from db import DB
+from db import DB, clean_text
+from sanitize import sanitize_name
 
 HERE = Path(__file__).parent
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
@@ -63,17 +64,28 @@ def _db() -> DB:
 def build_state() -> dict:
     with _db() as db:
         chats = db.chats(limit=500)
+        last: dict[int, tuple] = {}
+        for r in db.conn.execute(
+            "SELECT chat_id, text, sender_name, ts FROM messages "
+            "WHERE msg_id IN (SELECT MAX(msg_id) FROM messages GROUP BY chat_id)"
+        ):
+            last[r["chat_id"]] = (clean_text(r["text"]), sanitize_name(r["sender_name"]),
+                                  r["ts"])
+        topics_by = db.all_topics()
+        watched_by: dict[int, list[dict]] = {}
+        for w in db.watch_list():
+            watched_by.setdefault(w["chat_id"], []).append(w)
+        pins_by: dict[int, list[dict]] = {}
+        for p in db.conn.execute("SELECT * FROM pins ORDER BY chat_id, ts DESC"):
+            pins_by.setdefault(p["chat_id"], []).append(dict(p))
         for c in chats:
-            row = db.conn.execute(
-                "SELECT text, sender_name, ts FROM messages WHERE chat_id=? "
-                "ORDER BY ts DESC, msg_id DESC LIMIT 1", (c["id"],)
-            ).fetchone()
-            c["last_text"] = row["text"] if row else None
-            c["last_sender"] = row["sender_name"] if row else None
-            c["last_ts"] = row["ts"] if row else c.get("last_ts")
-            c["topics"] = db.topics(c["id"])
-            c["watched"] = db.watch_list(c["id"])
-            c["pins"] = db.pins(c["id"], limit=10)
+            lt = last.get(c["id"])
+            c["last_text"] = lt[0] if lt else None
+            c["last_sender"] = lt[1] if lt else None
+            c["last_ts"] = lt[2] if lt else c.get("last_ts")
+            c["topics"] = topics_by.get(c["id"], [])
+            c["watched"] = watched_by.get(c["id"], [])
+            c["pins"] = [p for p in pins_by.get(c["id"], [])[:10]]
             c["new_total"] = sum(w.get("new_since_read") or 0 for w in c["watched"])
         stats = dict(db.conn.execute(
             "SELECT (SELECT COUNT(*) FROM chats) chats, "
@@ -180,6 +192,11 @@ class Handler(BaseHTTPRequestHandler):
                         (chat, 1 if topic in (0, 1) else topic, before, before, limit),
                     ).fetchall()
             msgs = [dict(r) for r in reversed(rows)]
+            for m in msgs:
+                if m.get("text"):
+                    m["text"] = clean_text(m["text"])
+                if m.get("sender_name"):
+                    m["sender_name"] = sanitize_name(m["sender_name"])
             self._json({"chat_id": chat, "topic_id": topic,
                         "messages": msgs, "oldest": msgs[0]["msg_id"] if msgs else None,
                         "count": len(msgs)})
@@ -204,7 +221,15 @@ class Handler(BaseHTTPRequestHandler):
                     """SELECT chat_id, msg_id, topic_id, ts, sender_name, text, is_service
                        FROM messages WHERE ts > ? ORDER BY msg_id LIMIT 300""", (since,)
                 ).fetchall()
-            self._json({"since": since, "messages": [dict(r) for r in rows]})
+            msgs = []
+            for r in rows:
+                d = dict(r)
+                if d.get("text"):
+                    d["text"] = clean_text(d["text"])
+                if d.get("sender_name"):
+                    d["sender_name"] = sanitize_name(d["sender_name"])
+                msgs.append(d)
+            self._json({"since": since, "messages": msgs})
         elif u.path == "/api/digests":
             chat = q.get("chat_id", [None])[0]
             topic = q.get("topic_id", [None])[0]

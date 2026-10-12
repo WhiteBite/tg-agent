@@ -307,6 +307,7 @@ def tg_topics(chat_id: Optional[int] = None) -> str:
                 return _denied(chat_id)
             return _j({"chat_id": chat_id, "topics": db.topics(chat_id)})
         watched = {c for c, _ in db.watched_pairs()} if STRICT_WATCH else None
+        topics_by = db.all_topics()
         chats = []
         for c in db.chats(limit=500):
             if watched is not None and c["id"] not in watched:
@@ -315,7 +316,8 @@ def tg_topics(chat_id: Optional[int] = None) -> str:
                 "chat_id": c["id"], "title": c.get("title"), "username": c.get("username"),
                 "is_forum": bool(c.get("is_forum")), "messages": c.get("msg_count"),
                 "topics": [{"topic_id": t["topic_id"], "title": t["title"],
-                            "messages": t.get("local_count")} for t in db.topics(c["id"])],
+                            "messages": t.get("local_count")}
+                           for t in topics_by.get(c["id"], [])],
             })
         return _j({"chats": chats})
 

@@ -537,6 +537,12 @@ def test_reads(db_path: Path) -> None:
         leg = run_sql(db, "SELECT text FROM messages WHERE chat_id=-100222 AND msg_id=999")
         check(leg["ok"] and "ghp_" not in leg["rows"][0]["text"],
               "run_sql: выдача маскирует сырой текст", repr(leg["rows"][0]["text"][:50]))
+        db.fts = False
+        fbm = db.search_fts("legacy", chat_id=-100222)
+        check(fbm["count"] == 1 and "ghp_" not in (fbm["hits"][0].get("text") or ""),
+              "search_fts: LIKE-фолбэк тоже маскирует выдачу",
+              repr((fbm["hits"][0].get("text") or "")[:50]))
+        db.fts = True
         rid = db.conn.execute(
             "SELECT rowid FROM messages WHERE chat_id=-100222 AND msg_id=999").fetchone()["rowid"]
         db.conn.execute("DELETE FROM messages WHERE chat_id=-100222 AND msg_id=999")
@@ -1057,12 +1063,43 @@ def test_ui_security(db_path: Path) -> None:
                             cwd=str(Path(__file__).parent),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
+        # legacy-строка с сырым токеном: /api/messages и /api/poll не должны его отдавать
+        with DB(str(db_path)) as db:
+            db.conn.execute(
+                "INSERT OR IGNORE INTO messages(chat_id, msg_id, topic_id, ts, text) "
+                "VALUES(-100222, 998, 1, 1, 'ui ghp_" + "d" * 40 + "')")
+            db.conn.commit()
+
         for _ in range(50):  # ждём подъёма
             try:
                 urlreq.urlopen(f"http://127.0.0.1:{port}/api/poll?since=0", timeout=1)
                 break
             except Exception:
                 time.sleep(0.2)
+
+        msgs = json.loads(urlreq.urlopen(
+            f"http://127.0.0.1:{port}/api/messages?chat_id=-100222&topic_id=1&limit=300",
+            timeout=2).read())
+        poll = json.loads(urlreq.urlopen(
+            f"http://127.0.0.1:{port}/api/poll?since=0", timeout=2).read())
+        check(all("ghp_" not in (m.get("text") or "") for m in msgs["messages"]),
+              "ui /api/messages: сырой текст замаскирован",
+              str(len(msgs["messages"])))
+        check(all("ghp_" not in (m.get("text") or "") for m in poll["messages"]),
+              "ui /api/poll: сырой текст замаскирован", str(len(poll["messages"])))
+
+        st = json.loads(urlreq.urlopen(
+            f"http://127.0.0.1:{port}/api/state", timeout=5).read())
+        c222 = next((c for c in st["chats"] if c["id"] == -100222), None)
+        check(c222 is not None
+              and {"topics", "watched", "pins", "last_text", "last_sender",
+                   "new_total", "msg_count", "is_forum"} <= set(c222),
+              "ui /api/state: контракт чата сохранён",
+              str(sorted(c222)) if c222 else "нет чата")
+        check(c222 is not None and "ghp_" not in (c222.get("last_text") or ""),
+              "ui /api/state: last_text замаскирован")
+        check(st.get("stats", {}).get("messages", 0) > 0 and "folders" in st,
+              "ui /api/state: stats и folders на месте")
 
         # подменённый Host (DNS-rebinding/CSRF) отклоняется
         req = urlreq.Request(f"http://127.0.0.1:{port}/api/state",
@@ -1102,6 +1139,9 @@ def test_ui_security(db_path: Path) -> None:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        with DB(str(db_path)) as db:
+            db.conn.execute("DELETE FROM messages WHERE chat_id=-100222 AND msg_id=998")
+            db.conn.commit()
 
     # HOST=0.0.0.0 без токена — подниматься отказывается
     env2 = {**os.environ, "TG_DB": str(db_path), "PORT": str(port), "HOST": "0.0.0.0"}

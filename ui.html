@@ -406,7 +406,14 @@ $("#mdate").onchange = async e=>{
   bindOlder();
 };
 function bindOlder(){
-  bindOlder();
+  const b = $("#older"); if(!b) return;
+  b.onclick = async ()=>{
+    const r = await loadMessages(+b.dataset.before);
+    if(!r.messages.length){ b.remove(); return; }
+    b.insertAdjacentHTML("afterend", r.messages.map(msgHtml).join(""));
+    if(r.count < 60 || !r.oldest){ b.remove(); }
+    else{ b.dataset.before = r.oldest; }
+  };
 }
 $("#mq").oninput = e=>{ clearTimeout(window.__t); window.__t=setTimeout(doSearch, 350); };
 $("#q").oninput = e=>{ SEL.search = e.target.value.trim().toLowerCase(); renderChats(); };
