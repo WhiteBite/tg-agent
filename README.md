@@ -217,9 +217,13 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 - **Секреты маскируются на инджесте** (`redact.py`): API-ключи (openai/github/
   groq/slack/nvidia), бот-токены, JWT, приватные ключи и «пароль: …»-паттерны
   заменяются на `[скрыто: …]` до записи в индекс — агент сырые креды не видит.
-- **`tg_sql` только `SELECT`/`WITH`**: `ATTACH`, `PRAGMA`, `INSERT`, `UPDATE`,
-  `DELETE`, `DROP`, `ALTER`, `CREATE`, `BEGIN` и прочее отклоняются до выполнения,
-  несколько запросов через `;` — тоже. По умолчанию вообще выключен.
+  Чтение (LIKE-фолбэк, UI, `tg_sql`, дайджесты) маскирует ещё раз — на случай
+  баз, синхронизированных до появления маскировки.
+- **`tg_sql` только чтение, по-настоящему**: префикс SELECT/WITH, плюс отдельное
+  соединение с `PRAGMA query_only` и authorizer, который разрешает только чтение
+  — `ATTACH`, `PRAGMA`, записи и транзакции отклоняются, несколько запросов за
+  раз SQLite не пропустит. Слова вроде `update` внутри строковых литералов
+  поисковых запросов больше не блокируются. По умолчанию инструмент выключен.
 - **Session-файл = аккаунт.** 600, вне git. Если страшно — отдельный аккаунт для чтения.
 - **Prompt injection.** Чужой текст — данные, не инструкции; это сказано модели в
   `instructions` сервера и в промпте агента. Не включай `TG_ALLOW_LIVE` там, где
@@ -230,9 +234,10 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 - **`TG_STRICT_WATCH=1`** — жёсткий гейт: `tg_read`/`tg_find`/`tg_stats`/
   `tg_links`/`tg_topics` работают только по темам из watch-листа, на остальное
   агент получает `access_denied` с подсказкой попросить тебя отметить тему.
-- **UI с наружу — только с токеном.** При `HOST=0.0.0.0` задай `TG_UI_TOKEN=...`:
-  все `/api/*` станут требовать `?token=`, а ссылку открывай как
-  `http://host:8899/?token=...`.
+- **UI с наружу — только с токеном.** При `HOST=0.0.0.0` UI вообще не стартует
+  без `TG_UI_TOKEN`. Локальный режим дополнительно закрыт от DNS-rebinding
+  (проверка Host) и CSRF (POST принимается только с
+  `Content-Type: application/json`), токен сверяется constant-time.
 - **FloodWait переживается автоматически**: sync/backfill спят указанное
   Telegram время и повторяют (до 3 раз); SQLite в WAL с `busy_timeout`,
   поэтому `live.py`, `sync.py` и UI могут работать одновременно.
@@ -251,7 +256,7 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 103 офлайн-проверки (без аккаунта Telegram), гоняются в CI |
+| `test_offline.py` | 144 офлайн-проверки (без аккаунта Telegram), гоняются в CI |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -300,26 +305,39 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **103 проверки, все зелёные**. Реально исполняются:
+`python3 test_offline.py` — **144 проверки, все зелёные** (работают и на Linux,
+и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
   `--chat @канал`, `--folder`, `--watched`, `--dry-run`, раскладка по темам
   (включая General), инкрементальность по курсорам
 - `sync.backfill()`: досасывание истории чанками снизу вверх, идемпотентность,
-  сохранение курсора
+  сохранение курсора, **resume прерванного прогона** (meta:backfill)
+- **id-формы Telethon**: entity.id в marked-форме (-100…) на границе синка —
+  live.py и watch.py видят одни и те же id
 - `db.py`: темы, история, окно по времени, **FTS5-поиск** (включая фильтр по
   чату), статистика, watch-лист (`watch_new` / `watch_mark_read` / удаление),
-  `run_sql` и его блокировки (`DELETE`, `PRAGMA`, `SELECT; DROP`, `UPDATE`)
+  `run_sql` и его гейты (`query_only` + authorizer: `DELETE`, `PRAGMA`,
+  `SELECT; DROP`, `UPDATE`, `ATTACH` — блокируются; слово в LIKE-литерале — нет)
+- **маскировка секретов на инджесте**: токен не доезжает до `messages.text`,
+  `raw_json` и `refs`; LIKE-фолбэк и `run_sql` выдают замаскированное
+- **FTS-триггёр удаления**: `DELETE FROM messages` чистит индекс (раньше падал)
 - **настоящий `server.py` как подпроцесс по MCP stdio**: `initialize` →
   `tools/list` (10 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
-  включая сценарий «прочитал → отметил → непрочитанного нет»
-- маскировка секретов: токен GitHub в сообщении не доезжает до выдачи
+  включая сценарий «прочитал → отметил → непрочитанного нет»; `tg_new` честно
+  держит `truncated` при лимите; отдельный прогон с `TG_ALLOW_LIVE=1` —
+  live-инструменты регистрируются, без кредов отвечают JSON-ошибкой, а не
+  зависают
 - папки: `GetDialogFiltersRequest` на фейках → состав папок в индексе
 - топ по реакциям (`stats.top_reactions`)
-- `live.handle_message`: вставка + идемпотентность + refs
-- **настоящий `ui.py` как подпроцесс**: `/api/poll` отдаёт сообщения по курсору
+- `live.handle_message`: вставка + идемпотентность + refs; `collect_ids`
+  подхватывает чаты, добавленные после старта
+- **настоящий `ui.py` как подпроцесс**: `/api/poll` отдаёт сообщения по курсору;
+  Host-гейт (403 на чужой Host), POST без `application/json` → 415, отказ
+  поднимать `0.0.0.0` без токена; `/api/messages`, `/api/poll`, `/api/state`
+  выдают замаскированный текст
 - `digest.run`: stub-выжимки создаются, повторно не дублируются (курсор),
-  отдаются через MCP `tg_digests`
+  отдаются через MCP `tg_digests`; сбой LLM-провайдера не двигает курсор
 - гейты: `FloodWaitError` на фейках (sync дожидается и доделывает),
   `busy_timeout`, `before_id`/`date_to`, `budget_chars`+`truncated`,
   `tg_topics`, live-тема с заголовком, UI-токен (401 без / 200 с)
