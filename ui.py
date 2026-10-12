@@ -66,8 +66,9 @@ def build_state() -> dict:
         chats = db.chats(limit=500)
         last: dict[int, tuple] = {}
         for r in db.conn.execute(
-            "SELECT chat_id, text, sender_name, ts FROM messages "
-            "WHERE msg_id IN (SELECT MAX(msg_id) FROM messages GROUP BY chat_id)"
+            "SELECT m.chat_id, m.text, m.sender_name, m.ts FROM messages m "
+            "JOIN (SELECT chat_id, MAX(msg_id) AS max_id FROM messages "
+            "      GROUP BY chat_id) t ON t.chat_id = m.chat_id AND t.max_id = m.msg_id"
         ):
             last[r["chat_id"]] = (clean_text(r["text"]), sanitize_name(r["sender_name"]),
                                   r["ts"])

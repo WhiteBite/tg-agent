@@ -118,21 +118,15 @@ def topic_of_message(msg: Any) -> Optional[int]:
 
 
 def sender_name(msg: Any, client: Any) -> Optional[str]:
-    """Имя автора из кэшей Telethon; сети не зовём — sync и так под event loop."""
+    """Имя автора из кэша Telethon рядом с сообщением; сети не зовём."""
     if getattr(msg, "out", False):
         return "me"
     if not getattr(msg, "sender_id", None):
         return None
-    try:  # быстрый путь: Telethon кэширует отправителя рядом с сообщением
+    try:
         sender = msg._sender  # type: ignore[attr-defined]
     except Exception:
         sender = None
-    if sender is None and client is not None:
-        try:
-            cache = client._entity_cache  # type: ignore[attr-defined]
-            sender = cache.get(msg.sender_id) if cache is not None else None
-        except Exception:
-            sender = None
     if sender is None:
         return f"id{msg.sender_id}"
     parts = [getattr(sender, "first_name", None), getattr(sender, "last_name", None)]
@@ -227,7 +221,10 @@ async def list_topics(client: Any, entity: Any) -> list[dict]:
         )
         got = list(getattr(res, "topics", None) or [])
         for t in got:
-            title = getattr(getattr(t, "title", None), "text", None)
+            # ForumTopic.title в Telethon — строка; TextWithEntities держим на всякий
+            title = getattr(t, "title", None)
+            if title is not None and not isinstance(title, str):
+                title = getattr(title, "text", None)
             topics.append(
                 {
                     "topic_id": int(t.id),
@@ -486,7 +483,6 @@ async def backfill(
             for row in rows:
                 db.insert_refs(chat_id, row["msg_id"],
                                extract_refs(row["text"], row["fwd_from"]))
-            db.recount_topics(chat_id, general_id=1)
             db.set_meta(f"backfill:{chat_id}", str(chunk_max))
             db.conn.commit()
         total_new += chunk_new
@@ -501,6 +497,7 @@ async def backfill(
         if sleep:
             await asyncio.sleep(sleep)
     if not dry_run:
+        db.recount_topics(chat_id, general_id=1)
         db.set_cursor(chat_id, 0, max(cursor, db.get_cursor(chat_id, 0)))
     return {"new": total_new, "seen": total_seen, "cursor": cursor}
 

@@ -47,6 +47,7 @@ def handle_message(db: DB, msg, chat_id: int, forum: bool) -> bool:
         try:  # новая тема — сразу с заголовком, не дожидаясь следующего sync
             db.upsert_topic(chat_id, tid,
                             str(getattr(action, "title", None) or f"тема {tid}"), False)
+            db.conn.commit()
         except Exception as exc:
             print(f"  ! тема {tid} не сохранена: {exc}", file=sys.stderr)
     row = sync_mod.message_row(msg, chat_id, tid, None)

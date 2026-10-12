@@ -29,7 +29,7 @@ try:  # mcp 2.x
 except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server  # type: ignore[assignment]
 
-from db import DB, run_sql
+from db import DB, clean_text, run_sql
 
 INDEX = os.environ.get("TG_DB", os.path.expanduser("~/tg-agent/tg_index.sqlite"))
 EXPOSE_SQL = os.environ.get("TG_EXPOSE_SQL", "").lower() in ("1", "true", "yes")
@@ -158,6 +158,10 @@ def tg_new(chat_id: int, topic_id: int, limit: int = 100, max_chars: int = 1200)
     msgs, fit_truncated = _fit(res.get("messages") or [], 30000, keep="head")
     res["messages"] = msgs
     res["truncated"] = res.get("truncated") or fit_truncated
+    if msgs:
+        # returned/max_id описывают показанное: иначе mark_read пропустит невиданное
+        res["returned"] = len(msgs)
+        res["max_id"] = max(m["msg_id"] for m in msgs)
     if res.get("error"):
         return _j(res)
     res["note"] = (
@@ -400,9 +404,15 @@ if ALLOW_LIVE:
             entity = await cl.get_entity(chat_id)
             res = await cl(functions.messages.GetForumTopicsRequest(
                 peer=entity, offset_date=None, offset_id=0, offset_topic=0, limit=100))
-            return _j([{"topic_id": t.id, "title": getattr(t.title, "text", None),
-                        "closed": bool(t.closed), "top_message": getattr(t, "top_message", None)}
-                       for t in (res.topics or [])])
+            out = []
+            for t in (res.topics or []):
+                title = getattr(t, "title", None)
+                if title is not None and not isinstance(title, str):
+                    title = getattr(title, "text", None)
+                out.append({"topic_id": t.id, "title": title,
+                            "closed": bool(t.closed),
+                            "top_message": getattr(t, "top_message", None)})
+            return _j(out)
         except Exception as exc:
             return _j({"error": f"live: {exc}"})
 
@@ -415,7 +425,7 @@ if ALLOW_LIVE:
             cl = await _live()
             kwargs = {"reply_to": topic_id} if topic_id else {}
             return _j([{"id": m.id, "date": m.date.isoformat() if m.date else None,
-                        "sender_id": m.sender_id, "text": (m.message or "")[:1000]}
+                        "sender_id": m.sender_id, "text": clean_text(m.message or "", 1000)}
                        async for m in cl.iter_messages(chat_id, limit=limit, **kwargs)])
         except Exception as exc:
             return _j({"error": f"live: {exc}"})

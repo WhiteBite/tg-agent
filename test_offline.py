@@ -112,7 +112,7 @@ class TopicTitle:
 class Topic:
     def __init__(self, tid, title, top_message, closed=False):
         self.id, self.top_message, self.closed = tid, top_message, closed
-        self.title = TopicTitle(title)  # TextWithEntities, как в настоящем ответе
+        self.title = title  # в Telethon ForumTopic.title — обычная строка
         self.notify_date = int(NOW.timestamp())
 
 
@@ -545,6 +545,10 @@ def test_reads(db_path: Path) -> None:
         fp = run_sql(db, "SELECT COUNT(*) n FROM messages WHERE text LIKE '%update%'")
         check(fp["ok"] is True and fp["rows"][0]["n"] == 0,
               "run_sql: слово в LIKE-литерале не блокируется", fp.get("error", ""))
+
+        neg = run_sql(db, "SELECT msg_id FROM messages WHERE chat_id=-100333", limit=-1)
+        check(neg["ok"] and neg["row_count"] == 1,
+              "run_sql: отрицательный limit зажимается", str(neg.get("row_count")))
 
         # сырой текст legacy-строк маскируется при выдаче
         db.conn.execute(
@@ -1225,6 +1229,92 @@ def test_digest_resilience(db_path: Path) -> None:
                 os.environ[k] = v
 
 
+def test_tg_new_fit_honest(db_path: Path) -> None:
+    print("=== tg_new: returned/max_id после урезки бюджетом ===")
+    tn_db = db_path.parent / "tg_new_fit.sqlite"
+    with DB(tn_db) as db:
+        db.upsert_chat(chat_id=-100777, title="Длинная тема", username=None,
+                       kind="supergroup", is_forum=True, members=1)
+        db.watch_add(-100777, 1, alias="длинная")
+        for i in range(1, 31):
+            db.insert_message({"chat_id": -100777, "msg_id": i, "topic_id": 1,
+                               "ts": 1700000000 + i, "text": "ы" * 1200})
+    import server as server_mod
+    old_index = server_mod.INDEX
+    server_mod.INDEX = str(tn_db)
+    try:
+        out = json.loads(server_mod.tg_new(-100777, 1))
+    finally:
+        server_mod.INDEX = old_index
+    check(out["pending_total"] == 30 and out["truncated"] is True,
+          "tg_new: бюджет урезает выдачу",
+          f"returned={out.get('returned')} pending={out.get('pending_total')}")
+    check(out["returned"] == len(out["messages"])
+          and out["max_id"] == max(m["msg_id"] for m in out["messages"]),
+          "tg_new: returned/max_id описывают показанное, а не запрошенное",
+          f"returned={out.get('returned')} max_id={out.get('max_id')} "
+          f"real_max={max(m['msg_id'] for m in out['messages'])}")
+
+
+def test_marked_migration(db_path: Path) -> None:
+    print("=== миграция старых индексов на marked-id ===")
+    mig_db = db_path.parent / "mig.sqlite"
+    with DB(mig_db) as db:
+        db.upsert_chat(chat_id=777, title="Old", username=None,
+                       kind="supergroup", is_forum=True, members=1)
+        db.upsert_chat(chat_id=55, title="OldG", username=None,
+                       kind="group", is_forum=False, members=1)
+        db.insert_message({"chat_id": 777, "msg_id": 10, "topic_id": 1, "ts": 5, "text": "x"})
+        db.insert_message({"chat_id": 55, "msg_id": 1, "ts": 5, "text": "y"})
+        db.watch_add(777, 1, alias="старая")
+        db.set_cursor(777, 0, 10)
+        db.set_meta("backfill:777", "10")
+
+    with DB(mig_db) as db:
+        ids = {r["id"] for r in db.chats()}
+        check(ids == {-1000000000777, -55}, "миграция: chats переведены в marked", str(ids))
+        mid = db.conn.execute("SELECT chat_id FROM messages WHERE msg_id=10").fetchone()
+        check(mid is not None and mid["chat_id"] == -1000000000777,
+              "миграция: messages переведены")
+        wl = db.watch_list()
+        check(wl and wl[0]["chat_id"] == -1000000000777 and wl[0]["alias"] == "старая",
+              "миграция: watch переведён", str([(w["chat_id"], w["alias"]) for w in wl]))
+        check(db.get_cursor(-1000000000777, 0) == 10, "миграция: курсор перенесён",
+              str(db.get_cursor(-1000000000777, 0)))
+        check(db.get_meta("backfill:-1000000000777") == "10",
+              "миграция: backfill-курсор перенесён")
+        fts = db.conn.execute(
+            "SELECT COUNT(*) FROM messages_fts f JOIN messages m ON m.rowid = f.rowid "
+            "WHERE m.chat_id = -1000000000777").fetchone()[0]
+        check(fts == 1, "миграция: FTS согласован с перенесёнными строками", str(fts))
+
+
+def test_build_state_last(db_path: Path) -> None:
+    print("=== build_state: последнее сообщение по (chat_id, msg_id) ===")
+    bs_db = db_path.parent / "last_msg.sqlite"
+    with DB(bs_db) as db:
+        db.upsert_chat(chat_id=-100501, title="A", username=None, kind="supergroup",
+                       is_forum=False, members=1)
+        db.upsert_chat(chat_id=-100502, title="B", username=None, kind="supergroup",
+                       is_forum=False, members=1)
+        db.insert_message({"chat_id": -100501, "msg_id": 100, "ts": 300, "text": "A-100"})
+        db.insert_message({"chat_id": -100501, "msg_id": 50, "ts": 200, "text": "A-50"})
+        db.insert_message({"chat_id": -100502, "msg_id": 50, "ts": 250, "text": "B-50"})
+    import ui as ui_mod
+    old = ui_mod.DB_PATH
+    ui_mod.DB_PATH = str(bs_db)
+    try:
+        st = ui_mod.build_state()
+    finally:
+        ui_mod.DB_PATH = old
+    a = next(c for c in st["chats"] if c["id"] == -100501)
+    b = next(c for c in st["chats"] if c["id"] == -100502)
+    check(a["last_text"] == "A-100", "build_state: last чата A — его максимум",
+          repr(a["last_text"]))
+    check(b["last_text"] == "B-50", "build_state: last чата B — его максимум",
+          repr(b["last_text"]))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -1249,6 +1339,9 @@ def main() -> int:
     test_ui_security(db_path)
     test_live_collect(db_path)
     test_digest_resilience(db_path)
+    test_tg_new_fit_honest(db_path)
+    test_marked_migration(db_path)
+    test_build_state_last(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

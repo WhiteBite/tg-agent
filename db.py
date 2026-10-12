@@ -168,6 +168,7 @@ class DB:
             self.fts = True
         except sqlite3.OperationalError:
             self.fts = False  # поиск уедет на LIKE
+        self._migrate_marked_ids()
         self.conn.commit()
 
     def close(self) -> None:
@@ -179,6 +180,67 @@ class DB:
 
     def __exit__(self, *_exc) -> None:
         self.close()
+
+    # таблицы, где chat_id нужно перевести при миграции на marked-форму
+    _MIGRATE_TABLES = (
+        ("messages", "chat_id, msg_id, topic_id, ts, date_iso, sender_id, sender_name, "
+                     "is_out, is_service, text, media, reply_to, views, forwards, "
+                     "reactions, raw_json"),
+        ("topics", "chat_id, topic_id, title, closed, messages, last_ts"),
+        ("watch", "chat_id, topic_id, alias, pinned, last_read, added_at"),
+        ("refs", "chat_id, msg_id, kind, value"),
+        ("folder_chats", "folder_id, chat_id"),
+        ("pins", "chat_id, msg_id, topic_id, ts, sender_name, text"),
+    )
+
+    def _migrate_marked_ids(self) -> None:
+        """До 0.3.1 чаты хранились с сырыми положительными id Telethon; переносим
+        их на marked-форму, иначе после апгрейда watch/курсоры/live осиротеют,
+        а история задвоится под двумя id."""
+        rows = self.conn.execute(
+            "SELECT id, kind FROM chats WHERE id > 0 "
+            "AND kind IN ('channel', 'supergroup', 'group')").fetchall()
+        if not rows:
+            return
+        mapping = {
+            r["id"]: (-1000000000000 - r["id"]
+                      if r["kind"] in ("channel", "supergroup") else -r["id"])
+            for r in rows
+        }
+        self.conn.execute("CREATE TEMP TABLE id_map(old_id INTEGER PRIMARY KEY, new_id INTEGER)")
+        self.conn.executemany("INSERT INTO id_map VALUES(?, ?)", mapping.items())
+        self.conn.execute(
+            "INSERT OR IGNORE INTO chats(id, title, username, kind, is_forum, members, synced_at) "
+            "SELECT new_id, c.title, c.username, c.kind, c.is_forum, c.members, c.synced_at "
+            "FROM chats c JOIN id_map ON id_map.old_id = c.id")
+        self.conn.execute("DELETE FROM chats WHERE id IN (SELECT old_id FROM id_map)")
+        for table, cols in self._MIGRATE_TABLES:
+            sel = ", ".join(
+                "(SELECT new_id FROM id_map WHERE old_id = t.chat_id)" if c.strip() == "chat_id"
+                else f"t.{c.strip()}"
+                for c in cols.split(","))
+            self.conn.execute(
+                f"INSERT OR IGNORE INTO {table}({cols}) SELECT {sel} FROM {table} t "
+                f"WHERE t.chat_id IN (SELECT old_id FROM id_map)")
+            self.conn.execute(f"DELETE FROM {table} WHERE chat_id IN (SELECT old_id FROM id_map)")
+        self.conn.execute(
+            "INSERT INTO digests(chat_id, topic_id, ts, since_msg, upto_msg, summary) "
+            "SELECT (SELECT new_id FROM id_map WHERE old_id = d.chat_id), d.topic_id, d.ts, "
+            "d.since_msg, d.upto_msg, d.summary FROM digests d "
+            "WHERE d.chat_id IN (SELECT old_id FROM id_map)")
+        self.conn.execute("DELETE FROM digests WHERE chat_id IN (SELECT old_id FROM id_map)")
+        for r in self.conn.execute("SELECT key FROM meta").fetchall():
+            parts = r["key"].split(":")
+            if len(parts) >= 2 and parts[0] in ("cursor", "backfill", "digest_upto"):
+                try:
+                    old = int(parts[1])
+                except ValueError:
+                    continue
+                if old in mapping:
+                    new_key = ":".join([parts[0], str(mapping[old])] + parts[2:])
+                    self.conn.execute("UPDATE meta SET key=? WHERE key=?", (new_key, r["key"]))
+        self.conn.commit()
+        self.conn.execute("DROP TABLE id_map")
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
@@ -280,15 +342,6 @@ class DB:
             if len(out[r["kind"]]) < limit:
                 out[r["kind"]].append(r)
         return out
-
-    def add_digest(self, chat_id: int, topic_id: Optional[int], summary: str,
-                   since_msg: int, upto_msg: int) -> None:
-        self.conn.execute(
-            "INSERT INTO digests(chat_id,topic_id,ts,since_msg,upto_msg,summary) "
-            "VALUES(?,?,?,?,?,?)",
-            (chat_id, topic_id, int(time.time()), since_msg, upto_msg, summary),
-        )
-        self.conn.commit()
 
     def digests_list(self, chat_id: Optional[int] = None,
                      topic_id: Optional[int] = None, limit: int = 10) -> list[dict]:
@@ -876,6 +929,7 @@ def run_sql(db: DB, sql: str, params: tuple = (), limit: int = 200) -> dict:
     с PRAGMA query_only и authorizer, отклоняющим всё кроме чтения."""
     if not _ALLOWED.match(sql):
         return {"ok": False, "error": "только SELECT / WITH"}
+    limit = min(max(int(limit), 1), 2000)
     conn = sqlite3.connect(str(db.path))
     conn.row_factory = sqlite3.Row
     try:

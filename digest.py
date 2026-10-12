@@ -116,7 +116,10 @@ def run(db_path: str = DB_PATH) -> list[dict]:
                 print(f"  ! {w['chat_id']}/{w['topic_id']}: {exc}", file=sys.stderr)
                 continue
             new_upto = max(r["msg_id"] for r in rows)
-            db.add_digest(w["chat_id"], w["topic_id"], summary, upto, new_upto)
+            db.conn.execute(
+                "INSERT INTO digests(chat_id,topic_id,ts,since_msg,upto_msg,summary) "
+                "VALUES(?,?,?,?,?,?)",
+                (w["chat_id"], w["topic_id"], int(time.time()), upto, new_upto, summary))
             db.conn.execute(
                 "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, str(new_upto)))
