@@ -1154,6 +1154,60 @@ def test_ui_security(db_path: Path) -> None:
           "ui: отказ поднимать 0.0.0.0 без TG_UI_TOKEN", out.strip()[:70])
 
 
+def test_live_collect(db_path: Path) -> None:
+    print("=== live.collect_ids: подхват новых чатов ===")
+    import live as live_mod
+
+    lc_db = db_path.parent / "live_collect.sqlite"
+    with DB(lc_db) as db:
+        db.upsert_chat(chat_id=-100111, title="Форум", username=None,
+                       kind="supergroup", is_forum=True, members=5)
+    ids, forums = live_mod.collect_ids(str(lc_db))
+    check(-100111 in ids and -100111 in forums,
+          "live.collect_ids: чаты из индекса", str(sorted(ids)))
+    with DB(lc_db) as db:
+        db.watch_add(-100999, 1, alias="новый")
+    ids2, _ = live_mod.collect_ids(str(lc_db))
+    check(-100999 in ids2, "live.collect_ids: watch-добавка видна без рестарта",
+          str(sorted(ids2)))
+
+
+def test_digest_resilience(db_path: Path) -> None:
+    print("=== digest: сбой LLM, маскировка, курсор ===")
+    dg_db = db_path.parent / "digest_res.sqlite"
+    with DB(dg_db) as db:
+        db.watch_add(-100222, 1, alias="Тест")
+        db.conn.execute(
+            "INSERT INTO messages(chat_id, msg_id, topic_id, ts, text) "
+            "VALUES(-100222, 1, 1, 1, 'сырой ghp_" + "e" * 40 + "')")
+        db.conn.commit()
+
+    import digest as digest_mod
+    old_env = {k: os.environ.get(k) for k in ("DIGEST_PROVIDER", "DIGEST_URL")}
+    os.environ["DIGEST_PROVIDER"] = "openai"
+    os.environ["DIGEST_URL"] = "http://127.0.0.1:9/x"
+    try:
+        made = digest_mod.run(str(dg_db))
+        check(made == [], "digest: сбой LLM не роняет прогон", str(made))
+        with DB(dg_db) as db:
+            n = db.conn.execute("SELECT COUNT(*) FROM digests").fetchone()[0]
+            check(n == 0, "digest: сбой LLM не пишет дайджест", str(n))
+
+        os.environ["DIGEST_PROVIDER"] = "stub"
+        made2 = digest_mod.run(str(dg_db))
+        with DB(dg_db) as db:
+            dg = db.conn.execute("SELECT summary FROM digests").fetchone()
+        check(made2 and dg is not None and "ghp_" not in (dg["summary"] or ""),
+              "digest: выжимка не содержит сырой токен",
+              (dg["summary"] or "")[:60] if dg else "нет дайджеста")
+    finally:
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> int:
     import tempfile
     try:
@@ -1176,6 +1230,8 @@ def main() -> int:
     test_live_tools_flag(db_path)
     test_mcp_server(db_path)
     test_ui_security(db_path)
+    test_live_collect(db_path)
+    test_digest_resilience(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

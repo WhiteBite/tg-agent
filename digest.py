@@ -20,6 +20,8 @@ import urllib.request
 from collections import Counter
 from pathlib import Path
 
+from redact import redact
+
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from db import DB  # noqa: E402
@@ -36,7 +38,7 @@ def build_context(rows: list[dict], alias: str) -> str:
     lines = [head]
     used = len(head)
     shown = 0
-    for r in rows[:200]:
+    for r in rows:
         ln = f"- {r['sender_name'] or '?'}: {(r['text'] or '')[:300]}"
         if used + len(ln) > DIGEST_MAX_CHARS:
             lines.append(f"…(ещё {len(rows) - shown} сообщений не вошли в контекст)")
@@ -103,8 +105,16 @@ def run(db_path: str = DB_PATH) -> list[dict]:
                 (w["chat_id"], w["topic_id"], upto))]
             if not rows:
                 continue
+            for r in rows:
+                if r.get("text"):
+                    r["text"] = redact(r["text"])[0]
             alias = w.get("alias") or w.get("topic_title") or "без темы"
-            summary = summarize(rows, alias)
+            try:
+                summary = summarize(rows, alias)
+            except Exception as exc:
+                # курсор не двигаем: следующий прогон повторит эту же порцию
+                print(f"  ! {w['chat_id']}/{w['topic_id']}: {exc}", file=sys.stderr)
+                continue
             new_upto = max(r["msg_id"] for r in rows)
             db.add_digest(w["chat_id"], w["topic_id"], summary, upto, new_upto)
             db.conn.execute(
