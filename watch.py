@@ -51,8 +51,8 @@ async def cmd_topics(args) -> None:
     )
     await client.start()
     entity = await client.get_entity(args.chat)
-    chat_id = int(entity.id)
-    print(f"{entity.id}  {getattr(entity, 'title', '')!r}  "
+    chat_id = sync_mod.marked_id(entity)
+    print(f"{chat_id}  {getattr(entity, 'title', '')!r}  "
           f"форум={sync_mod.is_forum(entity)}  username={getattr(entity, 'username', None)}")
 
     if sync_mod.is_forum(entity):

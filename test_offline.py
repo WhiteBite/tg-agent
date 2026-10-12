@@ -157,11 +157,27 @@ class FakeClient:
         self.folder_filters = [(fid, t, ids) for fid, ids in (folders or {}).items()
                                for t in ({7: "AI Agent", 3: "Dev"}.get(fid, f"папка{fid}"),)]
 
+    def _group(self, ref: Any) -> dict:
+        # как Telethon: резолвит и сырой, и marked id одного и того же чата
+        k = int(getattr(ref, "id", ref))
+        if k in self.groups:
+            return self.groups[k]
+        if k > 0:
+            alt = {-1000000000000 - k, -k}
+        elif k < -1000000000000:
+            alt = {-k - 1000000000000}
+        else:
+            alt = {-k}
+        for a in alt:
+            if a in self.groups:
+                return self.groups[a]
+        raise KeyError(k)
+
     async def get_dialogs(self):
         return [Dialog(g["entity"], g["entity"].title) for g in self.groups.values()]
 
     async def get_entity(self, peer):
-        return self.groups[int(peer)]["entity"]
+        return self._group(peer)["entity"]
 
     async def iter_messages(self, entity, limit=None, reply_to=None,
                             offset_id=0, reverse=False, **kw):
@@ -171,7 +187,7 @@ class FakeClient:
             e = FloodWaitError(None, 0)
             e.seconds = 0
             raise e
-        msgs = self.groups[int(entity)]["messages"]
+        msgs = self._group(entity)["messages"]
         if reply_to is not None:
             # Telegram отдаёт тред темы: сообщения с reply_to=topic_id + сама тема
             msgs = [m for m in msgs
@@ -187,8 +203,7 @@ class FakeClient:
             yield m
 
     async def get_messages(self, entity, limit=None, filter=None, **kw):
-        cid = int(getattr(entity, "id", entity))
-        msgs = self.groups[cid]["messages"]
+        msgs = self._group(entity)["messages"]
         if filter is not None:  # InputMessagesFilterPinned
             msgs = [m for m in msgs if getattr(m, "pinned", False)]
         msgs = sorted(msgs, key=lambda m: m.id, reverse=True)
@@ -263,6 +278,24 @@ def build_fixture() -> FakeClient:
 
 def test_sync(db_path: Path) -> None:
     client = build_fixture()
+
+    # sender_name не должен звать сеть из sync-кода: клиент без кэша -> idNNN
+    import warnings
+
+    class NoCacheClient:
+        async def get_entity(self, pid):
+            raise AssertionError("get_entity не должен зваться из sender_name")
+
+    async def _bare_sender() -> str:
+        m = Msg(99, NOW, User(1, "Аня", "К", "anya"), "x")
+        del m._sender
+        return sync_mod.message_row(m, -100111, 1, NoCacheClient())["sender_name"]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        bare = asyncio.run(_bare_sender())
+    check(bare == "id1" and not any("never awaited" in str(w.message) for w in caught),
+          "sender_name: без кэша отдаёт idN без мусорной корутины", f"{bare}")
 
     # тема определяется по сообщению
     m = client.groups[-100111]["messages"][2]
@@ -956,6 +989,60 @@ def test_live_tools_flag(db_path: Path) -> None:
             proc.kill()
 
 
+def test_backfill_resume(db_path: Path) -> None:
+    print("=== backfill: resume прерванного прогона ===")
+    client = build_fixture()
+    u1, u2 = User(1, "Аня"), User(2, "Борис")
+    arch = Channel(-100555, "Архив", None, forum=False)
+    arch.broadcast, arch.megagroup = False, True
+    group = {"entity": arch,
+             "messages": [Msg(200 + i, NOW - timedelta(days=800 - i),
+                              u1 if i % 2 else u2, f"архив {i}") for i in range(7)],
+             "topics": []}
+    client.groups[-100555] = group
+
+    bf_db = db_path.parent / "bf_resume.sqlite"
+    with DB(bf_db) as db:
+        first = asyncio.run(sync_mod.backfill(
+            client, db, -100555, forum=False, chunk_size=5, sleep=0,
+            max_messages=3, entity=arch))
+        check(first["seen"] == 3, "backfill: max_messages останавливает после 3", str(first))
+        check(db.get_meta("backfill:-100555") == "202",
+              "backfill: прогресс сохранён в meta", str(db.get_meta("backfill:-100555")))
+        second = asyncio.run(sync_mod.backfill(
+            client, db, -100555, forum=False, chunk_size=5, sleep=0, entity=arch))
+        check(second["seen"] == 4,
+              "backfill: повторный запуск продолжает, а не начинает с нуля",
+              str(second))
+        total = db.conn.execute("SELECT COUNT(*) FROM messages WHERE chat_id=-100555").fetchone()[0]
+        check(total == 7, "backfill: в сумме все 7 сообщений", str(total))
+
+
+def test_marked_ids(db_path: Path) -> None:
+    print("=== id-формы: entity.id -> marked на границе Telethon ===")
+    client = build_fixture()
+    u1 = User(1, "Аня")
+    real = Channel(777, "Real Form Group", None, forum=False)
+    real.broadcast, real.megagroup = False, True
+    group = {"entity": real, "messages": [Msg(10, NOW, u1, "из real-формы")], "topics": []}
+    client.groups[777] = group
+
+    mk_db = db_path.parent / "marked.sqlite"
+    r = asyncio.run(sync_mod.run(db_path=str(mk_db), client=client,
+                                 names=["-1000000000777"]))
+    check(len(r["chats"]) == 1, "select_chats: матчится marked-форма id", str(len(r["chats"])))
+    with DB(mk_db) as db:
+        row = db.conn.execute(
+            "SELECT id FROM chats WHERE title='Real Form Group'").fetchone()
+        check(row is not None and row["id"] == -1000000000777,
+              "sync: положительный entity.id хранится как marked", str(row["id"] if row else None))
+        mid = db.conn.execute(
+            "SELECT chat_id FROM messages WHERE text='из real-формы'").fetchone()
+        check(mid is not None and mid["chat_id"] == -1000000000777,
+              "sync: сообщения привязаны к marked chat_id",
+              str(mid["chat_id"] if mid else None))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -968,6 +1055,8 @@ def main() -> int:
             f.unlink()
     test_sync(db_path)
     test_folder_and_backfill(db_path)
+    test_backfill_resume(db_path)
+    test_marked_ids(db_path)
     test_reads(db_path)
     test_watch(db_path)
     test_live_and_poll(db_path)

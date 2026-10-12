@@ -118,6 +118,7 @@ def topic_of_message(msg: Any) -> Optional[int]:
 
 
 def sender_name(msg: Any, client: Any) -> Optional[str]:
+    """Имя автора из кэшей Telethon; сети не зовём — sync и так под event loop."""
     if getattr(msg, "out", False):
         return "me"
     if not getattr(msg, "sender_id", None):
@@ -128,21 +129,29 @@ def sender_name(msg: Any, client: Any) -> Optional[str]:
         sender = None
     if sender is None and client is not None:
         try:
-            sender = client._entity_cache.get(msg.sender_id)  # type: ignore[attr-defined]
+            cache = client._entity_cache  # type: ignore[attr-defined]
+            sender = cache.get(msg.sender_id) if cache is not None else None
         except Exception:
             sender = None
-    if sender is None and client is None:
-        return f"id{msg.sender_id}"
     if sender is None:
-        try:
-            sender = asyncio.get_event_loop().run_until_complete(
-                client.get_entity(msg.sender_id)
-            )
-        except Exception:
-            return f"id{msg.sender_id}"
+        return f"id{msg.sender_id}"
     parts = [getattr(sender, "first_name", None), getattr(sender, "last_name", None)]
     name = " ".join(p for p in parts if p)
     return name or getattr(sender, "username", None) or f"id{msg.sender_id}"
+
+
+def marked_id(entity: Any) -> int:
+    """id в marked-форме Telegram: канал -100…, старая группа -N, юзер +N.
+    Telethon отдаёт entity.id в сыром виде, а итераторы/события ждут marked."""
+    eid = int(getattr(entity, "id", entity))
+    if eid < 0:
+        return eid
+    label = _label(entity)
+    if label == "Channel":
+        return -1000000000000 - eid
+    if label == "Chat":
+        return -eid
+    return eid
 
 
 def media_of(msg: Any) -> Optional[str]:
@@ -349,7 +358,7 @@ async def sync_chat(
     dry_run: bool,
 ) -> dict:
     entity = getattr(dialog_or_chat, "entity", dialog_or_chat)
-    chat_id = int(entity.id)
+    chat_id = marked_id(entity)
     forum = is_forum(entity)
     title = getattr(entity, "title", None) or getattr(dialog_or_chat, "name", None)
 
@@ -425,9 +434,13 @@ async def backfill(
     Обычная синхронизация идёт сверху вниз и обрывается на первом уже известном
     сообщении — для канала с историей в несколько лет это значит «никогда не
     дойти до конца». Здесь наоборот: курсор start_id двигается вперёд, прогресс
-    пишется в БД после каждого чанка, поэтому прерванный запуск продолжается.
+    пишется в БД после каждого чанка (meta:backfill:<chat_id>), поэтому
+    прерванный запуск продолжается с того же места.
     """
     total_new = total_seen = 0
+    if start_id == 0:
+        saved = db.get_meta(f"backfill:{chat_id}")
+        start_id = int(saved) if saved else 0
     cursor = start_id
     if entity is None:
         entity = await client.get_entity(chat_id)
@@ -443,9 +456,11 @@ async def backfill(
         )
     while True:
         attempt = 0
+        rows: list[dict[str, Any]] = []
         while True:  # FloodWait: повторяем тот же чанк (вставки идемпотентны)
-            chunk_new = chunk_seen = 0
+            chunk_seen = 0
             chunk_max = cursor
+            rows = []
             try:
                 async for msg in client.iter_messages(
                     chat_id, limit=chunk_size, offset_id=cursor, reverse=True
@@ -455,11 +470,7 @@ async def backfill(
                     if tid is None:
                         tid = 1
                     if not dry_run:
-                        row = message_row(msg, chat_id, tid, client)
-                        if db.insert_message(row):
-                            chunk_new += 1
-                            db.insert_refs(chat_id, row["msg_id"],
-                                           extract_refs(row["text"], row["fwd_from"]))
+                        rows.append(message_row(msg, chat_id, tid, client))
                     chunk_max = max(chunk_max, msg.id)
                     if max_messages and total_seen + chunk_seen >= max_messages:
                         break
@@ -469,8 +480,15 @@ async def backfill(
                 if attempt > 3:
                     raise
                 await _flood_sleep(exc, attempt)
+        chunk_new = 0
         if not dry_run:
+            chunk_new = db.insert_messages(rows)
+            for row in rows:
+                db.insert_refs(chat_id, row["msg_id"],
+                               extract_refs(row["text"], row["fwd_from"]))
             db.recount_topics(chat_id, general_id=1)
+            db.set_meta(f"backfill:{chat_id}", str(chunk_max))
+            db.conn.commit()
         total_new += chunk_new
         total_seen += chunk_seen
         print(f"    чанк {cursor}->{chunk_max}: просмотрено {chunk_seen}, новых {chunk_new}",
@@ -540,8 +558,8 @@ async def select_chats(
     wanted = {n.lower().lstrip("@") for n in names}
     for d in dialogs:
         entity = getattr(d, "entity", d)
-        named = str(entity.id) in names or (
-            getattr(entity, "username", None) or "").lower() in wanted
+        named = (str(entity.id) in names or str(marked_id(entity)) in names
+                 or (getattr(entity, "username", None) or "").lower() in wanted)
         # канал-вещание берём, если его назвали явно или он лежит в отобранной папке:
         # в обоих случаях это осознанный выбор пользователя
         allowed = include_channels or named
@@ -564,7 +582,8 @@ async def select_chats(
             continue
         picked.append(entity)
     if names:
-        found = {str(getattr(e, "username", None)).lower() for e in picked} | {str(e.id) for e in picked}
+        found = ({str(getattr(e, "username", None)).lower() for e in picked}
+                 | {str(e.id) for e in picked} | {str(marked_id(e)) for e in picked})
         missing = [n for n in names if n.lstrip("@").lower() not in found and n not in found]
         if missing:
             print(f"  ! не найдено в диалогах: {', '.join(missing)}", file=sys.stderr)

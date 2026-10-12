@@ -196,6 +196,18 @@ class DB:
         )
         self.conn.commit()
 
+    def get_meta(self, key: str) -> Optional[str]:
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
+
     # ---------------- папки (пишет sync.py, читает ui) ----------------
 
     def save_folders(self, folders: list[dict]) -> None:
@@ -354,35 +366,53 @@ class DB:
             (chat_id, topic_id, title, int(closed), messages, last_ts),
         )
 
+    _MSG_COLS = ("chat_id, msg_id, topic_id, ts, date_iso, "
+                 "sender_id, sender_name, is_out, is_service, text, media, reply_to, "
+                 "views, forwards, reactions, raw_json")
+
+    @staticmethod
+    def _msg_values(msg: dict[str, Any]) -> tuple:
+        return (
+            msg["chat_id"],
+            msg["msg_id"],
+            msg.get("topic_id"),
+            msg.get("ts"),
+            msg.get("date_iso"),
+            msg.get("sender_id"),
+            msg.get("sender_name"),
+            int(msg.get("is_out") or 0),
+            int(msg.get("is_service") or 0),
+            msg.get("text"),
+            msg.get("media"),
+            msg.get("reply_to"),
+            msg.get("views"),
+            msg.get("forwards"),
+            json.dumps(msg.get("reactions") or [], ensure_ascii=False),
+            json.dumps(msg, ensure_ascii=False, default=str),
+        )
+
     def insert_message(self, msg: dict[str, Any]) -> bool:
         """Вставляет сообщение; возвращает False, если оно уже было."""
         cur = self.conn.execute(
-            "INSERT OR IGNORE INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
-            "sender_id, sender_name, is_out, is_service, text, media, reply_to, "
-            "views, forwards, reactions, raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                msg["chat_id"],
-                msg["msg_id"],
-                msg.get("topic_id"),
-                msg.get("ts"),
-                msg.get("date_iso"),
-                msg.get("sender_id"),
-                msg.get("sender_name"),
-                int(msg.get("is_out") or 0),
-                int(msg.get("is_service") or 0),
-                msg.get("text"),
-                msg.get("media"),
-                msg.get("reply_to"),
-                msg.get("views"),
-                msg.get("forwards"),
-                json.dumps(msg.get("reactions") or [], ensure_ascii=False),
-                json.dumps(msg, ensure_ascii=False, default=str),
-            ),
+            f"INSERT OR IGNORE INTO messages({self._MSG_COLS}) "
+            f"VALUES({','.join('?' * 16)})",
+            self._msg_values(msg),
         )
         if cur.rowcount:
             self.conn.commit()
             return True
         return False
+
+    def insert_messages(self, rows: list[dict[str, Any]]) -> int:
+        """Батч-вставка одним коммитом на чанк; возвращает число новых строк."""
+        if not rows:
+            return 0
+        cur = self.conn.executemany(
+            f"INSERT OR IGNORE INTO messages({self._MSG_COLS}) "
+            f"VALUES({','.join('?' * 16)})",
+            [self._msg_values(r) for r in rows],
+        )
+        return cur.rowcount
 
     def set_topic_counters(self, chat_id: int, topic_id: int, messages: int, last_ts: Optional[int]) -> None:
         self.conn.execute(
