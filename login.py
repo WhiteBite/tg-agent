@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from env import load_env, write_env  # noqa: E402
+from sync import start_kwargs  # noqa: E402
 
 load_env()
 
@@ -79,14 +80,14 @@ async def _sign_in(client) -> None:
         await _qr_login(client)
     except ImportError:
         print("нет библиотеки qrcode (pip install qrcode) — переходим к телефону")
-        await client.start(phone=os.environ.get("TELEGRAM_PHONE"))
+        await client.start(**start_kwargs())
     except SessionPasswordNeededError:
         print("QR принят, включена 2FA — нужен пароль")
     except Exception as exc:
         print(f"QR не сработал ({exc}) — переходим к телефону")
         if not client.is_connected():
             await client.connect()
-        await client.start(phone=os.environ.get("TELEGRAM_PHONE"))
+        await client.start(**start_kwargs())
 
 
 def _needs_password(client) -> bool:
@@ -169,7 +170,7 @@ def main() -> None:
         if await client.is_user_authorized():
             print("уже авторизован — входить не нужно")
         elif use_phone:
-            await client.start(phone=os.environ.get("TELEGRAM_PHONE"))
+            await client.start(**start_kwargs())
         elif _needs_password(client):
             print("QR уже принят ранее — остался только пароль")
         else:

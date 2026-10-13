@@ -1492,6 +1492,24 @@ def test_login_2fa(db_path: Path) -> None:
         login_mod.getpass.getpass = orig
 
 
+def test_start_kwargs(db_path: Path) -> None:
+    print("=== старт клиента: Telethon не принимает phone=None ===")
+    import sync as sync_mod
+
+    os.environ.pop("TELEGRAM_PHONE", None)
+    check(sync_mod.start_kwargs() == {},
+          "start_kwargs: без TELEGRAM_PHONE kwargs пусты (пусть Telethon сам спросит)",
+          str(sync_mod.start_kwargs()))
+    os.environ["TELEGRAM_PHONE"] = "+79990001122"
+    try:
+        kwargs = sync_mod.start_kwargs()
+        check(kwargs == {"phone": "+79990001122"},
+              "start_kwargs: с TELEGRAM_PHONE прокидывает номер", str(kwargs))
+        check(kwargs.get("phone") is not None, "start_kwargs: phone никогда не None")
+    finally:
+        os.environ.pop("TELEGRAM_PHONE", None)
+
+
 def main() -> int:
     import tempfile
     try:
@@ -1521,6 +1539,7 @@ def main() -> int:
     test_build_state_last(db_path)
     test_env_loader(db_path)
     test_login_2fa(db_path)
+    test_start_kwargs(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

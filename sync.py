@@ -99,6 +99,12 @@ async def _flood_sleep(exc: Exception, attempt: int) -> None:
     await asyncio.sleep(wait)
 
 
+def start_kwargs() -> dict[str, str]:
+    """Telethon.start(phone=None) падает сразу; без TELEGRAM_PHONE пусть спросит сам."""
+    phone = os.environ.get("TELEGRAM_PHONE")
+    return {"phone": phone} if phone else {}
+
+
 def topic_of_message(msg: Any) -> Optional[int]:
     """Определяет id темы сообщения.
 
@@ -618,7 +624,7 @@ async def run(
                              "или запусти python login.py — спросит один раз и запомнит")
         session = StringSession(sess) if sess else sess_name
         client = TelegramClient(session, int(api_id), api_hash)
-        await client.start(phone=os.environ.get("TELEGRAM_PHONE"))
+        await client.start(**start_kwargs())
         own_client = True
 
     reports = []
