@@ -215,7 +215,10 @@ class FakeClient:
         return msgs[:limit] if limit else msgs
 
     async def iter_dialogs(self, folder=None, **kw):
-        assert folder is not None, "iter_dialogs без folder не должен вызываться"
+        if folder is None:
+            for g in self.groups.values():
+                yield Dialog(g["entity"], g["entity"].title)
+            return
         for cid in self.folders.get(folder, []):
             g = self.groups[cid]
             yield Dialog(g["entity"], g["entity"].title)
@@ -1538,6 +1541,43 @@ def test_days_window(db_path: Path) -> None:
           f"got={got} expected={expected} (всего в чате 7)")
 
 
+def test_start_wizard(db_path: Path) -> None:
+    print("=== start.py: одна команда вместо десяти ===")
+    import start as start_mod
+
+    chats = [
+        {"id": -100111, "title": "Работа", "username": "team_forum", "kind": "forum"},
+        {"id": -100222, "title": "Без юзернейма", "username": None, "kind": "group"},
+        {"id": -100333, "title": "Новости", "username": "ai_news", "kind": "channel"},
+    ]
+    check(start_mod.parse_pick("", chats) == [], "визард: пустой ответ = отмена")
+    check(start_mod.parse_pick("1,3", chats) == ["@team_forum", "@ai_news"],
+          "визард: номера через запятую", str(start_mod.parse_pick("1,3", chats)))
+    check(start_mod.parse_pick("all", chats) == ["@team_forum", "-100222", "@ai_news"],
+          "визард: all -> все чаты (без юзернейма — по id)",
+          str(start_mod.parse_pick("all", chats)))
+    check(start_mod.parse_pick("@custom, 2", chats) == ["@custom", "-100222"],
+          "визард: ручной @username вместе с номером")
+    check(start_mod.parse_pick("99, abc", chats) == [],
+          "визард: мусор и выход за диапазон игнорируются")
+
+    client = build_fixture()
+    listed = asyncio.run(sync_mod.list_chat_choices(client))
+    kinds = {c["kind"] for c in listed}
+    check({"forum", "group", "channel"} <= kinds,
+          "визард: листинг различает форум/группу/канал", str(sorted(kinds)))
+    check(any(c["title"] == "Работа / Команда" and c["username"] == "team_forum"
+              for c in listed), "визард: в списке есть заголовок и юзернейм")
+
+    os.environ.pop("TELEGRAM_API_ID", None)
+    os.environ.pop("TELEGRAM_API_HASH", None)
+    try:
+        sync_mod.make_client()
+        check(False, "make_client: без ключей должен быть понятный SystemExit")
+    except SystemExit as exc:
+        check("login.py" in str(exc), "make_client: без ключей отсылает к login.py", str(exc))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -1569,6 +1609,7 @@ def main() -> int:
     test_login_2fa(db_path)
     test_start_kwargs(db_path)
     test_days_window(db_path)
+    test_start_wizard(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

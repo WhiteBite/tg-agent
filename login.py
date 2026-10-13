@@ -159,26 +159,28 @@ async def _finish(client, export: bool, session_name: str) -> None:
     await client.disconnect()
 
 
+async def run_login(*, use_phone: bool = False, export: bool = False) -> None:
+    """Полный вход: ключи -> сессия (QR/телефон только если нужно). Для start.py тоже."""
+    ensure_creds()
+    client, name = _client()
+    await client.connect()
+    if await client.is_user_authorized():
+        print("уже авторизован — входить не нужно")
+    elif use_phone:
+        await client.start(**start_kwargs())
+    elif _needs_password(client):
+        print("QR уже принят ранее — остался только пароль")
+    else:
+        await _sign_in(client)
+    await _finish(client, export, name)
+
+
 def main() -> None:
     use_phone = "--phone" in sys.argv
     export = "--export" in sys.argv
 
-    async def run() -> None:
-        ensure_creds()
-        client, name = _client()
-        await client.connect()
-        if await client.is_user_authorized():
-            print("уже авторизован — входить не нужно")
-        elif use_phone:
-            await client.start(**start_kwargs())
-        elif _needs_password(client):
-            print("QR уже принят ранее — остался только пароль")
-        else:
-            await _sign_in(client)
-        await _finish(client, export, name)
-
     try:
-        asyncio.run(run())
+        asyncio.run(run_login(use_phone=use_phone, export=export))
     except (EOFError, ValueError) as exc:
         raise SystemExit(f"не получилось спросить телефон/код ({exc}) — "
                          "запусти в терминале и проверь ключи в .env")

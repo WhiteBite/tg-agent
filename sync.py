@@ -105,6 +105,42 @@ def start_kwargs() -> dict[str, str]:
     return {"phone": phone} if phone else {}
 
 
+def make_client() -> Any:
+    """TelegramClient из .env, без подключения."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    api_id = os.environ.get("TELEGRAM_API_ID")
+    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    if not api_id or not api_hash:
+        raise SystemExit("нет TELEGRAM_API_ID / TELEGRAM_API_HASH — запусти python login.py")
+    sess = os.environ.get("TELEGRAM_SESSION_STRING")
+    name = os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session")
+    return TelegramClient(StringSession(sess) if sess else name, int(api_id), api_hash)
+
+
+async def list_chat_choices(client: Any) -> list[dict]:
+    """Чаты для визарда: группы (в т.ч. форумы) и каналы, свежие сверху."""
+    out: list[dict] = []
+    async for d in client.iter_dialogs():
+        e = getattr(d, "entity", d)
+        if _label(e) in ("ChatForbidden", "ChannelForbidden"):
+            continue
+        if getattr(e, "broadcast", False):
+            kind = "channel"
+        elif is_group(e):
+            kind = "forum" if is_forum(e) else "group"
+        else:
+            continue
+        out.append({
+            "id": marked_id(e),
+            "title": getattr(e, "title", None) or getattr(d, "name", None),
+            "username": getattr(e, "username", None),
+            "kind": kind,
+        })
+    return out
+
+
 def topic_of_message(msg: Any) -> Optional[int]:
     """Определяет id темы сообщения.
 
@@ -620,15 +656,7 @@ async def run(
     if client is None:
         if not HAVE_TELETHON:
             raise SystemExit("нужен Telethon: pip install telethon")
-        api_id = os.environ.get("TELEGRAM_API_ID")
-        api_hash = os.environ.get("TELEGRAM_API_HASH")
-        sess = os.environ.get("TELEGRAM_SESSION_STRING")
-        sess_name = os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session")
-        if not api_id or not api_hash:
-            raise SystemExit("задай TELEGRAM_API_ID и TELEGRAM_API_HASH (https://my.telegram.org/apps) "
-                             "или запусти python login.py — спросит один раз и запомнит")
-        session = StringSession(sess) if sess else sess_name
-        client = TelegramClient(session, int(api_id), api_hash)
+        client = make_client()
         await client.start(**start_kwargs())
         own_client = True
 
