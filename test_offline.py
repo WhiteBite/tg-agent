@@ -698,6 +698,90 @@ def test_entities_schema(db_path: Path) -> None:
         check(n == 3, "entities: повторное открытие БД идемпотентно", str(n))
 
 
+def test_extract_stub(db_path: Path) -> None:
+    print("=== extract: stub-провайдер, курсор, dry-run ===")
+    ex_db = db_path.parent / "extract_stub.sqlite"
+    if ex_db.exists():
+        ex_db.unlink()
+    now = int(time.time())
+    with DB(ex_db) as db:
+        db.upsert_chat(chat_id=-100777, title="Стройка", username=None,
+                       kind="supergroup", is_forum=True, members=5)
+        db.upsert_topic(-100777, 42, "Стройка")
+        db.watch_add(-100777, 42, project="стройка")
+        msgs = [
+            (101, 42, "решено: пол бетон М300"),
+            (102, 42, "задача: закрыть контур у Alexey до 01.02.2027"),
+            (103, 42, "вопрос: когда привезут арматуру"),
+            (104, 42, "обещаю прислать смету"),
+            (105, 42, "привет, как дела?"),
+            (201, 43, "решено: это в другой, непросматриваемой теме"),
+        ]
+        for mid, tid, text in msgs:
+            ts = now - 600 + mid
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100777, ?, ?, ?, ?, 1, 'Иван', 0, ?)",
+                (mid, tid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+
+    import extract as extract_mod
+
+    made = extract_mod.run(str(ex_db))
+    with DB(ex_db) as db:
+        ents = db.entities_list(pack="construction")
+        kinds = sorted(e["kind"] for e in ents)
+        check(len(ents) == 4 and kinds == ["decision", "promise", "question", "task"],
+              "extract: 4 сущности с видами decision/task/question/promise", str(kinds))
+        task = next((e for e in ents if e["kind"] == "task"), None)
+        check(task is not None and task["owner"] == "Alexey" and task["due_ts"] is not None
+              and task["project"] == "стройка",
+              "extract: задача с owner, due_ts и проектом",
+              f"owner={task and task['owner']} due_ts={task and task['due_ts']} "
+              f"project={task and task['project']}")
+        evs = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE op='new'").fetchone()["c"]
+        check(evs == 4, "extract: 4 события new", str(evs))
+        leak = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE msg_id=201").fetchone()["c"]
+        check(leak == 0, "extract: непросматриваемая тема не извлечена", str(leak))
+        run = db.conn.execute("SELECT * FROM extraction_runs").fetchone()
+        check(run is not None and run["ops_applied"] == 4 and run["status"] == "ok",
+              "extract: прогон записан, 4 применённых, статус ok",
+              f"applied={run and run['ops_applied']} status={run and run['status']}")
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100777:42:construction'").fetchone()
+        check(cur is not None and int(cur["value"]) == 105,
+              "extract: курсор = max msg_id темы 42", str(cur and cur["value"]))
+
+    made2 = extract_mod.run(str(ex_db))
+    with DB(ex_db) as db:
+        n2 = len(db.entities_list(pack="construction"))
+        runs2 = db.conn.execute("SELECT COUNT(*) c FROM extraction_runs").fetchone()["c"]
+    check(n2 == 4 and runs2 == 1 and made2 == [],
+          "extract: повторный прогон ничего не добавляет",
+          f"ents={n2} runs={runs2} made={made2}")
+
+    with DB(ex_db) as db:
+        db.conn.execute("DELETE FROM meta WHERE key='extract:-100777:42:construction'")
+        db.conn.commit()
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        made3 = extract_mod.run(str(ex_db), dry_run=True)
+    with DB(ex_db) as db:
+        n3 = len(db.entities_list(pack="construction"))
+        runs3 = db.conn.execute("SELECT COUNT(*) c FROM extraction_runs").fetchone()["c"]
+        cur3 = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100777:42:construction'").fetchone()
+    check(n3 == 4 and runs3 == 1 and cur3 is None and bool(made3) and buf.getvalue().strip(),
+          "extract: dry-run печатает операции, но ничего не пишет",
+          f"ents={n3} runs={runs3} cursor={cur3 and cur3['value']}")
+
+
 # ------------------------------------------- 5. настоящий server.py по MCP stdio
 
 def rpc(proc: subprocess.Popen, payload: dict) -> None:
@@ -1655,6 +1739,7 @@ def main() -> int:
     test_reads(db_path)
     test_watch(db_path)
     test_entities_schema(db_path)
+    test_extract_stub(db_path)
     test_live_and_poll(db_path)
     test_gates(db_path)
     test_strict_and_doctor(db_path)
