@@ -1459,6 +1459,35 @@ def test_login_2fa(db_path: Path) -> None:
         check(login_mod._needs_password(FakeLoginClient([], auth_key=None)) is False
               and login_mod._needs_password(FakeLoginClient([], auth_key=object())) is True,
               "login: _needs_password определяет принятый QR по auth_key")
+
+        # подсказка к 2FA-паролю (Telegram хранит её и показывает на экране ввода)
+        class FakePassword:
+            def __init__(self, hint=None, has_recovery=False):
+                self.hint = hint
+                self.has_recovery = has_recovery
+
+        class HintClient:
+            def __init__(self, pw):
+                self._pw = pw
+
+            async def __call__(self, req):
+                if req.__class__.__name__ == "GetPasswordRequest":
+                    return self._pw
+                raise AssertionError(req)
+
+            async def sign_in(self, password=None):
+                return None
+
+        got = asyncio.run(login_mod._password_hint(
+            HintClient(FakePassword(hint="мой кот", has_recovery=True))))
+        check(got == "мой кот", "login: подсказка 2FA вытаскивается", repr(got))
+        empty = asyncio.run(login_mod._password_hint(HintClient(FakePassword())))
+        check(empty is None, "login: без подсказки — None, не падает", repr(empty))
+        broken = asyncio.run(login_mod._password_hint(object()))
+        check(broken is None, "login: сбой запроса подсказки не роняет логин")
+        want_reset = asyncio.run(login_mod._has_recovery(
+            HintClient(FakePassword(has_recovery=True))))
+        check(want_reset is True, "login: флаг резервной почты читается")
     finally:
         login_mod.getpass.getpass = orig
 

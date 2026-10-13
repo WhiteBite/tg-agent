@@ -94,9 +94,35 @@ def _needs_password(client) -> bool:
     return client.session.auth_key is not None
 
 
+async def _password_info(client):
+    """(подсказка, есть_резервная_почта) из account.GetPassword; (None, False) при сбое."""
+    try:
+        from telethon.tl import functions
+
+        pw = await client(functions.account.GetPasswordRequest())
+        return (getattr(pw, "hint", None) or None, bool(getattr(pw, "has_recovery", False)))
+    except Exception:
+        return None, False
+
+
+async def _password_hint(client):
+    return (await _password_info(client))[0]
+
+
+async def _has_recovery(client) -> bool:
+    return (await _password_info(client))[1]
+
+
 async def _password_flow(client) -> bool:
     """Спрашивает 2FA-пароль до трёх раз; True — вошли."""
     from telethon.errors import PasswordHashInvalidError
+
+    hint, recovery = await _password_info(client)
+    if hint:
+        print(f"подсказка к паролю (её задавал ты сам): {hint!r}")
+    if recovery:
+        print("есть резервная почта: если пароль забыт — Настройки → Приватность → "
+              "Двухэтапная проверка → «Забыли пароль?»")
 
     fails = 0
     while fails < 3:
