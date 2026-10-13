@@ -16,6 +16,10 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
+from env import load_env  # noqa: E402
+
+load_env()
+
 
 def run_checks(live: bool = False) -> list[dict]:
     out: list[dict] = []

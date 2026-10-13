@@ -27,6 +27,9 @@ from typing import Any, Optional
 
 from db import DB, clean_text, extract_refs
 from sanitize import sanitize_name
+from env import load_env
+
+load_env()
 
 try:  # Telethon нужен только для реального прогона, не для офлайн-тестов
     from telethon import TelegramClient

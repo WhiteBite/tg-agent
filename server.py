@@ -30,6 +30,9 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server  # type: ignore[assignment]
 
 from db import DB, clean_text, run_sql
+from env import load_env
+
+load_env()
 
 INDEX = os.environ.get("TG_DB", os.path.expanduser("~/tg-agent/tg_index.sqlite"))
 EXPOSE_SQL = os.environ.get("TG_EXPOSE_SQL", "").lower() in ("1", "true", "yes")

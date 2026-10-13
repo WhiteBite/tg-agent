@@ -1315,6 +1315,38 @@ def test_build_state_last(db_path: Path) -> None:
           repr(b["last_text"]))
 
 
+def test_env_loader(db_path: Path) -> None:
+    print("=== env: .env загрузчик ===")
+    from env import load_env
+
+    envf = db_path.parent / "test_env.env"
+    envf.write_text(
+        "# коммент\nAPI_TEST_ONE=1\nAPI_TEST_TWO='в кавычках'\n# API_TEST_SKIPPED=x\n",
+        encoding="utf-8")
+    for k in ("API_TEST_ONE", "API_TEST_TWO"):
+        os.environ.pop(k, None)
+    try:
+        load_env(envf)
+        check(os.environ.get("API_TEST_ONE") == "1",
+              "env: читает KEY=VALUE", str(os.environ.get("API_TEST_ONE")))
+        check(os.environ.get("API_TEST_TWO") == "в кавычках",
+              "env: снимает кавычки", str(os.environ.get("API_TEST_TWO")))
+        check("API_TEST_SKIPPED" not in os.environ, "env: комменты пропускает")
+        os.environ["API_TEST_ONE"] = "777"
+        load_env(envf)
+        check(os.environ["API_TEST_ONE"] == "777",
+              "env: не перекрывает уже заданное", os.environ["API_TEST_ONE"])
+        load_env(db_path.parent / "nope.env")
+        check(True, "env: отсутствующий файл — тихий no-op")
+        import login as login_mod
+        check(callable(getattr(login_mod, "main", None)),
+              "login: модуль импортируется офлайн (без сети)")
+    finally:
+        for k in ("API_TEST_ONE", "API_TEST_TWO"):
+            os.environ.pop(k, None)
+        envf.unlink(missing_ok=True)
+
+
 def main() -> int:
     import tempfile
     try:
@@ -1342,6 +1374,7 @@ def main() -> int:
     test_tg_new_fit_honest(db_path)
     test_marked_migration(db_path)
     test_build_state_last(db_path)
+    test_env_loader(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

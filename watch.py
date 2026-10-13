@@ -28,6 +28,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from db import DB
+from env import load_env
+
+load_env()
 
 
 def _fmt_ts(ts: Optional[int]) -> str:

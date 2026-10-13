@@ -24,6 +24,11 @@ from redact import redact
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
+
+from env import load_env  # noqa: E402
+
+load_env()
+
 from db import DB  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))

@@ -22,6 +22,10 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
+from env import load_env  # noqa: E402
+
+load_env()
+
 from db import DB, extract_refs  # noqa: E402
 import sync as sync_mod  # noqa: E402
 

@@ -109,15 +109,32 @@ python3 doctor.py --live   # + реальное подключение к Telegr
 
 ```bash
 python3 -m venv ~/.venvs/tg-agent
-~/.venvs/tg-agent/bin/pip install -r requirements.txt   # telethon, mcp>=2, cryptg
+~/.venvs/tg-agent/bin/pip install -r requirements.txt   # telethon, mcp>=2, cryptg, qrcode
 ```
 
 `api_id` / `api_hash`: https://my.telegram.org/apps (бесплатно).
 
+Всё остальное — без ввода чего-либо руками. Скопируй шаблон и заполни ключи один раз:
+
 ```bash
-export TELEGRAM_API_ID=123456
-export TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
+cp .env.example .env    # и впиши TELEGRAM_API_ID / TELEGRAM_API_HASH / TG_DB
 ```
+
+Все скрипты (sync / login / live / watch / server / ui / digest / doctor) читают
+`.env` сами; переменные окружения, если заданы, имеют приоритет.
+
+## Первый логин: один скан QR
+
+```bash
+python3 login.py
+```
+
+В терминале появится QR: Telegram → Настройки → Устройства → Подключить
+устройство — наведи камеру. Телефон и код вводить не нужно (код из Telegram
+приходит только тебе, обойти это нельзя — а QR убирает ввод целиком). 2FA
+спросит пароль. Сессия ляжет в `tg_agent_session.session` и переиспользуется
+навсегда. Альтернативы: `login.py --phone` (телефон+код),
+`login.py --export` (напечатает `TELEGRAM_SESSION_STRING` для контейнеров).
 
 ## Синхронизация
 
@@ -128,7 +145,8 @@ python3 sync.py --watched                    # только watch-лист
 python3 sync.py --chat @mygroup --days 30    # конкретная группа, окно 30 дней
 ```
 
-Первый запуск попросит телефон + код (или QR). Сессия — в `tg_agent_session.session`:
+Первый запуск попросит QR уже не должен — логинься заранее `login.py`; но и `sync.py`
+сам спросит телефон + код (или QR), если сессии нет. Сессия — в `tg_agent_session.session`:
 **это полный доступ к аккаунту**, `chmod 600`, не коммитить.
 
 ### Каналы с историей в годы
@@ -253,6 +271,8 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 | `digest.py` | Дайджесты: stub или openai-совместимый LLM |
 | `ui.py` + `ui.html` | Веб-визуал «как в TG Desktop» (кураторство watch-листа) |
 | `watch.py` | То же в терминале |
+| `login.py` | Логин QR-кодом (или телефон+код), `--export` — строка сессии |
+| `env.py` | Чтение `.env` всеми скриптами (env-переменные приоритетнее) |
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |

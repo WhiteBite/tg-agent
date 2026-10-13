@@ -25,6 +25,9 @@ from urllib.parse import parse_qs, urlparse
 
 from db import DB, clean_text
 from sanitize import sanitize_name
+from env import load_env
+
+load_env()
 
 HERE = Path(__file__).parent
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
