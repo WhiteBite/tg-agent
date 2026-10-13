@@ -55,9 +55,11 @@ class MessageActionTopicCreated:
 
 
 class MessageReplyHeader:
-    def __init__(self, reply_to_msg_id: int, forum_topic: bool = False):
+    def __init__(self, reply_to_msg_id: int, forum_topic: bool = False,
+                 reply_to_top_id: int | None = None):
         self.reply_to_msg_id = reply_to_msg_id
         self.forum_topic = forum_topic
+        self.reply_to_top_id = reply_to_top_id
 
 
 class User:
@@ -308,6 +310,13 @@ def test_sync(db_path: Path) -> None:
           "topic_of_message: сообщение без темы -> None")
     check(sync_mod.topic_of_message(client.groups[-100111]["messages"][0]) == 5,
           "topic_of_message: service TopicCreated -> id самой темы")
+
+    # ответ на сообщение ВНУТРИ темы: корень темы в reply_to_top_id, а не в адресате
+    nested = Msg(77, NOW, User(1, "Аня"), "ответ внутри темы",
+                 reply_to=MessageReplyHeader(555, True, reply_to_top_id=5))
+    check(sync_mod.topic_of_message(nested) == 5,
+          "topic_of_message: вложенный ответ -> корень темы, а не сообщение-адресат",
+          str(sync_mod.topic_of_message(nested)))
     check(sync_mod.is_group(client.groups[-100333]["entity"]) is False,
           "is_group: канал-вещание НЕ группа (берётся только если назван явно)")
 
@@ -1510,6 +1519,25 @@ def test_start_kwargs(db_path: Path) -> None:
         os.environ.pop("TELEGRAM_PHONE", None)
 
 
+def test_days_window(db_path: Path) -> None:
+    print("=== sync --days реально ограничивает окно ===")
+    client = build_fixture()
+    w_db = db_path.parent / "days.sqlite"
+    for suf in ("", "-wal", "-shm"):
+        f = w_db.with_name(w_db.name + suf)
+        if f.exists():
+            f.unlink()
+    r = asyncio.run(sync_mod.run(db_path=str(w_db), client=client,
+                                 pattern="Флудилка", days=1))
+    got = sum(c["new_messages"] for c in r["chats"])
+    since = time.time() - 86400
+    expected = sum(1 for m in client.groups[-100222]["messages"]
+                   if m.date.timestamp() >= since)
+    check(got == expected and 0 < expected < 7,
+          "sync --days 1: взяты только сообщения за сутки, без досасывания истории",
+          f"got={got} expected={expected} (всего в чате 7)")
+
+
 def main() -> int:
     import tempfile
     try:
@@ -1540,6 +1568,7 @@ def main() -> int:
     test_env_loader(db_path)
     test_login_2fa(db_path)
     test_start_kwargs(db_path)
+    test_days_window(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

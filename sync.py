@@ -109,12 +109,15 @@ def topic_of_message(msg: Any) -> Optional[int]:
     """Определяет id темы сообщения.
 
     Telegram хранит темы как треды: у сообщения внутри темы reply_to ведёт на
-    id темы (reply_to.top_msg_id при forum_topic=True). У сервисного сообщения
-    «тема создана» тема — это его собственный id.
+    id темы (reply_to.top_msg_id при forum_topic=True). У ответа на сообщение
+    ВНУТРИ темы адресат лежит в reply_to_msg_id, а корень темы — в reply_to_top_id,
+    поэтому сначала смотрим top_id. У сервисного сообщения «тема создана» тема —
+    это его собственный id.
     """
     reply_to = getattr(msg, "reply_to", None)
     if reply_to is not None and getattr(reply_to, "forum_topic", False):
-        tid = getattr(reply_to, "reply_to_msg_id", None)
+        tid = (getattr(reply_to, "reply_to_top_id", None)
+               or getattr(reply_to, "reply_to_msg_id", None))
         if tid:
             return int(tid)
     action = getattr(msg, "action", None)
@@ -273,17 +276,19 @@ async def pull_chat(
     Почему одним проходом: в форуме сообщения General не имеют reply_to, поэтому
     по темам через iter_messages(reply_to=...) они недостижимы. Проход по всей
     группе с разбиением по reply_to.top_msg_id ловит и темы, и General.
+
+    since_ts — граница окна (--days): идём от свежих вниз и останавливаемся,
+    как только сообщение старше границы.
     """
-    kwargs: dict[str, Any] = {}
-    if since_ts:
-        kwargs["offset_date"] = datetime.fromtimestamp(since_ts, tz=timezone.utc)
     attempt = 0
     while True:  # FloodWait: повторяем проход; вставки идемпотентны
         new = seen = 0
         max_id = min_id
         per_topic: dict[Optional[int], int] = {}
         try:
-            async for msg in client.iter_messages(chat_id, limit=limit, **kwargs):
+            async for msg in client.iter_messages(chat_id, limit=limit):
+                if since_ts and msg.date is not None and int(msg.date.timestamp()) < since_ts:
+                    break
                 if msg.id <= min_id:
                     break
                 seen += 1
@@ -658,11 +663,13 @@ async def run(
                     )
                 reports.append(rep)
         for rep in reports:
-            parts = ", ".join(
-                f"{t['title'] or 'без темы'}:{t['new']}" for t in rep["topics"]
-            )
+            top = rep["topics"][:8]
+            parts = ", ".join(f"{t['title'] or 'без темы'}:{t['new']}" for t in top)
+            rest = len(rep["topics"]) - len(top)
+            tail = f" … ещё тем: {rest}" if rest > 0 else ""
             bf = f"  backfill+{rep['backfill']['new']}" if rep.get("backfill") else ""
-            print(f"  {rep['chat_id']}  {rep['title']!r}  новых {rep['new_messages']}  [{parts}]{bf}")
+            print(f"  {rep['chat_id']}  {rep['title']!r}  новых {rep['new_messages']}  "
+                  f"[{parts}{tail}]{bf}")
     if own_client:
         await client.disconnect()
     return {"chats": reports, "dry_run": dry_run}
