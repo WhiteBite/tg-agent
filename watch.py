@@ -13,6 +13,7 @@
      python3 watch.py add --chat @mygroup --topic 789 --alias "Релизы"
      python3 watch.py list
      python3 watch.py remove --chat @mygroup --topic 789
+      python3 watch.py project --chat @mygroup --topic 789 --project "стройка"
 
 Дальше агент в opencode видит только отмеченное: инструмент tg_watch показывает
 ему список с твоими алиасами.
@@ -76,22 +77,36 @@ async def cmd_topics(args) -> None:
     await client.disconnect()
 
 
-def cmd_add(args) -> None:
-    chat_id = args.chat_id
-    if chat_id is None:
-        # разрешаем @username, если группа уже есть в индексе
-        with DB(args.db) as db:
-            found = db.chats(query=args.chat.lstrip("@"), limit=5)
-        exact = [c for c in found if (c["username"] or "").lower() == args.chat.lstrip("@").lower()]
-        if not exact:
-            raise SystemExit(
-                f"группа {args.chat!r} не найдена в индексе. Сначала sync.py --chat {args.chat}, "
-                f"либо передай --chat-id <числовой id> (его печатает watch.py topics)."
-            )
-        chat_id = exact[0]["id"]
+def _resolve_chat_id(args) -> int:
+    if args.chat_id is not None:
+        return args.chat_id
+    if args.chat is None:
+        raise SystemExit("нужен --chat @username или --chat-id <числовой id>")
+    # разрешаем @username, если группа уже есть в индексе
     with DB(args.db) as db:
-        db.watch_add(chat_id, args.topic, alias=args.alias, pinned=args.pin)
+        found = db.chats(query=args.chat.lstrip("@"), limit=5)
+    exact = [c for c in found if (c["username"] or "").lower() == args.chat.lstrip("@").lower()]
+    if not exact:
+        raise SystemExit(
+            f"группа {args.chat!r} не найдена в индексе. Сначала sync.py --chat {args.chat}, "
+            f"либо передай --chat-id <числовой id> (его печатает watch.py topics)."
+        )
+    return exact[0]["id"]
+
+
+def cmd_add(args) -> None:
+    chat_id = _resolve_chat_id(args)
+    with DB(args.db) as db:
+        db.watch_add(chat_id, args.topic, alias=args.alias, pinned=args.pin, project=args.project)
         print(f"+ {chat_id}/{args.topic}" + (f"  alias={args.alias!r}" if args.alias else ""))
+        _print_watch(db, chat_id)
+
+
+def cmd_project(args) -> None:
+    chat_id = _resolve_chat_id(args)
+    with DB(args.db) as db:
+        ok = db.watch_set_project(chat_id, args.topic, args.project)
+        print(f"project={args.project!r}" if ok else "! темы нет в watch-листе — сначала add")
         _print_watch(db, chat_id)
 
 
@@ -111,6 +126,8 @@ def _print_watch(db: DB, chat_id: Optional[int] = None) -> None:
     print(f"\n{'chat_id':>14}  {'topic':>7}  {'всего':>7}  {'новых':>6}  {'последнее':>10}  алиас / тема")
     for w in rows:
         label = w["alias"] or w["topic_title"] or "без темы"
+        if w["project"]:
+            label += f"  [{w['project']}]"
         pin = "★ " if w["pinned"] else "  "
         print(f"{w['chat_id']:>14}  {w['topic_id']:>7}  {w['total'] or 0:>7}  "
               f"{w['new_since_read'] or 0:>6}  {_fmt_ts(w['last_ts']):>10}  {pin}{label}")
@@ -135,6 +152,13 @@ def main() -> None:
     a.add_argument("--topic", type=int, required=True, help="id темы (0/1 = General, 0 = группа без тем)")
     a.add_argument("--alias", help="человеческое имя — его увидит агент")
     a.add_argument("--pin", action="store_true", help="показывать первым")
+    a.add_argument("--project", help="привязать тему к проекту")
+
+    pr = sub.add_parser("project", help="назначить проект теме из watch-листа")
+    pr.add_argument("--chat", help="@username (если группа уже в индексе)")
+    pr.add_argument("--chat-id", type=int, help="числовой id группы")
+    pr.add_argument("--topic", type=int, required=True, help="id темы (0/1 = General)")
+    pr.add_argument("--project", required=True, help="имя проекта")
 
     r = sub.add_parser("remove", help="убрать из watch-листа")
     r.add_argument("--chat-id", type=int, required=True)
@@ -147,6 +171,8 @@ def main() -> None:
         asyncio.run(cmd_topics(args))
     elif args.cmd == "add":
         cmd_add(args)
+    elif args.cmd == "project":
+        cmd_project(args)
     elif args.cmd == "remove":
         cmd_remove(args)
     else:

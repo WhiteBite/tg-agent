@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS watch (
     pinned      INTEGER DEFAULT 0,
     last_read   INTEGER DEFAULT 0,
     added_at    INTEGER,
+    project     TEXT,
     PRIMARY KEY (chat_id, topic_id)
 );
 
@@ -110,6 +111,61 @@ CREATE TABLE IF NOT EXISTS folder_chats (
     chat_id   INTEGER NOT NULL,
     PRIMARY KEY (folder_id, chat_id)
 );
+
+-- сущности, извлечённые из переписки: сами сущности, их события и прогоны экстрактора
+CREATE TABLE IF NOT EXISTS entities (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    pack        TEXT NOT NULL,
+    chat_id     INTEGER NOT NULL,
+    topic_id    INTEGER NOT NULL DEFAULT 1,
+    kind        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    body        TEXT,
+    status      TEXT NOT NULL DEFAULT 'open',
+    owner       TEXT,
+    due_ts      INTEGER,
+    project     TEXT,
+    confidence  REAL,
+    attrs_json  TEXT,
+    dedup_key   TEXT,
+    created_ts  INTEGER,
+    updated_ts  INTEGER,
+    closed_ts   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS entity_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id   INTEGER NOT NULL,
+    run_id      INTEGER,
+    ts          INTEGER NOT NULL,
+    op          TEXT NOT NULL,
+    field       TEXT,
+    from_val    TEXT,
+    to_val      TEXT,
+    chat_id     INTEGER,
+    msg_id      INTEGER,
+    quote       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS extraction_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    pack          TEXT NOT NULL,
+    chat_id       INTEGER NOT NULL,
+    topic_id      INTEGER NOT NULL,
+    from_msg      INTEGER,
+    upto_msg      INTEGER,
+    ts            INTEGER,
+    ops_applied   INTEGER DEFAULT 0,
+    ops_rejected  INTEGER DEFAULT 0,
+    status        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_ent_scope   ON entities (pack, chat_id, topic_id, status);
+CREATE INDEX IF NOT EXISTS ix_ent_overdue ON entities (due_ts) WHERE closed_ts IS NULL AND due_ts IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_ent_project ON entities (pack, project, status);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_ent_dedup ON entities (pack, chat_id, topic_id, dedup_key) WHERE closed_ts IS NULL;
+CREATE INDEX IF NOT EXISTS ix_ev_entity   ON entity_events (entity_id, ts);
+CREATE INDEX IF NOT EXISTS ix_ev_msg      ON entity_events (chat_id, msg_id);
 
 -- дайджесты: LLM-выжимки новых сообщений по watch-листу
 CREATE TABLE IF NOT EXISTS digests (
@@ -169,6 +225,7 @@ class DB:
         except sqlite3.OperationalError:
             self.fts = False  # поиск уедет на LIKE
         self._migrate_marked_ids()
+        self._migrate_watch_project()
         self.conn.commit()
 
     def close(self) -> None:
@@ -191,6 +248,9 @@ class DB:
         ("refs", "chat_id, msg_id, kind, value"),
         ("folder_chats", "folder_id, chat_id"),
         ("pins", "chat_id, msg_id, topic_id, ts, sender_name, text"),
+        ("entities", "pack, chat_id, topic_id, kind, title, body, status, owner, due_ts, "
+                     "project, confidence, attrs_json, dedup_key, created_ts, updated_ts, closed_ts"),
+        ("entity_events", "entity_id, run_id, ts, op, field, from_val, to_val, chat_id, msg_id, quote"),
     )
 
     def _migrate_marked_ids(self) -> None:
@@ -241,6 +301,12 @@ class DB:
                     self.conn.execute("UPDATE meta SET key=? WHERE key=?", (new_key, r["key"]))
         self.conn.commit()
         self.conn.execute("DROP TABLE id_map")
+
+    def _migrate_watch_project(self) -> None:
+        try:
+            self.conn.execute("ALTER TABLE watch ADD COLUMN project TEXT")
+        except sqlite3.OperationalError:
+            pass
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
@@ -727,16 +793,26 @@ class DB:
     # ---------------- watch-лист (то, за чем следит агент) ----------------
 
     def watch_add(self, chat_id: int, topic_id: int, alias: Optional[str] = None,
-                  pinned: bool = False) -> None:
+                  pinned: bool = False, project: Optional[str] = None) -> None:
         # 0 и 1 — это одно и то же: General / группа без тем. Храним канонически 1.
         topic_id = 1 if topic_id in (0, 1) else topic_id
         self.conn.execute(
-            "INSERT INTO watch(chat_id, topic_id, alias, pinned, added_at) VALUES(?,?,?,?,?) "
+            "INSERT INTO watch(chat_id, topic_id, alias, pinned, added_at, project) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(chat_id, topic_id) DO UPDATE SET "
-            "alias = COALESCE(excluded.alias, watch.alias), pinned = excluded.pinned",
-            (chat_id, topic_id, alias, int(pinned), int(time.time())),
+            "alias = COALESCE(excluded.alias, watch.alias), pinned = excluded.pinned, "
+            "project = COALESCE(excluded.project, watch.project)",
+            (chat_id, topic_id, alias, int(pinned), int(time.time()), project),
         )
         self.conn.commit()
+
+    def watch_set_project(self, chat_id: int, topic_id: int, project: Optional[str]) -> bool:
+        topic_id = 1 if topic_id in (0, 1) else topic_id
+        cur = self.conn.execute(
+            "UPDATE watch SET project = ? WHERE chat_id = ? AND topic_id = ?",
+            (project, chat_id, topic_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def watch_remove(self, chat_id: int, topic_id: int) -> bool:
         topic_id = 1 if topic_id in (0, 1) else topic_id
@@ -824,6 +900,52 @@ class DB:
             "max_id": max_id,
             "messages": out,
         }
+
+    # ---------------- сущности, извлечённые из переписки (читает агент) ----------------
+
+    def entities_list(self, pack: Optional[str] = None, kind: Optional[str] = None,
+                      status: Optional[str] = None, project: Optional[str] = None,
+                      chat_id: Optional[int] = None, limit: int = 100) -> list[dict]:
+        sql = "SELECT * FROM entities WHERE 1=1"
+        args: list[Any] = []
+        if pack is not None:
+            sql += " AND pack = ?"
+            args.append(pack)
+        if kind is not None:
+            sql += " AND kind = ?"
+            args.append(kind)
+        if status is not None:
+            sql += " AND status = ?"
+            args.append(status)
+        if project is not None:
+            sql += " AND project = ?"
+            args.append(project)
+        if chat_id is not None:
+            sql += " AND chat_id = ?"
+            args.append(chat_id)
+        sql += " ORDER BY updated_ts DESC LIMIT ?"
+        args.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, args)]
+
+    def entity_get(self, entity_id: int) -> Optional[dict]:
+        row = self.conn.execute("SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["events"] = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM entity_events WHERE entity_id = ? ORDER BY ts, id", (entity_id,))]
+        return d
+
+    def entity_overdue(self, project: Optional[str] = None, days_ahead: int = 0,
+                       limit: int = 100) -> list[dict]:
+        sql = "SELECT * FROM entities WHERE closed_ts IS NULL AND due_ts IS NOT NULL AND due_ts <= ?"
+        args: list[Any] = [int(time.time()) + days_ahead * 86400]
+        if project is not None:
+            sql += " AND project = ?"
+            args.append(project)
+        sql += " ORDER BY due_ts LIMIT ?"
+        args.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, args)]
 
     # ---------------- полнотекстовый поиск по истории ----------------
 

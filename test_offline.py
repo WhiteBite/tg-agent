@@ -640,6 +640,64 @@ def test_watch(db_path: Path) -> None:
               "sync --watched: только чаты из watch-листа", str(watched_ids))
 
 
+def test_entities_schema(db_path: Path) -> None:
+    print("=== entities: схема, watch.project, read-хелперы ===")
+    ent_db = db_path.parent / "entities_schema.sqlite"
+    if ent_db.exists():
+        ent_db.unlink()
+    now = int(time.time())
+    with DB(ent_db) as db:
+        want = {"entities", "entity_events", "extraction_runs"}
+        names = {r["name"] for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        check(want <= names, "entities: три таблицы в схеме", str(sorted(want - names)))
+        cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(watch)")}
+        check("project" in cols, "watch: колонка project в схеме", str(sorted(cols)))
+
+        db.watch_add(-100555, 1, alias="прораб", project="стройка")
+        w = next(x for x in db.watch_list() if x["chat_id"] == -100555)
+        check(w.get("project") == "стройка",
+              "watch_add: project round-trip через watch_list", str(w.get("project")))
+
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, project, due_ts, created_ts, updated_ts) "
+            "VALUES(1, 'demo', -100555, 1, 'task', 'Закрыть контур', 'open', 'стройка', ?, ?, ?)",
+            (now - 86400, now - 100, now - 10))
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, ts, op) VALUES(1, ?, 'create')", (now - 100,))
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, ts, op, field, to_val) VALUES(1, ?, 'update', 'owner', 'ИП Смирнов')",
+            (now,))
+        db.conn.commit()
+        e = db.entity_get(1)
+        check(e is not None and e["title"] == "Закрыть контур", "entity_get: сущность найдена")
+        evs = (e or {}).get("events", [])
+        check(len(evs) == 2 and evs[0]["op"] == "create" and evs[1]["op"] == "update",
+              "entity_get: события упорядочены по ts", str([x.get("op") for x in evs]))
+
+        check(len(db.entities_list(kind="task")) == 1, "entities_list: фильтр kind")
+        check(db.entities_list(kind="risk") == [], "entities_list: чужой kind пуст")
+        check(len(db.entities_list(status="open", project="стройка")) == 1,
+              "entities_list: фильтры status+project")
+        check(db.entities_list(project="монтаж") == [], "entities_list: чужой project пуст")
+
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, due_ts, created_ts, updated_ts, closed_ts) "
+            "VALUES(2, 'demo', -100555, 1, 'task', 'Сделано', 'done', ?, ?, ?, ?)",
+            (now - 86400, now - 200, now - 50, now - 50))
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, due_ts, created_ts, updated_ts) "
+            "VALUES(3, 'demo', -100555, 1, 'task', 'На неделе', 'open', ?, ?, ?)",
+            (now + 3 * 86400, now - 200, now - 50))
+        db.conn.commit()
+        od = db.entity_overdue()
+        check([x["id"] for x in od] == [1],
+              "entity_overdue: только просроченная открытая", str([x["id"] for x in od]))
+    with DB(ent_db) as db:
+        n = len(db.entities_list())
+        check(n == 3, "entities: повторное открытие БД идемпотентно", str(n))
+
+
 # ------------------------------------------- 5. настоящий server.py по MCP stdio
 
 def rpc(proc: subprocess.Popen, payload: dict) -> None:
@@ -1180,7 +1238,9 @@ def test_ui_security(db_path: Path) -> None:
             db.conn.commit()
 
     # HOST=0.0.0.0 без токена — подниматься отказывается
-    env2 = {**os.environ, "TG_DB": str(db_path), "PORT": str(port), "HOST": "0.0.0.0"}
+    # PYTHONIOENCODING: отказ печатается по-русски, без utf-8 чтение пайпа падает на Windows
+    env2 = {**os.environ, "TG_DB": str(db_path), "PORT": str(port), "HOST": "0.0.0.0",
+            "PYTHONIOENCODING": "utf-8"}
     proc2 = subprocess.Popen([sys.executable, "ui.py"], env=env2,
                              cwd=str(Path(__file__).parent),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1594,6 +1654,7 @@ def main() -> int:
     test_marked_ids(db_path)
     test_reads(db_path)
     test_watch(db_path)
+    test_entities_schema(db_path)
     test_live_and_poll(db_path)
     test_gates(db_path)
     test_strict_and_doctor(db_path)
