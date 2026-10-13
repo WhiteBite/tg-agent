@@ -21,6 +21,9 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# тесты герметичны: пользовательский .env (реальные ключи) не читается ни здесь, ни в подпроцессах
+os.environ["TG_ENV_FILE"] = ""
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from db import DB, run_sql  # noqa: E402
@@ -1360,6 +1363,20 @@ def test_env_loader(db_path: Path) -> None:
               "env: write_env обновляет ключ и не трогает остальные",
               f"{os.environ.get('API_TEST_TWO')}/{os.environ.get('API_TEST_ONE')}")
 
+        # TG_ENV_FILE управляет тем, какой файл читать ("" — не читать вовсе)
+        knob = db_path.parent / "test_knob.env"
+        knob.write_text("API_KNOB=1\n", encoding="utf-8")
+        os.environ.pop("API_KNOB", None)
+        os.environ["TG_ENV_FILE"] = ""
+        load_env()
+        check("API_KNOB" not in os.environ, "env: TG_ENV_FILE='' отключает чтение .env")
+        os.environ["TG_ENV_FILE"] = str(knob)
+        load_env()
+        check(os.environ.get("API_KNOB") == "1", "env: TG_ENV_FILE указывает конкретный файл")
+        os.environ["TG_ENV_FILE"] = ""
+        os.environ.pop("API_KNOB", None)
+        knob.unlink(missing_ok=True)
+
         # бутстрап логина: спросил один раз -> записал -> больше не спрашивает
         import builtins
         import login as login_mod
@@ -1392,6 +1409,60 @@ def test_env_loader(db_path: Path) -> None:
         u16.unlink(missing_ok=True)
 
 
+def test_login_2fa(db_path: Path) -> None:
+    print("=== login: 2FA-пароль не роняет и не гоняет QR заново ===")
+    import login as login_mod
+    from telethon.errors import PasswordHashInvalidError
+
+    class FakeSession:
+        def __init__(self, key):
+            self.auth_key = key
+
+    class FakeLoginClient:
+        def __init__(self, keys, auth_key=None):
+            self._keys = list(keys)
+            self.calls = 0
+            self.session = FakeSession(auth_key)
+
+        async def sign_in(self, password=None):
+            self.calls += 1
+            k = self._keys.pop(0) if self._keys else None
+            if isinstance(k, Exception):
+                raise k
+
+    bad = PasswordHashInvalidError(None)
+    orig = login_mod.getpass.getpass
+    try:
+        # две опечатки -> третья верная
+        fc = FakeLoginClient([bad, bad, None])
+        answers = iter(["a", "b", "c"])
+        login_mod.getpass.getpass = lambda prompt="": next(answers)
+        ok = asyncio.run(login_mod._password_flow(fc))
+        check(ok is True and fc.calls == 3,
+              "login: неверный пароль -> повторный вопрос, не падение", str(fc.calls))
+
+        # три промаха -> честный False (вызывающий скажет, что делать)
+        fc2 = FakeLoginClient([bad, bad, bad])
+        answers2 = iter(["a", "b", "c"])
+        login_mod.getpass.getpass = lambda prompt="": next(answers2)
+        ok2 = asyncio.run(login_mod._password_flow(fc2))
+        check(ok2 is False and fc2.calls == 3, "login: после 3 промахов — False, без исключения")
+
+        # пустой ввод не расходует попытку
+        fc3 = FakeLoginClient([None])
+        answers3 = iter(["", "верный"])
+        login_mod.getpass.getpass = lambda prompt="": next(answers3)
+        ok3 = asyncio.run(login_mod._password_flow(fc3))
+        check(ok3 is True and fc3.calls == 1,
+              "login: пустой ввод не тратит попытку", str(fc3.calls))
+
+        check(login_mod._needs_password(FakeLoginClient([], auth_key=None)) is False
+              and login_mod._needs_password(FakeLoginClient([], auth_key=object())) is True,
+              "login: _needs_password определяет принятый QR по auth_key")
+    finally:
+        login_mod.getpass.getpass = orig
+
+
 def main() -> int:
     import tempfile
     try:
@@ -1420,6 +1491,7 @@ def main() -> int:
     test_marked_migration(db_path)
     test_build_state_last(db_path)
     test_env_loader(db_path)
+    test_login_2fa(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

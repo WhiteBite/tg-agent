@@ -89,12 +89,38 @@ async def _sign_in(client) -> None:
         await client.start(phone=os.environ.get("TELEGRAM_PHONE"))
 
 
+def _needs_password(client) -> bool:
+    """QR уже импортирован (auth_key есть), но юзер не авторизован -> ждём облачный пароль."""
+    return client.session.auth_key is not None
+
+
+async def _password_flow(client) -> bool:
+    """Спрашивает 2FA-пароль до трёх раз; True — вошли."""
+    from telethon.errors import PasswordHashInvalidError
+
+    fails = 0
+    while fails < 3:
+        pw = getpass.getpass("2FA-пароль (Telegram → Настройки → Приватность → "
+                             "Двухэтапная проверка): ")
+        if not pw:
+            print("пустой ввод — введи пароль (Ctrl-C чтобы выйти)")
+            continue
+        try:
+            await client.sign_in(password=pw)
+            return True
+        except PasswordHashInvalidError:
+            fails += 1
+            print(f"пароль не подошёл ({fails}/3); проверь раскладку — ввод не отображается")
+    return False
+
+
 async def _finish(client, export: bool, session_name: str) -> None:
     from telethon.sessions import StringSession
 
     if not await client.is_user_authorized():
-        pw = getpass.getpass("2FA-пароль: ")
-        await client.sign_in(password=pw)
+        if not await _password_flow(client):
+            raise SystemExit("пароль не подошёл 3 раза. Сбрось/смени его в Telegram "
+                             "(Настройки → Приватность → Двухэтапная проверка) и запусти login.py заново")
 
     me = await client.get_me()
     sp = Path(session_name + ".session")
@@ -118,6 +144,8 @@ def main() -> None:
             print("уже авторизован — входить не нужно")
         elif use_phone:
             await client.start(phone=os.environ.get("TELEGRAM_PHONE"))
+        elif _needs_password(client):
+            print("QR уже принят ранее — остался только пароль")
         else:
             await _sign_in(client)
         await _finish(client, export, name)

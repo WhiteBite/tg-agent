@@ -21,7 +21,15 @@ def _read_text(p: Path) -> str:
 
 
 def load_env(path: Path | None = None) -> None:
-    p = path if path is not None else DEFAULT_PATH
+    if path is None:
+        override = os.environ.get("TG_ENV_FILE")
+        if override is not None:
+            if not override:
+                return  # TG_ENV_FILE="" — не читать .env вообще (тесты/CI)
+            path = Path(override)
+        else:
+            path = DEFAULT_PATH
+    p = path
     if not p.exists():
         return
     for line in _read_text(p).splitlines():
