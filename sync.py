@@ -614,7 +614,8 @@ async def run(
         sess = os.environ.get("TELEGRAM_SESSION_STRING")
         sess_name = os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session")
         if not api_id or not api_hash:
-            raise SystemExit("задай TELEGRAM_API_ID и TELEGRAM_API_HASH (https://my.telegram.org/apps)")
+            raise SystemExit("задай TELEGRAM_API_ID и TELEGRAM_API_HASH (https://my.telegram.org/apps) "
+                             "или запусти python login.py — спросит один раз и запомнит")
         session = StringSession(sess) if sess else sess_name
         client = TelegramClient(session, int(api_id), api_hash)
         await client.start(phone=os.environ.get("TELEGRAM_PHONE"))

@@ -1317,7 +1317,7 @@ def test_build_state_last(db_path: Path) -> None:
 
 def test_env_loader(db_path: Path) -> None:
     print("=== env: .env загрузчик ===")
-    from env import load_env
+    from env import load_env, write_env
 
     envf = db_path.parent / "test_env.env"
     envf.write_text(
@@ -1338,13 +1338,58 @@ def test_env_loader(db_path: Path) -> None:
               "env: не перекрывает уже заданное", os.environ["API_TEST_ONE"])
         load_env(db_path.parent / "nope.env")
         check(True, "env: отсутствующий файл — тихий no-op")
+
+        # notepad пишет BOM, Windows PowerShell — UTF-16: оба должны читаться
+        bom = db_path.parent / "test_bom.env"
+        bom.write_text("API_BOM=42\n", encoding="utf-8-sig")
+        os.environ.pop("API_BOM", None)
+        load_env(bom)
+        check(os.environ.get("API_BOM") == "42", "env: utf-8 c BOM читается")
+        u16 = db_path.parent / "test_u16.env"
+        u16.write_text("API_U16=43\n", encoding="utf-16")
+        os.environ.pop("API_U16", None)
+        load_env(u16)
+        check(os.environ.get("API_U16") == "43", "env: utf-16 (Out-File) читается")
+
+        # write_env обновляет свои ключи, не трогая чужие
+        os.environ.pop("API_TEST_ONE", None)
+        os.environ.pop("API_TEST_TWO", None)
+        write_env({"API_TEST_TWO": "новое"}, path=envf)
+        load_env(envf)
+        check(os.environ.get("API_TEST_TWO") == "новое" and os.environ.get("API_TEST_ONE") == "1",
+              "env: write_env обновляет ключ и не трогает остальные",
+              f"{os.environ.get('API_TEST_TWO')}/{os.environ.get('API_TEST_ONE')}")
+
+        # бутстрап логина: спросил один раз -> записал -> больше не спрашивает
+        import builtins
         import login as login_mod
+        bs = db_path.parent / "test_bootstrap.env"
+        bs.write_text("OTHER=1\n", encoding="utf-8")
+        answers = iter(["123", "deadbeef"])
+        orig_input = builtins.input
+        builtins.input = lambda prompt="": next(answers)
+        for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH"):
+            os.environ.pop(k, None)
+        try:
+            login_mod.ensure_creds(bs)
+            ok1 = os.environ.get("TELEGRAM_API_ID") == "123"
+            login_mod.ensure_creds(bs)  # второй вызов не должен спрашивать
+            ok2 = "OTHER=1" in bs.read_text(encoding="utf-8")
+            check(ok1 and ok2, "login: бутстрап спрашивает раз и не портит .env",
+                  str((os.environ.get("TELEGRAM_API_ID"), ok2)))
+        finally:
+            builtins.input = orig_input
+            for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH"):
+                os.environ.pop(k, None)
+            bs.unlink(missing_ok=True)
         check(callable(getattr(login_mod, "main", None)),
               "login: модуль импортируется офлайн (без сети)")
     finally:
-        for k in ("API_TEST_ONE", "API_TEST_TWO"):
+        for k in ("API_TEST_ONE", "API_TEST_TWO", "API_BOM", "API_U16"):
             os.environ.pop(k, None)
         envf.unlink(missing_ok=True)
+        bom.unlink(missing_ok=True)
+        u16.unlink(missing_ok=True)
 
 
 def main() -> int:

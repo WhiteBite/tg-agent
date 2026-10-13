@@ -114,14 +114,12 @@ python3 -m venv ~/.venvs/tg-agent
 
 `api_id` / `api_hash`: https://my.telegram.org/apps (бесплатно).
 
-Всё остальное — без ввода чего-либо руками. Скопируй шаблон и заполни ключи один раз:
-
-```bash
-cp .env.example .env    # и впиши TELEGRAM_API_ID / TELEGRAM_API_HASH / TG_DB
-```
-
-Все скрипты (sync / login / live / watch / server / ui / digest / doctor) читают
-`.env` сами; переменные окружения, если заданы, имеют приоритет.
+Больше ничего руками делать не надо: `login.py` при первом запуске сам спросит
+ключи и запомнит их в `.env` (файл в `.gitignore`). Хочешь заранее — скопируй
+`.env.example` в `.env` и заполни: все скрипты (sync / login / live / watch /
+server / ui / digest / doctor) читают `.env` сами, а переменные окружения,
+если заданы, имеют приоритет. Кодировка файла не важна: UTF-8, UTF-8 с BOM
+(notepad) и UTF-16 (Out-File в Windows PowerShell) читаются одинаково.
 
 ## Первый логин: один скан QR
 

@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from env import load_env  # noqa: E402
+from env import load_env, write_env  # noqa: E402
 
 load_env()
 
@@ -28,15 +28,27 @@ except Exception:
     pass
 
 
+def ensure_creds(env_path: Path | None = None) -> None:
+    """Нет ключей — спрашивает один раз и сохраняет в .env, дальше никогда."""
+    if os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH"):
+        return
+    print("Ключей ещё нет. Возьми на https://my.telegram.org/apps -> API development tools")
+    print("(Log in → Telegram Core → Create new application, ключи появятся справа).\n")
+    api_id = input("api_id: ").strip()
+    api_hash = input("api_hash: ").strip()
+    if not (api_id.isdigit() and api_hash):
+        raise SystemExit("ключи не похожи на настоящие — сохрани сам через .env и повтори")
+    write_env({"TELEGRAM_API_ID": api_id, "TELEGRAM_API_HASH": api_hash}, path=env_path)
+    load_env(env_path)
+    print("\nсохранено в .env: при следующих запусках не спросит")
+
+
 def _client():
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
     api_id = os.environ.get("TELEGRAM_API_ID")
     api_hash = os.environ.get("TELEGRAM_API_HASH")
-    if not api_id or not api_hash:
-        raise SystemExit("нет TELEGRAM_API_ID / TELEGRAM_API_HASH: заполни .env "
-                         "(шаблон .env.example, ключи — https://my.telegram.org/apps)")
     sess = os.environ.get("TELEGRAM_SESSION_STRING")
     name = os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session")
     return TelegramClient(StringSession(sess) if sess else name, int(api_id), api_hash), name
@@ -99,6 +111,7 @@ def main() -> None:
     export = "--export" in sys.argv
 
     async def run() -> None:
+        ensure_creds()
         client, name = _client()
         await client.connect()
         if await client.is_user_authorized():
@@ -109,7 +122,11 @@ def main() -> None:
             await _sign_in(client)
         await _finish(client, export, name)
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except (EOFError, ValueError) as exc:
+        raise SystemExit(f"не получилось спросить телефон/код ({exc}) — "
+                         "запусти в терминале и проверь ключи в .env")
 
 
 if __name__ == "__main__":
