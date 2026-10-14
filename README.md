@@ -287,6 +287,7 @@ EXTRACT_PROVIDER=stub python3 extract.py            # механический �
 EXTRACT_PROVIDER=stub python3 extract.py --dry-run  # показать операции, ничего не писать
 EXTRACT_PROVIDER=stub python3 extract.py --all-indexed  # все чаты индекса, не только watch
 python3 extract.py --pack services --until-done     # дожевать хвост за один запуск
+python3 extract.py --until-done --workers 6         # темы параллельно (EXTRACT_WORKERS)
 EXTRACT_PROVIDER=openai EXTRACT_URL=https://api.openai.com/v1 \
     EXTRACT_KEY=sk-... EXTRACT_MODEL=gpt-4o-mini python3 extract.py --pack construction
 ```
@@ -301,7 +302,10 @@ generic, предметная область описана декларатив
 «Acme Cloud trial» схлопываются в одну сущность). `services` прицелен в темы
 watch-листа с проектом «сервисы» (`watch.py add --project сервисы`) — не
 шумит в код-чатах; scope меняется в `packs/services.py`. `--until-done`
-крутит раунды (по 200 сообщений на тему), пока хвост истории не кончится.
+крутит раунды (по 200 сообщений на тему), пока хвост истории не кончится;
+`--workers N` (или `EXTRACT_WORKERS`) дожёвывает темы параллельно — разовая
+накачка базы на десятки тысяч сообщений вместо часов занимает минуты-десятки
+минут, а каждый скоуп коммитится независимо.
 
 По умолчанию область прогона — watch-лист; `--all-indexed` расширяет на все
 пары (chat, topic) индекса — для массовой обработки «кучи групп», без
