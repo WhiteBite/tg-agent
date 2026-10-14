@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS topics (
 CREATE TABLE IF NOT EXISTS messages (
     chat_id     INTEGER NOT NULL,
     msg_id      INTEGER NOT NULL,
-    topic_id    INTEGER,
+    topic_id    INTEGER NOT NULL DEFAULT 1,
     ts          INTEGER,
     date_iso    TEXT,
     sender_id   INTEGER,
@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS extraction_runs (
     ts            INTEGER,
     ops_applied   INTEGER DEFAULT 0,
     ops_rejected  INTEGER DEFAULT 0,
+    ops_overflow  INTEGER DEFAULT 0,
     status        TEXT
 );
 
@@ -247,6 +248,8 @@ class DB:
         self._migrate_marked_ids()
         self._migrate_watch_project()
         self._migrate_entity_status()
+        self._migrate_topic_ids()
+        self._migrate_ops_overflow()
         self.conn.commit()
 
     def close(self) -> None:
@@ -334,6 +337,18 @@ class DB:
         self.conn.execute(
             "UPDATE entities SET status='closed' "
             "WHERE closed_ts IS NOT NULL AND status <> 'closed'")
+
+    def _migrate_topic_ids(self) -> None:
+        """topic_id NOT NULL: старые базы писали NULL для «без темы» — это тот же
+        General (1). Индекс ix_msg_chat_topic используется только прямым
+        сравнением topic_id = ?, COALESCE его обходит."""
+        self.conn.execute("UPDATE messages SET topic_id = 1 WHERE topic_id IS NULL")
+
+    def _migrate_ops_overflow(self) -> None:
+        try:
+            self.conn.execute("ALTER TABLE extraction_runs ADD COLUMN ops_overflow INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
@@ -521,7 +536,7 @@ class DB:
         return (
             msg["chat_id"],
             msg["msg_id"],
-            msg.get("topic_id"),
+            int(msg.get("topic_id") or 1),
             msg.get("ts"),
             msg.get("date_iso"),
             msg.get("sender_id"),
@@ -576,13 +591,13 @@ class DB:
         self.conn.execute(
             """
             INSERT INTO topics(chat_id, topic_id, title, closed, messages, last_ts)
-            SELECT chat_id, COALESCE(topic_id, ?), 'General', 0, COUNT(*), MAX(ts)
+            SELECT chat_id, topic_id, 'General', 0, COUNT(*), MAX(ts)
             FROM messages WHERE chat_id = ?
-            GROUP BY chat_id, COALESCE(topic_id, ?)
+            GROUP BY chat_id, topic_id
             ON CONFLICT(chat_id, topic_id) DO UPDATE SET
                 messages = excluded.messages, last_ts = excluded.last_ts
             """,
-            (general_id, chat_id, general_id),
+            (chat_id,),
         )
         self.conn.commit()
 
@@ -606,7 +621,7 @@ class DB:
             """
             SELECT t.*, (SELECT COUNT(*) FROM messages m
                          WHERE m.chat_id = t.chat_id
-                           AND COALESCE(m.topic_id, 1) = t.topic_id) AS local_count
+                           AND m.topic_id = t.topic_id) AS local_count
             FROM topics t WHERE t.chat_id = ? ORDER BY t.topic_id
             """,
             (chat_id,),
@@ -620,7 +635,7 @@ class DB:
             """
             SELECT t.*, (SELECT COUNT(*) FROM messages m
                          WHERE m.chat_id = t.chat_id
-                           AND COALESCE(m.topic_id, 1) = t.topic_id) AS local_count
+                           AND m.topic_id = t.topic_id) AS local_count
             FROM topics t ORDER BY t.chat_id, t.topic_id
             """
         ):
@@ -642,11 +657,9 @@ class DB:
         sql = "SELECT * FROM messages WHERE chat_id = ?"
         args: list[Any] = [chat_id]
         if topic_id is not None:
-            if topic_id in (0, 1):
-                sql += " AND COALESCE(topic_id, 1) = 1"  # General: и без темы, и явная 1
-            else:
-                sql += " AND topic_id = ?"
-                args.append(topic_id)
+            # 0 и 1 — General: сообщения без темы хранятся канонически как 1
+            sql += " AND topic_id = ?"
+            args.append(1 if topic_id in (0, 1) else topic_id)
         if since_ts:
             sql += " AND ts >= ?"
             args.append(since_ts)
@@ -698,7 +711,7 @@ class DB:
             sql += f" AND m.chat_id IN ({','.join('?' * len(chat_ids))})"
             args.extend(chat_ids)
         if topic_id is not None:
-            sql += " AND COALESCE(m.topic_id, 1) = ?"
+            sql += " AND m.topic_id = ?"
             args.append(1 if topic_id in (0, 1) else topic_id)
         sql += " ORDER BY m.ts DESC LIMIT ?"
         args.append(limit)
@@ -720,7 +733,7 @@ class DB:
         rows = self.conn.execute(
             f"""
             SELECT msg_id, date_iso, sender_name, text FROM messages
-            WHERE chat_id = ? AND COALESCE(topic_id,1) = COALESCE(?,1)
+            WHERE chat_id = ? AND topic_id = COALESCE(?, 1)
               AND (ts, msg_id) {op} (?, ?)
             ORDER BY ts {order}, msg_id {order} LIMIT ?
             """,
@@ -739,8 +752,8 @@ class DB:
         where = "WHERE chat_id = ?"
         args: list[Any] = [chat_id]
         if topic_id is not None:
-            where += " AND COALESCE(topic_id,1) = ?"
-            args.append(topic_id)
+            where += " AND topic_id = ?"
+            args.append(1 if topic_id in (0, 1) else topic_id)
         if since_ts:
             where += " AND ts >= ?"
             args.append(since_ts)
@@ -752,14 +765,14 @@ class DB:
         by_topic = [
             dict(r)
             for r in self.conn.execute(
-                f"""SELECT COALESCE(topic_id,1) AS topic_id,
+                f"""SELECT topic_id,
                            (SELECT title FROM topics t
-                             WHERE t.chat_id = ? AND t.topic_id = COALESCE(messages.topic_id,0)) AS title,
+                             WHERE t.chat_id = ? AND t.topic_id = messages.topic_id) AS title,
                            COUNT(*) AS n,
                            COUNT(DISTINCT sender_id) AS senders,
                            MAX(ts) AS last_ts
                     FROM messages {where}
-                    GROUP BY COALESCE(topic_id,1) ORDER BY n DESC""",
+                    GROUP BY topic_id ORDER BY n DESC""",
                 [chat_id] + args,
             )
         ]
@@ -852,7 +865,7 @@ class DB:
     def watched_pairs(self) -> set[tuple[int, int]]:
         """Пары (chat_id, topic_id) из watch-листа; тема General нормализована в 1."""
         return {(r["chat_id"], r["topic_id"]) for r in self.conn.execute(
-            "SELECT chat_id, COALESCE(topic_id, 1) AS topic_id FROM watch")}
+            "SELECT chat_id, topic_id FROM watch")}
 
     def watch_list(self, chat_id: Optional[int] = None) -> list[dict]:
         sql = """
@@ -860,12 +873,12 @@ class DB:
                    (SELECT title FROM topics t
                      WHERE t.chat_id = w.chat_id AND t.topic_id = w.topic_id) AS topic_title,
                    (SELECT COUNT(*) FROM messages m
-                     WHERE m.chat_id = w.chat_id AND COALESCE(m.topic_id,1) = w.topic_id) AS total,
+                     WHERE m.chat_id = w.chat_id AND m.topic_id = w.topic_id) AS total,
                    (SELECT COUNT(*) FROM messages m
-                     WHERE m.chat_id = w.chat_id AND COALESCE(m.topic_id,1) = w.topic_id
+                     WHERE m.chat_id = w.chat_id AND m.topic_id = w.topic_id
                        AND m.msg_id > w.last_read) AS new_since_read,
                    (SELECT MAX(ts) FROM messages m
-                     WHERE m.chat_id = w.chat_id AND COALESCE(m.topic_id,1) = w.topic_id) AS last_ts
+                     WHERE m.chat_id = w.chat_id AND m.topic_id = w.topic_id) AS last_ts
             FROM watch w LEFT JOIN chats c ON c.id = w.chat_id
         """
         args: list[Any] = []
@@ -897,7 +910,7 @@ class DB:
         rows = self.conn.execute(
             """
             SELECT * FROM messages
-            WHERE chat_id = ? AND COALESCE(topic_id,1) = ? AND msg_id > ?
+            WHERE chat_id = ? AND topic_id = ? AND msg_id > ?
             ORDER BY msg_id LIMIT ?
             """,
             (chat_id, topic_id, last_read, limit),
@@ -914,7 +927,7 @@ class DB:
             out.append(d)
             max_id = max(max_id, d["msg_id"])
         pending = self.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE chat_id=? AND COALESCE(topic_id,1)=? AND msg_id > ?",
+            "SELECT COUNT(*) FROM messages WHERE chat_id=? AND topic_id=? AND msg_id > ?",
             (chat_id, topic_id, last_read),
         ).fetchone()[0]
         return {

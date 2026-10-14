@@ -105,7 +105,7 @@ def run(db_path: str = DB_PATH) -> list[dict]:
             row = db.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
             upto = int(row["value"]) if row else 0
             rows = [dict(r) for r in db.conn.execute(
-                "SELECT * FROM messages WHERE chat_id=? AND COALESCE(topic_id,1)=? "
+                "SELECT * FROM messages WHERE chat_id=? AND topic_id=? "
                 "AND msg_id>? AND is_service=0 ORDER BY msg_id",
                 (w["chat_id"], w["topic_id"], upto))]
             if not rows:

@@ -240,7 +240,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = db.conn.execute(
                         """SELECT msg_id, topic_id, ts, date_iso, sender_name, is_service,
                                   text, media, reply_to FROM messages
-                           WHERE chat_id=? AND COALESCE(topic_id,1)=? AND ts<=?
+                           WHERE chat_id=? AND topic_id=? AND ts<=?
                            ORDER BY msg_id DESC LIMIT ?""",
                         (chat, 1 if topic in (0, 1) else topic, around, limit),
                     ).fetchall()
@@ -248,7 +248,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = db.conn.execute(
                         """SELECT msg_id, topic_id, ts, date_iso, sender_name, is_service,
                                   text, media, reply_to FROM messages
-                           WHERE chat_id=? AND COALESCE(topic_id,1)=? AND (?=0 OR msg_id<?)
+                           WHERE chat_id=? AND topic_id=? AND (?=0 OR msg_id<?)
                            ORDER BY msg_id DESC LIMIT ?""",
                         (chat, 1 if topic in (0, 1) else topic, before, before, limit),
                     ).fetchall()
@@ -356,7 +356,7 @@ class Handler(BaseHTTPRequestHandler):
                 chat, topic = int(b["chat_id"]), int(b["topic_id"])
                 with _db() as db:
                     row = db.conn.execute(
-                        "SELECT MAX(msg_id) m FROM messages WHERE chat_id=? AND COALESCE(topic_id,1)=?",
+                        "SELECT MAX(msg_id) m FROM messages WHERE chat_id=? AND topic_id=?",
                         (chat, 1 if topic in (0, 1) else topic)).fetchone()
                     ok = bool(row and row["m"] and db.watch_mark_read(chat, topic, row["m"]))
                 self._json({"ok": ok})

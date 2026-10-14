@@ -194,7 +194,7 @@ def main():
         # «прочитано до» чуть ниже верхушки — будет непрочитанное
         for chat, tid in [(e1.id, 13), (e1.id, 12), (e2.id, 2), (e2.id, 5)]:
             row = db.conn.execute(
-                "SELECT MAX(msg_id) m FROM messages WHERE chat_id=? AND COALESCE(topic_id,1)=?",
+                "SELECT MAX(msg_id) m FROM messages WHERE chat_id=? AND topic_id=?",
                 (chat, tid)).fetchone()
             if row and row["m"]:
                 db.watch_mark_read(chat, tid, max(0, row["m"] - 4))
