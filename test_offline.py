@@ -130,6 +130,13 @@ class ForumTopicsRes:
         self.topics = topics
 
 
+class GlobalRes:  # подмена ответа messages.SearchGlobalRequest
+    def __init__(self, chats=(), users=()):
+        self.chats = list(chats)
+        self.users = list(users)
+        self.messages = []
+
+
 class FakeGetForumTopicsRequest:  # подмена messages.GetForumTopicsRequest
     def __init__(self, **kw):
         self.kw = kw
@@ -163,6 +170,10 @@ class FakeClient:
         self.groups = groups  # chat_id -> {"entity":..., "messages":[...]}
         self.folders = folders or {}
         self.flood_once = False
+        self.flood_mid = 0  # >0: FloodWait после N-го сообщения первой итерации
+        self.global_chats: list = []   # ответ на SearchGlobalRequest
+        self.global_users: list = []
+        self.last_global_req = None
         self.folder_filters = [(fid, t, ids) for fid, ids in (folders or {}).items()
                                for t in ({7: "AI Agent", 3: "Dev"}.get(fid, f"папка{fid}"),)]
 
@@ -208,7 +219,13 @@ class FakeClient:
         msgs = sorted(msgs, key=lambda m: m.id, reverse=not reverse)
         if limit:
             msgs = msgs[:limit]
-        for m in msgs:
+        for i, m in enumerate(msgs):
+            if self.flood_mid and i == self.flood_mid:
+                self.flood_mid = 0
+                from telethon.errors import FloodWaitError
+                e = FloodWaitError(None, 0)
+                e.seconds = 0
+                raise e
             yield m
 
     async def get_messages(self, entity, limit=None, filter=None, **kw):
@@ -232,6 +249,19 @@ class FakeClient:
         if name == "GetDialogFiltersRequest":
             return [FakeFilter(fid, title, [FakePeerChat(abs(c)) for c in chats])
                     for fid, title, chats in self.folder_filters]
+        if name == "SearchGlobalRequest":
+            self.last_global_req = req
+            chats = list(self.global_chats)
+            users = list(self.global_users)
+            if getattr(req, "broadcasts_only", None):
+                chats = [c for c in chats if getattr(c, "broadcast", False)]
+                users = []
+            elif getattr(req, "groups_only", None):
+                chats = [c for c in chats if not getattr(c, "broadcast", False)]
+                users = []
+            elif getattr(req, "users_only", None):
+                chats = []
+            return GlobalRes(chats, users)
         assert name == "GetForumTopicsRequest", name
         peer = getattr(req, "peer", None) or getattr(req, "channel", None)
         gid = int(getattr(peer, "id", peer))
@@ -772,7 +802,7 @@ def test_extract_stub(db_path: Path) -> None:
     with DB(ex_db) as db:
         n2 = len(db.entities_list(pack="construction"))
         runs2 = db.conn.execute("SELECT COUNT(*) c FROM extraction_runs").fetchone()["c"]
-    check(n2 == 4 and runs2 == 1 and made2 == [],
+    check(n2 == 4 and runs2 == 2 and made2 == [],
           "extract: повторный прогон ничего не добавляет",
           f"ents={n2} runs={runs2} made={made2}")
 
@@ -790,7 +820,7 @@ def test_extract_stub(db_path: Path) -> None:
         runs3 = db.conn.execute("SELECT COUNT(*) c FROM extraction_runs").fetchone()["c"]
         cur3 = db.conn.execute(
             "SELECT value FROM meta WHERE key='extract:-100777:42:construction'").fetchone()
-    check(n3 == 4 and runs3 == 1 and cur3 is None and bool(made3) and buf.getvalue().strip(),
+    check(n3 == 4 and runs3 == 2 and cur3 is None and bool(made3) and buf.getvalue().strip(),
           "extract: dry-run печатает операции, но ничего не пишет",
           f"ents={n3} runs={runs3} cursor={cur3 and cur3['value']}")
 
@@ -873,10 +903,13 @@ def test_extract_validation(db_path: Path) -> None:
     def ev(msg, quote, chat=-100888):
         return {"chat_id": chat, "msg_id": msg, "quote": quote}
 
-    def op_new(title, msg, quote, owner=None, body=None):
-        return {"op": "new", "kind": "task", "title": title, "entity_id": None,
-                "body": body, "owner": owner, "due_text": None, "due_ts": None,
-                "confidence": 0.9, "evidence": [ev(msg, quote)]}
+    def op_new(title, msg, quote, owner=None, body=None, dedup_hint=None):
+        op = {"op": "new", "kind": "task", "title": title, "entity_id": None,
+              "body": body, "owner": owner, "due_text": None, "due_ts": None,
+              "confidence": 0.9, "evidence": [ev(msg, quote)]}
+        if dedup_hint is not None:
+            op["dedup_hint"] = dedup_hint
+        return op
 
     def op_update(entity_id, msg, quote, owner=None, body=""):
         return {"op": "update", "kind": "task", "title": "Залить фундамент",
@@ -890,12 +923,13 @@ def test_extract_validation(db_path: Path) -> None:
                 "due_text": None, "due_ts": None, "confidence": 0.9,
                 "evidence": [ev(msg, quote)]}
 
-    def provider(ops):
-        return lambda prompt, p: result(ops)
+    def provider(ops, covered=11):
+        return lambda prompt, p: result(ops, covered)
 
     def last_run(db):
         return db.conn.execute(
-            "SELECT * FROM extraction_runs ORDER BY id DESC LIMIT 1").fetchone()
+            "SELECT * FROM extraction_runs WHERE pack='construction' "
+            "ORDER BY id DESC LIMIT 1").fetchone()
 
     extract_mod.run(str(ex_db), provider=provider([
         op_new("Залить фундамент", 11, "фундамент", owner="Иван", body="Заливка запланирована"),
@@ -1027,40 +1061,32 @@ def test_extract_validation(db_path: Path) -> None:
         open_ids = [e["id"] for e in db.entities_list(status="open")]
         check(1 in open_ids, "extract: (d) reopen вернул status=open", str(open_ids))
 
-    extract_mod.run(str(ex_db), provider=provider(
-        [op_new(f"Задача {i}", 14, "арматуры") for i in range(55)]))
+    ops55 = ([op_new(f"Задача {i}", 14, "арматуры") for i in range(30)]
+             + [op_new(f"Задача {i}", 15, "качества") for i in range(30, 55)])
+    extract_mod.run(str(ex_db), provider=provider(ops55, covered=15))
     with DB(ex_db) as db:
         run = last_run(db)
-        check(run["ops_applied"] == 50 and run["ops_rejected"] == 5 and run["status"] == "partial",
-              "extract: (e) 55 валидных new: 50 применено, 5 сверх лимита отклонено",
-              f"applied={run['ops_applied']} rejected={run['ops_rejected']}")
+        check(run["ops_applied"] == 50 and run["ops_rejected"] == 0
+              and run["ops_overflow"] == 5 and run["status"] == "partial",
+              "extract: (e) 55 валидных new: 50 применено, 5 — overflow, не rejected",
+              f"applied={run and run['ops_applied']} rejected={run and run['ops_rejected']} "
+              f"overflow={run and run['ops_overflow']}")
         n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
         check(n == 51, "extract: (e) сущностей 1+50", str(n))
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100888:7:construction'"
+        ).fetchone()
+        check(int(cur["value"]) == 14,
+              "extract: (e) курсор остановлен до первой overflow-операции (msg 15)",
+              str(cur and cur["value"]))
 
-    extract_mod.run(str(ex_db), provider=provider([op_new("Залить фундамент", 14, "арматуры")]))
+    extract_mod.run(str(ex_db), provider=provider(ops55, covered=15))
     with DB(ex_db) as db:
         n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
-        check(n == 51, "extract: (f) дубликат не создаёт вторую сущность", str(n))
-        evd = db.conn.execute(
-            "SELECT * FROM entity_events WHERE entity_id=1 AND op='update' AND field='dedup'").fetchone()
-        check(evd is not None, "extract: (f) дубликат конвертирован в update/dedup", str(evd))
         run = last_run(db)
-        check(run["ops_applied"] == 1 and run["ops_rejected"] == 0,
-              "extract: (f) конвертация дубликата считается применённой",
-              f"applied={run['ops_applied']}")
-
-    twin = op_new("Двойная задача", 14, "арматуры")
-    extract_mod.run(str(ex_db), provider=provider([twin, dict(twin)]))
-    with DB(ex_db) as db:
-        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
-        check(n == 52, "extract: (f) два одинаковых new в одном батче дают одну сущность", str(n))
-        evs = db.conn.execute(
-            "SELECT op, field FROM entity_events WHERE entity_id=52 ORDER BY id").fetchall()
-        check([(r["op"], r["field"]) for r in evs] == [("new", None), ("update", "dedup")],
-              "extract: (f) второй new конвертирован в update первого",
-              str([(r["op"], r["field"]) for r in evs]))
-        run = last_run(db)
-        check(run["ops_applied"] == 2, "extract: (f) обе операции засчитаны", str(run["ops_applied"]))
+        check(n == 56 and run["ops_overflow"] == 0,
+              "extract: (e) следующий прогон дочитал overflow: все 55 сущностей на месте",
+              f"entities={n} overflow={run['ops_overflow']}")
 
     real_post = extract_mod._post
     saved = {k: os.environ.get(k) for k in ("EXTRACT_URL", "EXTRACT_KEY", "EXTRACT_MODEL")}
@@ -1302,6 +1328,57 @@ def test_extract_validation(db_path: Path) -> None:
     check(m9b is not None and m9b["messages"] == 5 - kept,
           "extract: (k) следующий прогон подбирает остаток",
           f"messages={m9b and m9b['messages']} kept={kept}")
+
+    with DB(ex_db) as db:
+        for mid, text in ((28, "Снова возвращаемся к фундаменту"),
+                          (29, "Акция: триал Acme Cloud на месяц"),
+                          (30, "Двойная задача закрыта и переоткрыта")):
+            ts = now - 600 + mid
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100888, ?, 7, ?, ?, 1, 'Иван', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+
+    extract_mod.run(str(ex_db), provider=provider([op_new("Залить фундамент", 28, "фундаменту")]))
+    with DB(ex_db) as db:
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        check(n == 60, "extract: (l) дубликат title не создаёт вторую сущность", str(n))
+        evd = db.conn.execute(
+            "SELECT * FROM entity_events WHERE entity_id=1 AND op='update' AND field='dedup'").fetchone()
+        check(evd is not None, "extract: (l) дубликат конвертирован в update/dedup", str(evd))
+        run = last_run(db)
+        check(run["ops_applied"] == 1 and run["ops_rejected"] == 0,
+              "extract: (l) конвертация дубликата считается применённой",
+              f"applied={run['ops_applied']}")
+
+    twin = op_new("Двойная задача", 30, "закрыта и переоткрыта")
+    extract_mod.run(str(ex_db), provider=provider([twin, dict(twin)]))
+    with DB(ex_db) as db:
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        check(n == 61, "extract: (l) два одинаковых new в одном батче дают одну сущность", str(n))
+        tw_id = db.conn.execute(
+            "SELECT id FROM entities WHERE title='Двойная задача'").fetchone()["id"]
+        evs = db.conn.execute(
+            "SELECT op, field FROM entity_events WHERE entity_id=? ORDER BY id",
+            (tw_id,)).fetchall()
+        check([(r["op"], r["field"]) for r in evs] == [("new", None), ("update", "dedup")],
+              "extract: (l) второй new конвертирован в update первого",
+              str([(r["op"], r["field"]) for r in evs]))
+        run = last_run(db)
+        check(run["ops_applied"] == 2, "extract: (l) обе операции засчитаны", str(run["ops_applied"]))
+
+    extract_mod.run(str(ex_db), provider=provider([
+        op_new("Acme Cloud — триал 30 дней", 29, "триал Acme Cloud", dedup_hint="acme.cloud"),
+        op_new("Триал 30 дней на Acme Cloud", 29, "триал Acme Cloud", dedup_hint=" Acme.Cloud "),
+    ]))
+    with DB(ex_db) as db:
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        check(n == 62, "extract: (l) одинаковый dedup_hint дедупит разные формулировки", str(n))
+        acme = db.conn.execute("SELECT title FROM entities WHERE title LIKE 'Acme%'").fetchone()
+        check(acme is not None and acme["title"] == "Acme Cloud — триал 30 дней",
+              "extract: (l) выживает первая формулировка", str(acme and acme["title"]))
 
 
 def test_entities_mcp(db_path: Path) -> None:
@@ -1715,6 +1792,70 @@ def test_export(db_path: Path) -> None:
     finally:
         sys.argv = saved_argv
 
+    crash_db = db_path.parent / "export_crash.sqlite"
+    crash_out = db_path.parent / "export_crash.jsonl"
+    for f in (crash_db, crash_out):
+        if f.exists():
+            f.unlink()
+    with DB(crash_db) as db:
+        for eid, title in ((1, "Первая"), (2, "Вторая")):
+            db.conn.execute(
+                "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, created_ts, updated_ts) "
+                "VALUES(?, 'construction', -100999, 7, 'task', ?, ?, ?)", (eid, title, now, now))
+            db.conn.execute(
+                "INSERT INTO entity_events(entity_id, run_id, ts, op, chat_id, msg_id, quote) "
+                "VALUES(?, 1, ?, 'new', -100999, ?, 'цитата')", (eid, now - 60, eid))
+        db.conn.commit()
+
+    orig_open = Path.open
+    state = {"writes": 0}
+
+    def crash_open(self, *a, **k):
+        fh = orig_open(self, *a, **k)
+        if self != crash_out:
+            return fh
+
+        class Wrapped:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                fh.close()
+
+            def write(self, data):
+                state["writes"] += 1
+                if state["writes"] == 2:
+                    raise RuntimeError("краш на второй строке")
+                return fh.write(data)
+
+            def flush(self):
+                fh.flush()
+
+        return Wrapped()
+
+    Path.open = crash_open
+    try:
+        try:
+            export_mod.run(str(crash_db), system="file", out=str(crash_out))
+            crashed = False
+        except RuntimeError:
+            crashed = True
+    finally:
+        Path.open = orig_open
+    check(crashed, "export: краш посреди прогона виден наружу", str(crashed))
+    with DB(crash_db) as db:
+        synced = db.conn.execute(
+            "SELECT COUNT(*) FROM integrations WHERE system='file' "
+            "AND synced_ts IS NOT NULL").fetchone()[0]
+    check(synced == 1, "export: сущность до краха закоммичена (окно — одна строка)",
+          str(synced))
+    res_c = export_mod.run(str(crash_db), system="file", out=str(crash_out))
+    ids = [json.loads(x)["entity"]["id"]
+           for x in crash_out.read_text(encoding="utf-8").splitlines()]
+    check(res_c.get("exported") == 1 and ids == [1, 2],
+          "export: повтор после краха — только незакоммиченное, без дублей",
+          f"{res_c} ids={ids}")
+
 
 # ------------------------------------------- 5. настоящий server.py по MCP stdio
 
@@ -1830,6 +1971,18 @@ def test_gates(db_path: Path) -> None:
     rep = asyncio.run(sync_mod.run(db_path=str(flood_db), client=client))
     n = sum(c["new_messages"] for c in rep["chats"])
     check(n == 16, "sync: FloodWait пережил, всё записано (16)", str(n))
+
+    # FloodWait посреди итерации: вставленные до ожидания не занижают new
+    client = build_fixture()
+    client.flood_mid = 3
+    flood_db2 = db_path.parent / "flood_mid.sqlite"
+    rep2 = asyncio.run(sync_mod.run(db_path=str(flood_db2), client=client))
+    n2 = sum(c["new_messages"] for c in rep2["chats"])
+    with DB(str(flood_db2)) as db:
+        actual = db.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    check(n2 == actual and actual > 0,
+          "sync: FloodWait посреди прохода — new равен числу вставленных",
+          f"reported={n2} in_db={actual}")
 
     # live: новая тема сразу с заголовком
     live_mod = __import__("live")
@@ -2086,7 +2239,7 @@ def test_live_tools_flag(db_path: Path) -> None:
         rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = wait_for(proc, lambda m: m.get("id") == 2)
         names = {t["name"] for t in tools["result"]["tools"]}
-        check({"tg_live_topics", "tg_live_history"} <= names,
+        check({"tg_live_topics", "tg_live_history", "tg_live_search"} <= names,
               "MCP: TG_ALLOW_LIVE=1 добавляет tg_live_* инструменты",
               str(sorted(names)))
 
@@ -2099,9 +2252,17 @@ def test_live_tools_flag(db_path: Path) -> None:
         check("error" in body,
               "MCP: tg_live без кредов возвращает JSON-ошибку, а не молчит",
               str(body.get("error", ""))[:80])
-        rpc(proc, {"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
-        alive = wait_for(proc, lambda m: m.get("id") == 4)
-        check(alive.get("id") == 4, "MCP: сервер жив после ошибки live-инструмента")
+        rpc(proc, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                   "params": {"name": "tg_live_search",
+                              "arguments": {"query": "ИИ", "limit": 5}}})
+        resp4 = wait_for(proc, lambda m: m.get("id") == 4)
+        body4 = json.loads(resp4["result"]["content"][0]["text"])
+        check("error" in body4,
+              "MCP: tg_live_search без кредов — JSON-ошибка, не зависание",
+              str(body4.get("error", ""))[:80])
+        rpc(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
+        alive = wait_for(proc, lambda m: m.get("id") == 5)
+        check(alive.get("id") == 5, "MCP: сервер жив после ошибки live-инструмента")
     finally:
         proc.terminate()
         try:
@@ -2693,6 +2854,300 @@ def test_start_wizard(db_path: Path) -> None:
         check("start.py" in str(exc), "make_client: без ключей отсылает к start.py", str(exc))
 
 
+def test_topic_norm(db_path: Path) -> None:
+    print("=== topic_id: General=1 канонически, миграция NULL, индекс ===")
+    tdb = db_path.parent / "topic_norm.sqlite"
+    if tdb.exists():
+        tdb.unlink()
+    with DB(tdb) as db:
+        db.upsert_chat(-100500, "Группа", None, "group", False, 3)
+        db.watch_add(-100500, 1)
+        db.insert_message({"chat_id": -100500, "msg_id": 1, "ts": 100, "text": "без темы"})
+        tid = db.conn.execute("SELECT topic_id FROM messages WHERE msg_id=1").fetchone()["topic_id"]
+        check(tid == 1, "db: insert без topic_id пишет General=1", str(tid))
+        db.insert_message({"chat_id": -100500, "msg_id": 2, "topic_id": 0, "ts": 200, "text": "ноль"})
+        tid0 = db.conn.execute("SELECT topic_id FROM messages WHERE msg_id=2").fetchone()["topic_id"]
+        check(tid0 == 1, "db: topic_id=0 нормализуется в 1", str(tid0))
+        w = db.watch_list()
+        check(w[0]["total"] == 2, "db: watch_list считает General по прямому сравнению",
+              str(w[0]["total"]))
+        plan = db.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM messages WHERE chat_id=? AND topic_id=?",
+            (-100500, 1)).fetchall()
+        check(any("ix_msg_chat_topic" in (r["detail"] or "") for r in plan),
+              "db: прямой topic_id=? использует индекс ix_msg_chat_topic",
+              str([r["detail"] for r in plan]))
+
+    ldb = db_path.parent / "topic_legacy.sqlite"
+    if ldb.exists():
+        ldb.unlink()
+    import sqlite3 as sq
+    raw = sq.connect(str(ldb))
+    raw.execute(
+        "CREATE TABLE messages ("
+        "chat_id INTEGER NOT NULL, msg_id INTEGER NOT NULL, topic_id INTEGER, "
+        "ts INTEGER, date_iso TEXT, sender_id INTEGER, sender_name TEXT, "
+        "is_out INTEGER DEFAULT 0, is_service INTEGER DEFAULT 0, text TEXT, "
+        "media TEXT, reply_to INTEGER, views INTEGER, forwards INTEGER, "
+        "reactions TEXT, raw_json TEXT, PRIMARY KEY (chat_id, msg_id))")
+    raw.execute(
+        "INSERT INTO messages(chat_id, msg_id, topic_id, ts, text) "
+        "VALUES(-100600, 1, NULL, 100, 'legacy без темы')")
+    raw.commit()
+    raw.close()
+    with DB(ldb) as db:
+        tid = db.conn.execute("SELECT topic_id FROM messages WHERE msg_id=1").fetchone()["topic_id"]
+        check(tid == 1, "db: NULL topic_id старой базы мигрирует в 1 при открытии", str(tid))
+        db.upsert_chat(-100600, "Легаси", None, "group", False, 3)
+        db.watch_add(-100600, 1)
+        w = db.watch_list()
+        check(w[0]["total"] == 1, "db: watch_list видит мигрированный NULL как General",
+              str(w[0]["total"]))
+        hist = db.history(-100600, topic_id=1)
+        check(len(hist) == 1, "db: history читает мигрированное сообщение", str(len(hist)))
+
+
+def test_server_db_cache(db_path: Path) -> None:
+    print("=== server: соединение кэшируется на поток ===")
+    import server as server_mod
+    server_mod.INDEX = str(db_path)
+    server_mod._tls.__dict__.pop("db", None)
+    constructions: list[str] = []
+    orig_db = server_mod.DB
+
+    class CountingDB:
+        def __init__(self, path):
+            constructions.append(str(path))
+            self._real = orig_db(path)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    server_mod.DB = CountingDB
+    try:
+        h1 = server_mod._db()
+        h2 = server_mod._db()
+        check(h1.db is h2.db, "server: _db отдаёт то же соединение", str(constructions))
+        with h1 as db:
+            db.chats()
+        with h2 as db:
+            db.chats()
+        check(constructions == [str(db_path)],
+              "server: DB() конструируется один раз на поток", str(constructions))
+    finally:
+        server_mod.DB = orig_db
+        server_mod._tls.__dict__.pop("db", None)
+
+
+def test_extract_all_indexed(db_path: Path) -> None:
+    print("=== extract --all-indexed: область — весь индекс ===")
+    import extract as extract_mod
+    now = int(time.time())
+
+    def seed(path: Path, watch: bool) -> None:
+        if path.exists():
+            path.unlink()
+        with DB(path) as db:
+            db.upsert_chat(-100111, "Форум", None, "supergroup", True, 5)
+            db.upsert_chat(-100222, "Группа", None, "group", False, 5)
+            db.upsert_topic(-100111, 7, "Тема")
+            db.upsert_topic(-100111, 8, "Оффтоп")
+            if watch:
+                db.watch_add(-100111, 7)
+            for cid, mid, tid, text in ((-100111, 101, 7, "задача подготовить отчёт"),
+                                        (-100111, 102, 8, "решено согласовать смету"),
+                                        (-100222, 201, 1, "обещаю прислать акт")):
+                ts = now - 60
+                db.conn.execute(
+                    "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                    "sender_id, sender_name, is_service, text) VALUES(?,?,?,?,?,1,'А',0,?)",
+                    (cid, mid, tid, ts,
+                     datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+            db.conn.commit()
+
+    ai_db = db_path.parent / "all_indexed.sqlite"
+    seed(ai_db, watch=True)
+    made = extract_mod.run(str(ai_db), provider=extract_mod.provider_stub)
+    scopes = {(m["chat_id"], m["topic_id"]) for m in made}
+    check(scopes == {(-100111, 7)},
+          "extract: без флага — только watch-темы", str(scopes))
+
+    ai_db2 = db_path.parent / "all_indexed2.sqlite"
+    seed(ai_db2, watch=False)
+    made2 = extract_mod.run(str(ai_db2), provider=extract_mod.provider_stub, all_indexed=True)
+    scopes2 = {(m["chat_id"], m["topic_id"]) for m in made2}
+    check({(-100111, 7), (-100111, 8), (-100222, 1)} == scopes2,
+          "extract: --all-indexed покрывает все (chat, topic) индекса", str(scopes2))
+    with DB(ai_db2) as db:
+        ents = db.entities_list()
+        t8 = [e for e in ents if e["chat_id"] == -100111 and e["topic_id"] == 8]
+        g1 = [e for e in ents if e["chat_id"] == -100222 and e["topic_id"] == 1]
+        check(len(t8) == 1 and len(g1) == 1,
+              "extract: --all-indexed создаёт сущности вне watch-листа",
+              f"t8={len(t8)} g1={len(g1)}")
+
+
+def test_search_global(db_path: Path) -> None:
+    print("=== search: глобальный поиск каналов/групп/юзеров по слову ===")
+    import search as search_mod
+    client = build_fixture()
+    chan = Channel(777, "AI Tools Hub", "ai_tools_hub", forum=False)
+    chan.broadcast, chan.megagroup = True, False
+    chan.participants_count = 12500
+    group_ch = Channel(778, "AI чат", "ai_chat_ru", forum=True)
+    group_ch.broadcast, group_ch.megagroup = False, True
+    client.global_chats = [chan, group_ch]
+    client.global_users = [User(555, "Пётр", "Иванов", "petr_ai")]
+
+    rows = asyncio.run(search_mod.search_global(client, "ИИ"))
+    by_id = {r["chat_id"]: r for r in rows}
+    check(len(rows) == 3 and {-1000000000777, -1000000000778, 555} <= set(by_id),
+          "search: каналы, группы и юзеры одним запросом, id в marked-форме",
+          str(sorted(by_id)))
+    check(by_id[-1000000000777]["kind"] == "channel"
+          and by_id[-1000000000777]["username"] == "ai_tools_hub"
+          and by_id[-1000000000777]["participants"] == 12500,
+          "search: канал с юзернеймом и подписчиками", str(by_id.get(-1000000000777)))
+    check(by_id[-1000000000778]["kind"] == "supergroup" and by_id[555]["kind"] == "user"
+          and by_id[555]["username"] == "petr_ai",
+          "search: группа и юзер с правильными kind/username",
+          f"{by_id.get(-1000000000778)} {by_id.get(555)}")
+    check(client.last_global_req is not None and client.last_global_req.q == "ИИ"
+          and client.last_global_req.limit == 20,
+          "search: запрос идёт с q и limit", str(client.last_global_req and
+                                                 (client.last_global_req.q, client.last_global_req.limit)))
+
+    rows_c = asyncio.run(search_mod.search_global(client, "ИИ", kind="channel"))
+    check([r["chat_id"] for r in rows_c] == [-1000000000777],
+          "search: kind=channel оставляет только каналы-вещания",
+          str([r["chat_id"] for r in rows_c]))
+    check(client.last_global_req.broadcasts_only is True,
+          "search: фильтр типа уходит флагом в запрос", str(client.last_global_req.broadcasts_only))
+    rows_u = asyncio.run(search_mod.search_global(client, "ИИ", kind="user"))
+    check([r["chat_id"] for r in rows_u] == [555],
+          "search: kind=user оставляет только юзеров", str([r["chat_id"] for r in rows_u]))
+    try:
+        asyncio.run(search_mod.search_global(client, "x", kind="bogus"))
+        check(False, "search: неизвестный тип поднимает ValueError")
+    except ValueError:
+        check(True, "search: неизвестный тип поднимает ValueError")
+
+
+def test_services_pack(db_path: Path) -> None:
+    print("=== services: пакет для сервисов, триалов и промо ===")
+    sv_db = db_path.parent / "services_pack.sqlite"
+    if sv_db.exists():
+        sv_db.unlink()
+    now = int(time.time())
+    with DB(sv_db) as db:
+        db.upsert_chat(-100444, "Сервисы и триалы", None, "supergroup", False, 800)
+        db.watch_add(-100444, 1)
+        for mid, text in ((401, "Триал 30 дней на Acme Cloud, acme.cloud/register"),
+                          (402, "сервис betaai.com — нейросети для дизайнеров"),
+                          (403, "промо: скидка 50% на всё")):
+            ts = now - 60
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100444, ?, 1, ?, ?, 1, 'Марат', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+    import extract as extract_mod
+    from packs import PACKS
+
+    def sop(title, msg, quote, hint, kind="trial", due_text=None):
+        return {"op": "new", "kind": kind, "title": title, "entity_id": None,
+                "body": None, "owner": None, "due_text": due_text, "due_ts": None,
+                "confidence": 0.9, "dedup_hint": hint,
+                "evidence": [{"chat_id": -100444, "msg_id": msg, "quote": quote}]}
+
+    extract_mod.run(str(sv_db), packs=[PACKS["services"]], provider=lambda p, pk: {
+        "ops": [sop("Acme Cloud — триал 30 дней", 401, "Триал 30 дней",
+                    "acme.cloud", due_text="30 дней")],
+        "covered_upto_msg_id": 401})
+    with DB(sv_db) as db:
+        n = db.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE pack='services'").fetchone()["c"]
+        e = db.conn.execute("SELECT * FROM entities WHERE pack='services'").fetchone()
+        check(n == 1 and e["kind"] == "trial" and e["title"].startswith("Acme Cloud")
+              and e["attrs_json"] and json.loads(e["attrs_json"])["due_text"] == "30 дней",
+              "services: триал с kind/title/due_text через dedup_hint-схему",
+              f"n={n} kind={e and e['kind']} attrs={e and e['attrs_json']}")
+
+    extract_mod.run(str(sv_db), packs=[PACKS["services"]], provider=lambda p, pk: {
+        "ops": [sop("Триал на Acme Cloud", 402, "сервис betaai.com", " Acme.Cloud ")],
+        "covered_upto_msg_id": 402})
+    with DB(sv_db) as db:
+        n = db.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE pack='services'").fetchone()["c"]
+        evd = db.conn.execute(
+            "SELECT * FROM entity_events WHERE op='update' AND field='dedup'").fetchone()
+        check(n == 1 and evd is not None,
+              "services: другая формулировка с тем же hint — дубликат, не сущность",
+              f"n={n}")
+
+    with DB(sv_db) as db:
+        for mid, text in ((404, "сервис gamma.io с генерацией видео"),
+                          (405, "триал 7 дней на delta.ai")):
+            ts = now - 30
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100444, ?, 1, ?, ?, 1, 'Марат', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+    extract_mod.run(str(sv_db), packs=[PACKS["services"]],
+                    provider=extract_mod.provider_stub)
+    with DB(sv_db) as db:
+        ks = {r["kind"] for r in db.conn.execute(
+            "SELECT kind FROM entities WHERE pack='services'")}
+        check({"service", "trial", "promo"} <= ks,
+              "services: stub-провайдер создаёт все три вида", str(ks))
+
+    made = extract_mod.run(str(sv_db), packs=[PACKS["services"]],
+                           provider=extract_mod.provider_stub)
+    check(made == [], "services: повторный прогон без новых сообщений пуст", str(made))
+
+
+def test_pipeline(db_path: Path) -> None:
+    print("=== pipeline: sync -> extract -> digest -> monitor ===")
+    import pipeline as pipeline_mod
+    pl_db = db_path.parent / "pipeline.sqlite"
+    if pl_db.exists():
+        pl_db.unlink()
+    with DB(pl_db) as db:
+        db.watch_add(-100222, 1)
+        db.watch_add(-100333, 1)
+    client = build_fixture()
+
+    rep = asyncio.run(pipeline_mod.run(str(pl_db), client=client))
+    check(rep["sync"]["ok"] and rep["sync"]["new_messages"] == 10 and rep["sync"]["chats"] == 2,
+          "pipeline: sync по watch-листу синхронизировал обе группы",
+          str(rep["sync"]))
+    check(rep["extract"]["ok"] and rep["extract"]["areas"] > 0,
+          "pipeline: extract отработал по свежим сообщениям", str(rep["extract"]))
+    check(rep["digest"]["ok"] and rep["digest"]["made"] == 2,
+          "pipeline: digest собран по каждой watch-теме", str(rep["digest"]))
+    check(rep["monitor"]["ok"] and len(rep["monitor"]["lines"]) >= 1,
+          "pipeline: monitor дал сводку", str(rep["monitor"]["lines"])[:80])
+    with DB(pl_db) as db:
+        n_msgs = db.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        n_dig = db.conn.execute("SELECT COUNT(*) FROM digests").fetchone()[0]
+    check(n_msgs == 10 and n_dig == 2,
+          "pipeline: данные в базе после одного прогона", f"msgs={n_msgs} digests={n_dig}")
+
+    rep2 = asyncio.run(pipeline_mod.run(str(pl_db), client=client))
+    check(rep2["sync"]["ok"] and rep2["sync"]["new_messages"] == 0
+          and rep2["digest"]["made"] == 0 and rep2["extract"]["areas"] == 0,
+          "pipeline: второй прогон инкрементален",
+          f"sync={rep2['sync']} digest={rep2['digest']} extract={rep2['extract']}")
+
+    rep3 = asyncio.run(pipeline_mod.run(str(pl_db), client=None, skip_sync=True))
+    check("sync" not in rep3 and rep3["extract"]["ok"] and rep3["monitor"]["ok"],
+          "pipeline: --skip sync гоняет офлайн-шаги без Telegram",
+          str(sorted(rep3)))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -2732,6 +3187,12 @@ def main() -> int:
     test_start_kwargs(db_path)
     test_days_window(db_path)
     test_start_wizard(db_path)
+    test_topic_norm(db_path)
+    test_server_db_cache(db_path)
+    test_extract_all_indexed(db_path)
+    test_search_global(db_path)
+    test_services_pack(db_path)
+    test_pipeline(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Автономный конвейер: sync (watch) -> extract -> digest -> monitor.
+
+    python3 pipeline.py                      # полный прогон по watch-листу
+    python3 pipeline.py --pack services      # один пакет извлечения
+    python3 pipeline.py --skip sync          # офлайн-шаги, без Telegram
+    python3 pipeline.py --days-ahead 7 --send
+
+Шаги независимы: сбой одного не останавливает остальные — упавший шаг
+отражается в отчёте и в коде выхода (1). Для регулярности — cron
+раз в 15–60 минут; live.py остаётся отдельным демоном.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).parent
+sys.path.insert(0, str(HERE))
+
+from env import load_env  # noqa: E402
+
+load_env()
+
+import sync as sync_mod  # noqa: E402
+import extract as extract_mod  # noqa: E402
+import digest as digest_mod  # noqa: E402
+import monitor as monitor_mod  # noqa: E402
+
+DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
+
+
+async def run(db_path: str = DB_PATH, pack_id: str | None = None,
+              days_ahead: int = 7, send: bool = False, skip_sync: bool = False,
+              client=None) -> dict:
+    report: dict[str, dict] = {}
+    if not skip_sync:
+        try:
+            rep = await sync_mod.run(db_path=db_path, client=client, watched_only=True)
+            report["sync"] = {
+                "ok": True,
+                "chats": len({r["chat_id"] for r in rep["chats"]}),
+                "new_messages": sum(r["new_messages"] for r in rep["chats"]),
+            }
+        except Exception as exc:
+            report["sync"] = {"ok": False, "error": str(exc)}
+    try:
+        made = extract_mod.run(db_path, pack_id=pack_id)
+        report["extract"] = {
+            "ok": True,
+            "areas": len(made),
+            "ops_applied": sum(m["ops_applied"] for m in made),
+            "ops_overflow": sum(m["ops_overflow"] for m in made),
+        }
+    except Exception as exc:
+        report["extract"] = {"ok": False, "error": str(exc)}
+    try:
+        digests = digest_mod.run(db_path)
+        report["digest"] = {"ok": True, "made": len(digests)}
+    except Exception as exc:
+        report["digest"] = {"ok": False, "error": str(exc)}
+    try:
+        mon = monitor_mod.run(db_path, days_ahead=days_ahead, send=send,
+                              dry_run=not send)
+        report["monitor"] = {
+            "ok": True,
+            "overdue": len(mon["overdue"]),
+            "upcoming": len(mon["upcoming"]),
+            "lines": mon["lines"],
+            "notify": mon["notify"],
+        }
+    except Exception as exc:
+        report["monitor"] = {"ok": False, "error": str(exc)}
+    return report
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="sync -> extract -> digest -> monitor одним прогоном")
+    ap.add_argument("--db", default=DB_PATH)
+    ap.add_argument("--pack", help="один пакет извлечения (иначе все)")
+    ap.add_argument("--days-ahead", type=int, default=7,
+                    help="горизонт сроков в сводке мониторинга")
+    ap.add_argument("--send", action="store_true",
+                    help="отправить сводку в Saved Messages (нужен TG_ALLOW_SEND=1)")
+    ap.add_argument("--skip", action="append", default=[], choices=["sync"],
+                    metavar="STEP", help="пропустить шаг (sync)")
+    args = ap.parse_args()
+    report = asyncio.run(run(args.db, pack_id=args.pack, days_ahead=args.days_ahead,
+                             send=args.send, skip_sync="sync" in args.skip))
+    for name, res in report.items():
+        if res.get("ok"):
+            details = "  ".join(f"{k}={v}" for k, v in res.items()
+                                if k not in ("ok", "lines", "notify"))
+            print(f"  {name}: ok  {details}")
+            if name == "monitor":
+                for line in res["lines"]:
+                    print(f"    {line}")
+        else:
+            print(f"  {name}: FAIL  {res.get('error')}", file=sys.stderr)
+    if any(not res.get("ok") for res in report.values()):
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

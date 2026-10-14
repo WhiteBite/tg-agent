@@ -202,6 +202,24 @@ id темы — в `reply_to.reply_to_msg_id`. Сообщения без `reply_
 offset_topic, limit)`. Обёртки в Telethon нет, а в `functions.channels` этого
 метода нет вообще (там только `ToggleForumRequest`) — запрос делается напрямую.
 
+## Глобальный поиск: найти новые каналы по слову
+
+```bash
+python3 search.py "нейросети"                # каналы, группы и юзеры
+python3 search.py "нейросети" --type channel # только каналы-вещания
+python3 search.py "ИИ" --type group --limit 30
+```
+
+Обёртка над `messages.SearchGlobalRequest` — сервер Telegram сам ищет по
+названиям и содержимому публичных чатов (обычный API-запрос, не парсинг).
+Результат: тип, название, @username, подписчики; дальше `sync.py --chat
+@username` — и канал в индексе. Так закрывается сценарий «найди все каналы
+по ИИ», с которого начинается кураторство: поиск → выбор → синк → watch.
+
+Агент может искать сам: при `TG_ALLOW_LIVE=1` у MCP-сервера появляется
+инструмент `tg_live_search` (тоже только чтение) — агент находит каналы и
+предлагает тебе их синхронизировать, сам ничего не добавляет.
+
 ## Подключение к opencode
 
 Формат в v1 и v2 разный: в v2 серверы лежат в `mcp.servers`, вместо
@@ -258,6 +276,7 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 ```bash
 EXTRACT_PROVIDER=stub python3 extract.py            # механический извлекатель (без LLM)
 EXTRACT_PROVIDER=stub python3 extract.py --dry-run  # показать операции, ничего не писать
+EXTRACT_PROVIDER=stub python3 extract.py --all-indexed  # все чаты индекса, не только watch
 EXTRACT_PROVIDER=openai EXTRACT_URL=https://api.openai.com/v1 \
     EXTRACT_KEY=sk-... EXTRACT_MODEL=gpt-4o-mini python3 extract.py --pack construction
 ```
@@ -266,21 +285,42 @@ EXTRACT_PROVIDER=openai EXTRACT_URL=https://api.openai.com/v1 \
 проекция: удалил и перегенерил заново, ничего не потеряно. Движок `extract.py`
 generic, предметная область описана декларативным пакетом в `packs/`; пакет
 задаёт kinds, prompt-шаблон, окно первого прогона (`backfill_days`) и scope.
-Сейчас один пакет — `construction` (PM для стройки): decision / task / promise
-/ question.
+Пакеты: `construction` (PM для стройки: decision / task / promise / question)
+и `services` (сервисы и триалы: service / trial / promo; ключ дедупа —
+`dedup_hint`: домен или слаг сервиса, поэтому «Триал 30 дней на Acme» и
+«Acme Cloud trial» схлопываются в одну сущность). На смешанных базах гоняй
+точечно: `--pack construction` / `--pack services`.
 
-По каждой паре (пакет, watch-тема) курсор `extract:<chat>:<topic>:<pack>` в
-`meta`; за один прогон не больше 200 сообщений, остаток подберёт следующий.
+По умолчанию область прогона — watch-лист; `--all-indexed` расширяет на все
+пары (chat, topic) индекса — для массовой обработки «кучи групп», без
+курирования. По каждой паре (пакет, тема) курсор `extract:<chat>:<topic>:<pack>`
+в `meta`; за один прогон не больше 200 сообщений, остаток подберёт следующий.
 Провайдер отвечает JSON-операциями new/update/close/reopen; каждая обязана
 нести evidence — цитаты сообщений. Цитата проверяется как подстрока текста
 сохранённого сообщения (плюс транскрипты медиа); операция без валидного
 evidence отклоняется. Операции применяются одной транзакцией
 (`entities`, `entity_events`, `extraction_runs`), сбой провайдера курсор не
-двигает.
+двигает. Валидных операций больше 50 за прогон: применяются первые по позиции
+evidence, остаток фиксируется как `ops_overflow` (status=partial), а курсор
+остаётся до первой отброшенной — следующий прогон дочитает без потерь.
 
 Теги проектов: `python3 watch.py add ... --project "Объекд"` или
 `python3 watch.py project --chat @mygroup --topic 789 --project "Объекд"`.
 Проект у строки watch — сущности наследуют его от темы.
+
+## Автономный конвейер
+
+```bash
+python3 pipeline.py                  # sync (watch) -> extract -> digest -> monitor
+python3 pipeline.py --pack services  # один пакет извлечения
+python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram
+python3 pipeline.py --days-ahead 7 --send
+```
+
+Одна команда для автономного режима: шаги независимы, сбой одного не
+останавливает остальные (упавший шаг — в отчёте и в exit code 1). Для
+регулярности — cron раз в 15–60 минут; `live.py` остаётся отдельным демоном
+для мгновенной подхватки новых сообщений.
 
 ## Мониторинг и уведомления
 
@@ -381,12 +421,14 @@ swagger на app.101-group.ru — ждёт кредов).
 | Файл | Роль |
 |---|---|
 | `sync.py` | Telethon → SQLite: инкрементальная синхронизация, бэкфилл чанками, папки, пины |
+| `search.py` | Глобальный поиск Telegram: публичные каналы/группы/юзеры по ключевому слову |
+| `pipeline.py` | Автономный конвейер: sync (watch) → extract → digest → monitor одним прогоном |
 | `db.py` | Индекс: схема, FTS5, watch-лист, refs, пины, дайджесты, `run_sql` с блокировками |
 | `server.py` | MCP-сервер (stdio): 13 read-only инструментов |
 | `live.py` | Новые сообщения в реальном времени (`events.NewMessage`) |
 | `digest.py` | Дайджесты: stub или openai-совместимый LLM |
 | `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт |
-| `packs/` | Декларативные пакеты извлечения (`construction`: decision/task/promise/question) |
+| `packs/` | Декларативные пакеты извлечения: `construction` (decision/task/promise/question), `services` (service/trial/promo) |
 | `monitor.py` | Сводка просроченного и дедлайнов по проектам; `--send` через `notify.py` |
 | `notify.py` | Уведомления в Saved Messages; единственный пишущий модуль, гейт `TG_ALLOW_SEND=1` |
 | `media.py` | Очередь транскрипции голосовых и документов (stub/openai) |
@@ -398,7 +440,7 @@ swagger на app.101-group.ru — ждёт кредов).
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 314 офлайн-проверок (без аккаунта Telegram), гоняются в CI |
+| `test_offline.py` | 354 офлайн-проверки (без аккаунта Telegram), гоняются в CI |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -447,7 +489,7 @@ swagger на app.101-group.ru — ждёт кредов).
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **314 проверок, все зелёные** (работают и на Linux,
+`python3 test_offline.py` — **354 проверки, все зелёные** (работают и на Linux,
 и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
@@ -480,9 +522,10 @@ swagger на app.101-group.ru — ждёт кредов).
   выдают замаскированный текст
 - `digest.run`: stub-выжимки создаются, повторно не дублируются (курсор),
   отдаются через MCP `tg_digests`; сбой LLM-провайдера не двигает курсор
-- гейты: `FloodWaitError` на фейках (sync дожидается и доделывает),
-  `busy_timeout`, `before_id`/`date_to`, `budget_chars`+`truncated`,
-  `tg_topics`, live-тема с заголовком, UI-токен (401 без / 200 с)
+- гейты: `FloodWaitError` на фейках (sync дожидается и доделывает; посреди
+  прохода счётчик `new` не занижается), `busy_timeout`, `before_id`/`date_to`,
+  `budget_chars`+`truncated`, `tg_topics`, live-тема с заголовком, UI-токен
+  (401 без / 200 с)
 - `TG_STRICT_WATCH=1`: второй сервер-подпроцесс — чужой чат отклонён,
   слежуемый читается, `tg_find`/`tg_topics` вне watch слепы
 - `doctor.run_checks()`: формат чеков, FTS5 и redact self-test
@@ -491,14 +534,32 @@ swagger на app.101-group.ru — ждёт кредов).
 - `extract.run`: курсор по (пакет, тема), окно `backfill_days` на первом прогоне,
   лимит 200 сообщений; операции new/update/close/reopen одной транзакцией;
   **evidence-гейт**: цитата вне текста сообщения отклоняется, сбой провайдера
-  курсор не двигает; отдаётся через MCP `tg_entities`/`tg_entity`/`tg_overdue`
+  курсор не двигает; **overflow**: операции сверх 50 фиксируются в
+  `ops_overflow`, курсор остаётся до первой отброшенной, следующий прогон
+  дочитывает; `--all-indexed` покрывает все (chat, topic) индекса; дедуп
+  `dedup_hint` сильнее title; отдаётся через MCP `tg_entities`/`tg_entity`/
+  `tg_overdue`
 - `monitor.collect`: просрочка и горизонт `--days-ahead`, фильтр по проекту;
   `notify`: dry-run по умолчанию, реальная отправка только за `TG_ALLOW_SEND=1`,
   cap `TG_NOTIFY_CAP`; `server.py` его не импортирует
 - `media`: sync/live ставят voice/document в очередь, stub-транскрипт попадает
   в промпт извлечения; openai без байтов — `NotImplementedError`
 - `export.run`: file-провайдер пишет JSONL, курсор в `integrations` (повторный
-  прогон дубликатов не даёт); 101/notion — словарь-ошибка без исключения
+  прогон дубликатов не даёт; краш посреди прогона — закоммичено до сущности,
+  повтор выгружает только остаток); 101/notion — словарь-ошибка без исключения
+- **topic_id канонически NOT NULL** (=1 General): вставка без темы и миграция
+  старых баз с NULL, запросы идут по индексу `ix_msg_chat_topic` (EXPLAIN PLAN
+  проверяется), watch/history/search/stats видят то же
+- `server._db()` кэширует соединение на поток — схема/миграции не гоняются
+  на каждый tool-call
+- **`tg_live_*` + `tg_live_search`**: живые запросы регистрируются при
+  `TG_ALLOW_LIVE=1`; без кредов — JSON-ошибка, не зависание
+- `search.search_global`: каналы/группы/юзеры с marked-id и kind,
+  фильтр типа уходит флагом в запрос (SearchGlobalRequest на фейк-клиенте)
+- пакет `services`: триал с due_text через dedup_hint-схему, другая
+  формулировка с тем же hint — дубликат; stub создаёт service/trial/promo
+- `pipeline.run`: sync→extract→digest→monitor на фейк-клиенте (10 сообщений,
+  2 дайджеста), второй прогон инкрементален, `--skip sync` — офлайн-шаги
 - проект у тем watch (`watch.py --project`, подкоманда `project`) наследуется
   сущностями и фильтруется в `tg_entities`/`tg_overdue`/`monitor`
 
