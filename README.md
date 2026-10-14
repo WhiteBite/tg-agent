@@ -399,7 +399,7 @@ swagger на app.101-group.ru — ждёт кредов).
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 285 офлайн-проверок (без аккаунта Telegram), гоняются в CI |
+| `test_offline.py` | 314 офлайн-проверок (без аккаунта Telegram), гоняются в CI |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -448,7 +448,7 @@ swagger на app.101-group.ru — ждёт кредов).
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **285 проверок, все зелёные** (работают и на Linux,
+`python3 test_offline.py` — **314 проверок, все зелёные** (работают и на Linux,
 и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
