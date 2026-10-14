@@ -45,7 +45,7 @@ load_env()
 from db import DB  # noqa: E402
 from packs import PACKS  # noqa: E402
 import media as media_mod  # noqa: E402
-from llm_http import extra_body  # noqa: E402
+from llm_http import call_with_deadline, extra_body  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -185,7 +185,8 @@ def provider_openai(prompt: str, pack: dict) -> dict:
         payload.update(extra_body(url))
         raw = ""
         try:
-            data = _post(url, key, payload)
+            deadline = float(os.environ.get("EXTRACT_TIMEOUT") or 240)
+            data = call_with_deadline(_post, deadline, url, key, payload)
             choice = (data.get("choices") or [{}])[0]
             message = choice.get("message") or {}
             raw = message.get("content") or message.get("refusal") or ""
@@ -526,6 +527,11 @@ def run(db_path: str = DB_PATH, pack_id: str | None = None,
                         continue
                     if res is not None:
                         made_round.append(res)
+                        if not dry_run:
+                            tail = f" overflow={res['ops_overflow']}" if res["ops_overflow"] else ""
+                            print(f"  {res['pack']} {res['chat_id']}/{res['topic_id']}: "
+                                  f"msgs={res['messages']} ops={res['ops_applied']} "
+                                  f"rejected={res['ops_rejected']}{tail}", flush=True)
         made.extend(made_round)
         if (not until_done or dry_run or not made_round
                 or rounds >= max_rounds):

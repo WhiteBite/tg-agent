@@ -3396,6 +3396,23 @@ def test_llm_extra_body(db_path: Path) -> None:
           "llm_http: dashscope URL глушит thinking", str(extra_body("dashscope")))
     check(extra_body("https://api.openai.com/v1") == {} and extra_body(None) == {},
           "llm_http: прочие провайдеры не трогаются", str(extra_body("openai")))
+    from llm_http import call_with_deadline
+    check(call_with_deadline(lambda x: x * 2, 5, 21) == 42,
+          "llm_http: быстрый вызов возвращает результат")
+    try:
+        call_with_deadline(time.sleep, 0.2, 5)
+        check(False, "llm_http: дедлайн прерывает зависший вызов")
+    except TimeoutError:
+        check(True, "llm_http: дедлайн прерывает зависший вызов")
+
+    def boom() -> None:
+        raise ValueError("провайдер упал")
+
+    try:
+        call_with_deadline(boom, 5)
+        check(False, "llm_http: исключение провайдера пробрасывается вызывающему")
+    except ValueError:
+        check(True, "llm_http: исключение провайдера пробрасывается вызывающему")
     import extract as extract_mod
     from packs import PACKS
     calls: list[dict] = []

@@ -30,7 +30,7 @@ from env import load_env  # noqa: E402
 load_env()
 
 from db import DB  # noqa: E402
-from llm_http import extra_body  # noqa: E402
+from llm_http import call_with_deadline, extra_body  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -88,8 +88,13 @@ def summarize_openai(context: str) -> str:
     key = os.environ.get("DIGEST_KEY")
     if key:
         req.add_header("Authorization", f"Bearer {key}")
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read())["choices"][0]["message"]["content"]
+
+    def _fetch() -> str:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read())["choices"][0]["message"]["content"]
+
+    deadline = float(os.environ.get("DIGEST_TIMEOUT") or 240)
+    return call_with_deadline(_fetch, deadline)
 
 
 def summarize(rows: list[dict], alias: str) -> str:
