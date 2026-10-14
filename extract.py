@@ -4,6 +4,7 @@
     EXTRACT_PROVIDER=stub python3 extract.py            # механический извлекатель (без LLM)
     EXTRACT_PROVIDER=stub python3 extract.py --dry-run  # показать операции, ничего не писать
     EXTRACT_PROVIDER=stub python3 extract.py --all-indexed  # все чаты индекса, не только watch
+    python3 extract.py --pack services --until-done     # крутить до исчерпания хвоста
     EXTRACT_PROVIDER=openai EXTRACT_URL=https://api.openai.com/v1 \
         EXTRACT_KEY=sk-... python3 extract.py --pack construction --db demo.sqlite
 
@@ -494,7 +495,8 @@ def _scopes(db: DB, all_indexed: bool) -> list[dict]:
 
 def run(db_path: str = DB_PATH, pack_id: str | None = None,
         dry_run: bool = False, provider=None, packs: list | None = None,
-        all_indexed: bool = False) -> list[dict]:
+        all_indexed: bool = False, until_done: bool = False,
+        max_rounds: int = 100) -> list[dict]:
     prov = get_provider(provider)
     if packs is None:
         if pack_id is not None:
@@ -504,20 +506,30 @@ def run(db_path: str = DB_PATH, pack_id: str | None = None,
         else:
             packs = list(PACKS.values())
     made: list[dict] = []
-    with DB(db_path) as db:
-        for pack in packs:
-            for w in _scopes(db, all_indexed):
-                if not scope_matches(pack["scope_filter"], w):
-                    continue
-                try:
-                    res = _run_scope(db, pack, w, prov, dry_run)
-                except Exception as exc:
-                    db.conn.rollback()
-                    print(f"  ! {pack['id']} {w['chat_id']}/{w['topic_id']}: {exc}",
-                          file=sys.stderr)
-                    continue
-                if res is not None:
-                    made.append(res)
+    rounds = 0
+    while True:
+        rounds += 1
+        made_round: list[dict] = []
+        with DB(db_path) as db:
+            for pack in packs:
+                for w in _scopes(db, all_indexed):
+                    if not scope_matches(pack["scope_filter"], w):
+                        continue
+                    try:
+                        res = _run_scope(db, pack, w, prov, dry_run)
+                    except Exception as exc:
+                        db.conn.rollback()
+                        print(f"  ! {pack['id']} {w['chat_id']}/{w['topic_id']}: {exc}",
+                              file=sys.stderr)
+                        continue
+                    if res is not None:
+                        made_round.append(res)
+        made.extend(made_round)
+        if (not until_done or dry_run or not made_round
+                or rounds >= max_rounds):
+            break
+        ops = sum(m["ops_applied"] for m in made_round)
+        print(f"раунд {rounds}: областей {len(made_round)}, операций {ops} — хвост остался, продолжаю")
     return made
 
 
@@ -535,7 +547,8 @@ def main() -> None:
     pack_id = _arg_value(args, "--pack")
     db_path = _arg_value(args, "--db") or DB_PATH
     made = run(db_path, pack_id=pack_id, dry_run=dry_run,
-               all_indexed="--all-indexed" in args)
+               all_indexed="--all-indexed" in args,
+               until_done="--until-done" in args)
     total = sum(m["ops_applied"] for m in made)
     overflow = sum(m["ops_overflow"] for m in made)
     print(f"областей обработано: {len(made)}, операций применено: {total}")

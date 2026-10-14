@@ -45,13 +45,20 @@ def _when(ts: int, now: int) -> str:
     return f"через {delta // 86400} дн."
 
 
-def collect(db: str | Path, days_ahead: int = 0, project: str | None = None) -> dict:
+def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
+            news_hours: int = 24) -> dict:
     now = int(time.time())
     with DB(db) as d:
         overdue = d.entity_overdue(project=project, days_ahead=0, limit=500)
         window = d.entity_overdue(project=project, days_ahead=days_ahead, limit=500)
         open_rows = [dict(r) for r in d.conn.execute(
             "SELECT * FROM entities WHERE closed_ts IS NULL ORDER BY due_ts")]
+        news = [dict(r) for r in d.conn.execute(
+            "SELECT * FROM entities WHERE created_ts >= ? ORDER BY created_ts DESC LIMIT 200",
+            (now - news_hours * 3600,))]
+        updated = d.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE updated_ts >= ? AND created_ts < ?",
+            (now - news_hours * 3600, now - news_hours * 3600)).fetchone()["c"]
     overdue_ids = {e["id"] for e in overdue}
     upcoming = [e for e in window if e["id"] not in overdue_ids]
     projects: dict[str, dict] = {}
@@ -67,7 +74,8 @@ def collect(db: str | Path, days_ahead: int = 0, project: str | None = None) -> 
         if e["due_ts"] and e["due_ts"] > now and (p["next_due"] is None or e["due_ts"] < p["next_due"]):
             p["next_due"] = e["due_ts"]
     return {"now_ts": now, "days_ahead": days_ahead, "projects": projects,
-            "overdue": overdue, "upcoming": upcoming}
+            "overdue": overdue, "upcoming": upcoming, "news": news,
+            "news_hours": news_hours, "news_updated": updated}
 
 
 def format_report(summary: dict) -> list[str]:
@@ -76,7 +84,13 @@ def format_report(summary: dict) -> list[str]:
     header = f"Мониторинг {date}: проектов {len(summary['projects'])}, просрочено {len(summary['overdue'])}"
     if summary["days_ahead"]:
         header += f", к сроку в ближайшие {summary['days_ahead']} дн.: {len(summary['upcoming'])}"
+    if summary.get("news"):
+        header += (f", нового за {summary['news_hours']}ч: {len(summary['news'])}"
+                   + (f" (+{summary['news_updated']} обновлений)" if summary.get("news_updated") else ""))
     lines = [header]
+    for e in summary["news"][:10]:
+        age = max((now - e["created_ts"]) // 3600, 1)
+        lines.append(f"  новое: [{e['pack']}/{e['kind']}] {e['title'][:120]} ({age}ч назад)")
     for name, p in sorted(summary["projects"].items()):
         parts = [f"{name}: открытых {p['open']}"]
         kinds = ", ".join(f"{k} {c}" for k, c in sorted(p["by_kind"].items()))
@@ -92,12 +106,14 @@ def format_report(summary: dict) -> list[str]:
 
 
 def run(db_path: str | Path = DB_PATH, days_ahead: int = 0, project: str | None = None,
-        send: bool = False, dry_run: bool = True) -> dict:
-    summary = collect(db_path, days_ahead=days_ahead, project=project)
+        send: bool = False, dry_run: bool = True, news_hours: int = 24) -> dict:
+    summary = collect(db_path, days_ahead=days_ahead, project=project,
+                      news_hours=news_hours)
     lines = format_report(summary)
     result = notify_mod.notify(lines, dry_run=dry_run) if send else None
     return {"projects": summary["projects"], "overdue": summary["overdue"],
-            "upcoming": summary["upcoming"], "lines": lines, "notify": result}
+            "upcoming": summary["upcoming"], "news": summary["news"],
+            "lines": lines, "notify": result}
 
 
 def _arg_value(args: list[str], name: str) -> str | None:
@@ -113,7 +129,8 @@ def main() -> None:
     send = "--send" in args and "--dry-run" not in args
     res = run(_arg_value(args, "--db") or DB_PATH,
               days_ahead=int(_arg_value(args, "--days-ahead") or 0),
-              project=_arg_value(args, "--project"), send=send, dry_run=not send)
+              project=_arg_value(args, "--project"), send=send, dry_run=not send,
+              news_hours=int(_arg_value(args, "--news-hours") or 24))
     for line in res["lines"]:
         print(line)
     if send:

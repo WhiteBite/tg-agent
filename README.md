@@ -89,6 +89,7 @@ python3 watch.py topics --chat @mygroup      # темы с цифрами: ск�
 python3 watch.py add --chat @mygroup --topic 123456 --alias "ML-новости" --pin
 python3 watch.py add --chat @mygroup --topic 789   --alias "Релизы"
 python3 watch.py list                        # что отмечено и сколько там непрочитанного
+python3 watch.py suggest                     # топ-тем по активности + готовые команды add
 python3 sync.py --watched                    # синхронизировать только отмеченное
 ```
 
@@ -112,7 +113,7 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_links` | Что шерили: топ @упоминаний, t.me, инвайтов, URL и источников пересылок |
 | `tg_topics` | Структура индекса: чаты, а по chat_id — его темы со счётчиками |
 | `tg_digests` | Готовые выжимки новых сообщений (создаёт `digest.py`) |
-| `tg_entities` | Извлечённые сущности (задачи, решения, обещания, вопросы): project, kind, status, owner, due_ts; фильтры pack/kind/status/project/chat_id |
+| `tg_entities` | Извлечённые сущности (задачи, решения, обещания, вопросы): project, kind, status, owner, due_ts; фильтры pack/kind/status/project/chat_id и query — подстрока в title/body |
 | `tg_entity` | Одна сущность по id: все поля и история событий — какое поле менялось, когда и с каким доказательством из сообщения |
 | `tg_overdue` | Открытые сущности со сроком: просроченные (`days_ahead=0`) или на горизонте N дней, по возрастанию due_ts |
 
@@ -285,6 +286,7 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 EXTRACT_PROVIDER=stub python3 extract.py            # механический извлекатель (без LLM)
 EXTRACT_PROVIDER=stub python3 extract.py --dry-run  # показать операции, ничего не писать
 EXTRACT_PROVIDER=stub python3 extract.py --all-indexed  # все чаты индекса, не только watch
+python3 extract.py --pack services --until-done     # дожевать хвост за один запуск
 EXTRACT_PROVIDER=openai EXTRACT_URL=https://api.openai.com/v1 \
     EXTRACT_KEY=sk-... EXTRACT_MODEL=gpt-4o-mini python3 extract.py --pack construction
 ```
@@ -296,8 +298,10 @@ generic, предметная область описана декларатив
 Пакеты: `construction` (PM для стройки: decision / task / promise / question)
 и `services` (сервисы и триалы: service / trial / promo; ключ дедупа —
 `dedup_hint`: домен или слаг сервиса, поэтому «Триал 30 дней на Acme» и
-«Acme Cloud trial» схлопываются в одну сущность). На смешанных базах гоняй
-точечно: `--pack construction` / `--pack services`.
+«Acme Cloud trial» схлопываются в одну сущность). `services` прицелен в темы
+watch-листа с проектом «сервисы» (`watch.py add --project сервисы`) — не
+шумит в код-чатах; scope меняется в `packs/services.py`. `--until-done`
+крутит раунды (по 200 сообщений на тему), пока хвост истории не кончится.
 
 По умолчанию область прогона — watch-лист; `--all-indexed` расширяет на все
 пары (chat, topic) индекса — для массовой обработки «кучи групп», без
@@ -323,12 +327,14 @@ python3 pipeline.py                  # sync (watch) -> extract -> digest -> moni
 python3 pipeline.py --pack services  # один пакет извлечения
 python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram
 python3 pipeline.py --days-ahead 7 --send
+python3 pipeline.py --loop 30 --send # демон: полный цикл каждые 30 минут
 ```
 
 Одна команда для автономного режима: шаги независимы, сбой одного не
-останавливает остальные (упавший шаг — в отчёте и в exit code 1). Для
-регулярности — cron раз в 15–60 минут; `live.py` остаётся отдельным демоном
-для мгновенной подхватки новых сообщений.
+останавливает остальные (упавший шаг — в отчёте и в exit code 1); extract
+дожёвывает хвост сообщений до конца. Регулярность — `--loop N` (демон,
+cron не нужен) или cron; `live.py` остаётся отдельным демоном для мгновенной
+подхватки новых сообщений.
 
 ## Мониторинг и уведомления
 
@@ -336,11 +342,15 @@ python3 pipeline.py --days-ahead 7 --send
 python3 monitor.py                       # dry-run: сводка по проектам и дедлайны
 python3 monitor.py --days-ahead 7        # добавить задачи на неделю вперёд
 python3 monitor.py --project "Объекд"    # один проект
+python3 monitor.py --news-hours 24       # окно блока «новое» (по умолчанию сутки)
 python3 monitor.py --send                # отправить сводку в Saved Messages
 ```
 
 Считает по `entities`: просроченные — открытые сущности со сроком, чей due_ts
 в прошлом; `--days-ahead N` дополнительно достаёт задачи до N дней включительно.
+Сводка начинается с блока «новое за Nч» — свежесозданные сущности всех пакетов
+(новые триалы и сервисы для пакета services) со временем появления: утренний
+`pipeline.py --loop 1440 --send` превращается в ежедневную сводку о триалах.
 `--send` — это `notify.py`:
 
 ```bash
@@ -450,7 +460,7 @@ swagger на app.101-group.ru — ждёт кредов).
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 369 офлайн-проверки (без аккаунта Telegram), гоняются в CI |
+| `test_offline.py` | 380 офлайн-проверки (без аккаунта Telegram), гоняются в CI |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -499,7 +509,7 @@ swagger на app.101-group.ru — ждёт кредов).
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **369 проверки, все зелёные** (работают и на Linux,
+`python3 test_offline.py` — **380 проверки, все зелёные** (работают и на Linux,
 и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,

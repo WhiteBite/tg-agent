@@ -11,7 +11,7 @@ PACK: dict = {
     "scope_filter": {
         "topic_title_regex": None,
         "alias_regex": None,
-        "project_regex": None,
+        "project_regex": "^сервисы$",
         "chat_ids": None,
     },
     "kinds": {

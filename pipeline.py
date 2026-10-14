@@ -5,10 +5,12 @@
     python3 pipeline.py --pack services      # один пакет извлечения
     python3 pipeline.py --skip sync          # офлайн-шаги, без Telegram
     python3 pipeline.py --days-ahead 7 --send
+    python3 pipeline.py --loop 30 --send     # демон: цикл каждые 30 минут
 
 Шаги независимы: сбой одного не останавливает остальные — упавший шаг
-отражается в отчёте и в коде выхода (1). Для регулярности — cron
-раз в 15–60 минут; live.py остаётся отдельным демоном.
+отражается в отчёте и в коде выхода (1). Extract дожёвывает хвост сообщений
+до конца (until_done). Для регулярности — либо --loop, либо cron; live.py
+остаётся отдельным демоном для мгновенной подхватки новых сообщений.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -49,7 +52,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         except Exception as exc:
             report["sync"] = {"ok": False, "error": str(exc)}
     try:
-        made = extract_mod.run(db_path, pack_id=pack_id)
+        made = extract_mod.run(db_path, pack_id=pack_id, until_done=True)
         report["extract"] = {
             "ok": True,
             "areas": len(made),
@@ -78,6 +81,20 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
     return report
 
 
+async def run_loop(db_path: str, pack_id: str | None, days_ahead: int,
+                   send: bool, minutes: int) -> None:
+    while True:
+        stamp = time.strftime("%H:%M:%S")
+        report = await run(db_path, pack_id=pack_id, days_ahead=days_ahead, send=send)
+        for name, res in report.items():
+            state = "ok" if res.get("ok") else f"FAIL {res.get('error')}"
+            details = "  ".join(f"{k}={v}" for k, v in res.items()
+                                if k not in ("ok", "lines", "notify", "error"))
+            print(f"[{stamp}] {name}: {state}  {details}")
+        print(f"[{stamp}] сплю {minutes} мин до следующего цикла (Ctrl+C — выход)")
+        await asyncio.sleep(minutes * 60)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="sync -> extract -> digest -> monitor одним прогоном")
@@ -89,7 +106,13 @@ def main() -> None:
                     help="отправить сводку в Saved Messages (нужен TG_ALLOW_SEND=1)")
     ap.add_argument("--skip", action="append", default=[], choices=["sync"],
                     metavar="STEP", help="пропустить шаг (sync)")
+    ap.add_argument("--loop", type=int, metavar="MIN",
+                    help="демон: повторять цикл каждые N минут (cron не нужен)")
     args = ap.parse_args()
+    if args.loop:
+        asyncio.run(run_loop(args.db, args.pack, args.days_ahead,
+                             args.send, args.loop))
+        return
     report = asyncio.run(run(args.db, pack_id=args.pack, days_ahead=args.days_ahead,
                              send=args.send, skip_sync="sync" in args.skip))
     for name, res in report.items():

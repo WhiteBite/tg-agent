@@ -945,7 +945,8 @@ class DB:
 
     def entities_list(self, pack: Optional[str] = None, kind: Optional[str] = None,
                       status: Optional[str] = None, project: Optional[str] = None,
-                      chat_id: Optional[int] = None, limit: int = 100) -> list[dict]:
+                      chat_id: Optional[int] = None, query: Optional[str] = None,
+                      limit: int = 100) -> list[dict]:
         sql = "SELECT * FROM entities WHERE 1=1"
         args: list[Any] = []
         if pack is not None:
@@ -963,6 +964,9 @@ class DB:
         if chat_id is not None:
             sql += " AND chat_id = ?"
             args.append(chat_id)
+        if query:
+            sql += " AND (title LIKE ? OR body LIKE ?)"
+            args += [f"%{query}%", f"%{query}%"]
         sql += " ORDER BY updated_ts DESC LIMIT ?"
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args)]

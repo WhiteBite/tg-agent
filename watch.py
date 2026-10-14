@@ -138,6 +138,30 @@ def cmd_list(args) -> None:
         _print_watch(db)
 
 
+def cmd_suggest(args) -> None:
+    """Топ-тем по активности, которых ещё нет в watch — с готовыми командами add."""
+    with DB(args.db) as db:
+        watched = {(w["chat_id"], w["topic_id"]) for w in db.watch_list()}
+        rows = db.conn.execute(
+            "SELECT t.chat_id, t.topic_id, t.title, t.messages, t.last_ts, "
+            "       c.title AS chat_title, c.username "
+            "FROM topics t JOIN chats c ON c.id = t.chat_id "
+            "WHERE t.messages >= ? AND t.closed = 0 "
+            "ORDER BY t.messages DESC LIMIT 300",
+            (args.min_messages,)).fetchall()
+    fresh = [r for r in rows if (r["chat_id"], r["topic_id"]) not in watched]
+    if not fresh:
+        print("всё активное уже в watch-листе")
+        return
+    print(f"топ-{min(len(fresh), args.top)} тем по сообщениям (курсор — последние 30 дней):")
+    for r in fresh[:args.top]:
+        chat = r["username"] or r["chat_id"]
+        label = r["title"] or "General"
+        print(f"  {r['messages']:>6} msgs  {r['chat_title'][:28]:28}  {label[:28]:28}  "
+              f"watch.py add --chat {chat} --topic {r['topic_id']} --alias {label!r}")
+    print("\nкопируй строку целиком; --project сервисы — чтобы пак services взял тему в прицел")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Watch-лист тем/каналов для агента")
     ap.add_argument("--db", default=os.environ.get("TG_DB", "tg_index.sqlite"))
@@ -166,6 +190,10 @@ def main() -> None:
 
     sub.add_parser("list", help="показать watch-лист")
 
+    s = sub.add_parser("suggest", help="топ-тем по активности, не в watch — с готовыми командами")
+    s.add_argument("--top", type=int, default=15, help="сколько показать")
+    s.add_argument("--min-messages", type=int, default=50, help="порог активности")
+
     args = ap.parse_args()
     if args.cmd == "topics":
         asyncio.run(cmd_topics(args))
@@ -175,6 +203,8 @@ def main() -> None:
         cmd_project(args)
     elif args.cmd == "remove":
         cmd_remove(args)
+    elif args.cmd == "suggest":
+        cmd_suggest(args)
     else:
         cmd_list(args)
 

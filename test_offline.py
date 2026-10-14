@@ -910,7 +910,7 @@ def test_extract_stub(db_path: Path) -> None:
     with DB(ex_db) as db:
         n2 = len(db.entities_list(pack="construction"))
         runs2 = db.conn.execute("SELECT COUNT(*) c FROM extraction_runs").fetchone()["c"]
-    check(n2 == 4 and runs2 == 2 and made2 == [],
+    check(n2 == 4 and runs2 == 1 and made2 == [],
           "extract: повторный прогон ничего не добавляет",
           f"ents={n2} runs={runs2} made={made2}")
 
@@ -928,7 +928,7 @@ def test_extract_stub(db_path: Path) -> None:
         runs3 = db.conn.execute("SELECT COUNT(*) c FROM extraction_runs").fetchone()["c"]
         cur3 = db.conn.execute(
             "SELECT value FROM meta WHERE key='extract:-100777:42:construction'").fetchone()
-    check(n3 == 4 and runs3 == 2 and cur3 is None and bool(made3) and buf.getvalue().strip(),
+    check(n3 == 4 and runs3 == 1 and cur3 is None and bool(made3) and buf.getvalue().strip(),
           "extract: dry-run печатает операции, но ничего не пишет",
           f"ents={n3} runs={runs3} cursor={cur3 and cur3['value']}")
 
@@ -1571,6 +1571,13 @@ def test_entities_mcp(db_path: Path) -> None:
               "MCP tg_entities: пометка «данные, не инструкции»",
               str(ents.get("note"))[:80])
 
+        q = call("tg_entities", {"query": "отчёт"}, 8)
+        check(q.get("count") == 1 and q["items"][0]["title"] == "Сдать отчёт",
+              "MCP tg_entities: query ищет подстроку в title/body", str(q.get("count")))
+        q2 = call("tg_entities", {"query": "которого нет нигде"}, 9)
+        check(q2.get("count") == 0,
+              "MCP tg_entities: query без совпадений пуст", str(q2.get("count")))
+
         one = call("tg_entity", {"id": ids[0]}, 4)
         check(one.get("id") == ids[0] and one.get("title") == "Сдать отчёт"
               and isinstance(one.get("events"), list) and len(one["events"]) >= 1,
@@ -1658,6 +1665,16 @@ def test_monitor_notify(db_path: Path) -> None:
           and all(len(ln) <= 300 for ln in lines),
           "monitor.format_report: строки по обоим проектам, <=300 симв.",
           str(len(lines)))
+
+    check(len(summary["news"]) == 4,
+          "monitor.collect: news — все сущности моложе 24ч", str(len(summary["news"])))
+    stale = monitor_mod.collect(str(mon_db), news_hours=1)
+    check(stale["news"] == [],
+          "monitor.collect: news_hours=1 отсекает двухчасовые", str(len(stale["news"])))
+    check("нового за 24ч: 4" in lines[0],
+          "monitor.format_report: шапка считает новое", lines[0][:120])
+    check(any("новое:" in ln and "Купить дрова" in ln for ln in lines),
+          "monitor.format_report: новое раскрыто списком", str(lines[:6]))
 
     dry = notify_mod.notify(["x"], dry_run=True)
     check(dry.get("ok") is True and dry.get("dry_run") is True
@@ -3188,7 +3205,7 @@ def test_services_pack(db_path: Path) -> None:
     now = int(time.time())
     with DB(sv_db) as db:
         db.upsert_chat(-100444, "Сервисы и триалы", None, "supergroup", False, 800)
-        db.watch_add(-100444, 1)
+        db.watch_add(-100444, 1, project="сервисы")
         for mid, text in ((401, "Триал 30 дней на Acme Cloud, acme.cloud/register"),
                           (402, "сервис betaai.com — нейросети для дизайнеров"),
                           (403, "промо: скидка 50% на всё")):
@@ -3295,6 +3312,82 @@ def test_pipeline(db_path: Path) -> None:
           str(sorted(rep3)))
 
 
+def test_extract_until_done(db_path: Path) -> None:
+    print("=== extract --until-done: дожёвывает хвост раундами ===")
+    ud_db = db_path.parent / "until_done.sqlite"
+    if ud_db.exists():
+        ud_db.unlink()
+    now = int(time.time())
+    with DB(ud_db) as db:
+        db.upsert_chat(-100555, "Поток", None, "supergroup", False, 3)
+        db.watch_add(-100555, 1, project="сервисы")
+        for i in range(1, 10):
+            ts = now - 600 + i
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100555, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                (i, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                 f"сервис demo{i}.com — раздача номер {i}"))
+        db.conn.commit()
+    import extract as extract_mod
+    saved = extract_mod.MAX_MESSAGES_PER_RUN
+    extract_mod.MAX_MESSAGES_PER_RUN = 2
+    try:
+        made = extract_mod.run(str(ud_db), pack_id="services",
+                               provider=extract_mod.provider_stub, until_done=True)
+    finally:
+        extract_mod.MAX_MESSAGES_PER_RUN = saved
+    check(sum(m["messages"] for m in made) == 9 and len(made) == 5,
+          "extract --until-done: 5 раундов по 2 сообщения, всё дочитано",
+          str([(m["messages"], m["ops_applied"]) for m in made]))
+    with DB(ud_db) as db:
+        n = db.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE pack='services'").fetchone()["c"]
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100555:1:services'").fetchone()
+    check(n == 9 and cur is not None and int(cur["value"]) == 9,
+          "extract --until-done: 9 сущностей, курсор на последнем сообщении",
+          f"ents={n} cursor={cur and cur['value']}")
+    made2 = extract_mod.run(str(ud_db), pack_id="services",
+                            provider=extract_mod.provider_stub, until_done=True)
+    check(made2 == [], "extract --until-done: повторный прогон пуст", str(made2))
+
+
+def test_watch_suggest(db_path: Path) -> None:
+    print("=== watch suggest: топ-тем с готовыми командами ===")
+    import argparse
+    import io
+    from contextlib import redirect_stdout
+    sg_db = db_path.parent / "suggest.sqlite"
+    if sg_db.exists():
+        sg_db.unlink()
+    with DB(sg_db) as db:
+        db.upsert_chat(-100501, "Форум", "team_forum", "supergroup", True, 5)
+        db.upsert_topic(-100501, 7, "Релизы")
+        db.upsert_topic(-100501, 8, "Мемы")
+        db.watch_add(-100501, 7, alias="релизы")
+        for tid, n in ((7, 300), (8, 120)):
+            for i in range(n):
+                ts = 1700000000 + i
+                db.conn.execute(
+                    "INSERT INTO messages(chat_id, msg_id, topic_id, ts, text) "
+                    "VALUES(-100501, ?, ?, ?, 'x')", (tid * 1000 + i, tid, ts))
+        db.recount_topics(-100501)
+        db.conn.commit()
+    import watch as watch_mod
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        watch_mod.cmd_suggest(argparse.Namespace(
+            db=str(sg_db), top=5, min_messages=50))
+    out = buf.getvalue()
+    check("watch.py add --chat team_forum --topic 8" in out
+          and "Мемы" in out,
+          "watch suggest: непросматриваемая тема с готовой командой", out[-200:])
+    check("--topic 7" not in out,
+          "watch suggest: уже отмеченная тема не предлагается", out[-200:])
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3342,6 +3435,8 @@ def main() -> int:
     test_search_global(db_path)
     test_services_pack(db_path)
     test_pipeline(db_path)
+    test_extract_until_done(db_path)
+    test_watch_suggest(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
