@@ -118,7 +118,9 @@ def make_client() -> Any:
                          "запусти python start.py: спросит один раз и запомнит")
     sess = os.environ.get("TELEGRAM_SESSION_STRING")
     name = os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session")
-    return TelegramClient(StringSession(sess) if sess else name, int(api_id), api_hash)
+    # без приёма апдейтов: иначе процесс постоянно пишет в общий .session и блокирует его
+    return TelegramClient(StringSession(sess) if sess else name, int(api_id), api_hash,
+                          receive_updates=False)
 
 
 async def list_chat_choices(client: Any) -> list[dict]:

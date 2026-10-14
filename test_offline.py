@@ -2901,6 +2901,23 @@ def test_start_wizard(db_path: Path) -> None:
     except SystemExit as exc:
         check("start.py" in str(exc), "make_client: без ключей отсылает к start.py", str(exc))
 
+    sess_name = db_path.parent / "test_make_client"
+    os.environ["TELEGRAM_API_ID"] = "123"
+    os.environ["TELEGRAM_API_HASH"] = "0123456789abcdef0123456789abcdef"
+    os.environ["TELEGRAM_SESSION_NAME"] = str(sess_name)
+    cl = None
+    try:
+        cl = sync_mod.make_client()
+        check(getattr(cl, "_no_updates", False) is True,
+              "make_client: receive_updates=False — CLI не блокирует общий .session",
+              str(getattr(cl, "_no_updates", None)))
+    finally:
+        for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_SESSION_NAME"):
+            os.environ.pop(k, None)
+        if cl is not None:
+            cl.session.close()
+        sess_name.with_suffix(".session").unlink(missing_ok=True)
+
 
 def test_topic_norm(db_path: Path) -> None:
     print("=== topic_id: General=1 канонически, миграция NULL, индекс ===")

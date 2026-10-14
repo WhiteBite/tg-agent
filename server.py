@@ -479,10 +479,12 @@ if ALLOW_LIVE:
         global _client
         if _client is None:
             sess = os.environ.get("TELEGRAM_SESSION_STRING")
+            # без приёма апдейтов: иначе сервер вечно пишет в общий .session и блокирует sync
             _client = TelegramClient(
                 StringSession(sess) if sess else os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session"),
                 int(os.environ["TELEGRAM_API_ID"]),
                 os.environ["TELEGRAM_API_HASH"],
+                receive_updates=False,
             )
             await _client.start()
         return _client
