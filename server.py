@@ -486,6 +486,11 @@ if ALLOW_LIVE:
                 os.environ["TELEGRAM_API_HASH"],
                 receive_updates=False,
             )
+            try:
+                # общий .session бывает занят CLI-синком — пусть SQLite ждёт, а не падает
+                _client.session._conn.execute("PRAGMA busy_timeout=30000")
+            except AttributeError:  # StringSession — нечего настраивать
+                pass
             await _client.start()
         return _client
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 — 2026-10-14
+Эксплуатация на реальном аккаунте: живой discovery, папки под контролем агента, устойчивость:
+- Новый `folders.py`: правка состава папок Telegram (`list` / `add` / `remove` по @username или id). Второй пишущий модуль после `notify.py`, контент не пишет — только membership; после правки состав перечитывается в индекс (`folder_chats`). Агенту достаточно попросить «добавь чат X в папку AI».
+- `sync.py`: `--folder` переживает `FolderIdInvalidError` (слой 229 отклоняет folder_id в getDialogs) — состав берётся из include_peers (getDialogFilters). `fetch_folders` разворачивает объект `DialogFilters` и TextWithEntities-title.
+- `sync.py`/`server.py`: `receive_updates=False` у CLI- и MCP-клиентов + `busy_timeout=30000` на общий `.session` — параллельная работа живого MCP-клиента и CLI-синка больше не падает `database is locked`.
+- `env.py`: `harden_stdio()` — print не роняет скрипты на эмодзи в cp1251-консоли Windows (обрывал sync на названиях чатов).
+- Проверки: 354 → 369.
+
 ## 0.5.0 — 2026-10-14
 Discovery, предметный пакет и автономный конвейер:
 - Новый `search.py`: глобальный поиск Telegram по ключевому слову (`messages.SearchGlobalRequest` — обычный API-запрос, не парсинг). Каналы/группы/юзеры с marked-id, `--type channel|group|user`, `--limit`; цепочка «поиск → sync --chat → watch» закрывает сценарий «найди все каналы по ИИ».

@@ -122,9 +122,14 @@ def make_client() -> Any:
                          "запусти python start.py: спросит один раз и запомнит")
     sess = os.environ.get("TELEGRAM_SESSION_STRING")
     name = os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session")
-    # без приёма апдейтов: иначе процесс постоянно пишет в общий .session и блокирует его
-    return TelegramClient(StringSession(sess) if sess else name, int(api_id), api_hash,
-                          receive_updates=False)
+    client = TelegramClient(StringSession(sess) if sess else name, int(api_id), api_hash,
+                            receive_updates=False)
+    try:
+        # общий .session бывает занят живым MCP-клиентом — пусть SQLite ждёт, а не падает
+        client.session._conn.execute("PRAGMA busy_timeout=30000")
+    except AttributeError:  # StringSession — нечего настраивать
+        pass
+    return client
 
 
 async def list_chat_choices(client: Any) -> list[dict]:

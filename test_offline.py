@@ -175,6 +175,7 @@ class FakeClient:
         self.global_chats: list = []   # ответ на SearchGlobalRequest
         self.global_users: list = []
         self.last_global_req = None
+        self.filter_updates: list = []  # UpdateDialogFilterRequest, посланные folders.py
         self.folder_filters = [(fid, t, ids) for fid, ids in (folders or {}).items()
                                for t in ({7: "AI Agent", 3: "Dev"}.get(fid, f"папка{fid}"),)]
 
@@ -199,6 +200,9 @@ class FakeClient:
 
     async def get_entity(self, peer):
         return self._group(peer)["entity"]
+
+    def get_input_entity(self, peer):
+        return peer
 
     async def iter_messages(self, entity, limit=None, reply_to=None,
                             offset_id=0, reverse=False, **kw):
@@ -266,6 +270,14 @@ class FakeClient:
             elif getattr(req, "users_only", None):
                 chats = []
             return GlobalRes(chats, users)
+        if name == "UpdateDialogFilterRequest":
+            self.filter_updates.append(req)
+            ids = [sync_mod._peer_marked(p) or sync_mod.marked_id(p)
+                   for p in (req.filter.include_peers or [])]
+            for i, (fid, t, _) in enumerate(self.folder_filters):
+                if fid == req.id:
+                    self.folder_filters[i] = (fid, t, ids)
+            return True
         assert name == "GetForumTopicsRequest", name
         peer = getattr(req, "peer", None) or getattr(req, "channel", None)
         gid = int(getattr(peer, "id", peer))
@@ -432,6 +444,49 @@ def test_folder_fallback(db_path: Path) -> None:
     news = next((c for c in r["chats"] if c["chat_id"] == -100333), None)
     check(news is not None and news["new_messages"] == 3,
           "sync --folder: фолбэк синхронизировал канал-вещание", str(news))
+
+
+def test_folder_edit(db_path: Path) -> None:
+    print("=== folders: add/remove чатов в папке ===")
+    import folders as folders_mod
+    client = build_fixture()
+    fdb = db_path.parent / "folder_edit.sqlite"
+    if fdb.exists():
+        fdb.unlink()
+
+    res = asyncio.run(folders_mod.folder_edit(client, 7, ["-100222"],
+                                              mode="add", db_path=str(fdb)))
+    check(res.get("ok") and res.get("changed") == 1 and res.get("peers") == 3,
+          "folders: add доложил чат в папку", str(res))
+    upd = client.filter_updates[-1]
+    peers = sorted(sync_mod._peer_marked(p) or sync_mod.marked_id(p)
+                   for p in upd.filter.include_peers)
+    check(peers == [-100333, -100222, -100111],
+          "folders: include_peers пополнился, старые на месте", str(peers))
+    with DB(fdb) as db:
+        got = {r["chat_id"] for r in db.conn.execute(
+            "SELECT chat_id FROM folder_chats WHERE folder_id=7")}
+    check(got == {-100111, -100222, -100333},
+          "folders: локальная копия состава обновлена", str(sorted(got)))
+
+    res2 = asyncio.run(folders_mod.folder_edit(client, 7, ["-100222"], mode="add"))
+    check(res2.get("changed") == 0 and len(client.filter_updates) == 1,
+          "folders: повторный add — no-op без запроса к Telegram", str(res2))
+
+    res3 = asyncio.run(folders_mod.folder_edit(client, 7, ["-100222"], mode="remove"))
+    check(res3.get("ok") and res3.get("changed") == 1 and res3.get("peers") == 2,
+          "folders: remove убрал чат", str(res3))
+    upd3 = client.filter_updates[-1]
+    peers3 = sorted(sync_mod._peer_marked(p) for p in upd3.filter.include_peers)
+    check(-100222 not in peers3 and peers3 == [-100333, -100111],
+          "folders: после remove чата в папке нет", str(peers3))
+
+    res4 = asyncio.run(folders_mod.folder_edit(client, 999, ["-100222"], mode="add"))
+    check(res4.get("ok") is False and "не найдена" in res4.get("error", ""),
+          "folders: несуществующая папка — структурная ошибка", str(res4))
+    res5 = asyncio.run(folders_mod.folder_edit(client, 7, ["@nope"], mode="add"))
+    check(res5.get("ok") is False and "не найден" in res5.get("error", ""),
+          "folders: несуществующий чат — структурная ошибка", str(res5))
 
 
 def test_folder_and_backfill(db_path: Path) -> None:
@@ -2934,6 +2989,10 @@ def test_start_wizard(db_path: Path) -> None:
         check(getattr(cl, "_no_updates", False) is True,
               "make_client: receive_updates=False — CLI не блокирует общий .session",
               str(getattr(cl, "_no_updates", None)))
+        bt = cl.session._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        check(bt == 30000,
+              "make_client: busy_timeout 30с — конкуренция за .session переживается",
+              str(bt))
     finally:
         for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_SESSION_NAME"):
             os.environ.pop(k, None)
@@ -3249,6 +3308,7 @@ def main() -> int:
     test_sync(db_path)
     test_folder_and_backfill(db_path)
     test_folder_fallback(db_path)
+    test_folder_edit(db_path)
     test_backfill_resume(db_path)
     test_marked_ids(db_path)
     test_reads(db_path)
