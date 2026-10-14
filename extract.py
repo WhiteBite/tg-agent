@@ -5,6 +5,7 @@
     EXTRACT_PROVIDER=stub python3 extract.py --dry-run  # показать операции, ничего не писать
     EXTRACT_PROVIDER=stub python3 extract.py --all-indexed  # все чаты индекса, не только watch
     python3 extract.py --pack services --until-done     # крутить до исчерпания хвоста
+    python3 extract.py --until-done --workers 6         # темы параллельно (EXTRACT_WORKERS)
     EXTRACT_PROVIDER=openai EXTRACT_URL=https://api.openai.com/v1 \
         EXTRACT_KEY=sk-... python3 extract.py --pack construction --db demo.sqlite
 
@@ -496,10 +497,37 @@ def _scopes(db: DB, all_indexed: bool) -> list[dict]:
     return out
 
 
+def _drain_scope(db_path: str, pack: dict, w: dict, prov, dry_run: bool,
+                 until_done: bool, max_rounds: int) -> list[dict]:
+    """Дожёвывает один скоуп раундами (батч за батчем) до исчерпания хвоста."""
+    made: list[dict] = []
+    rounds = 0
+    while True:
+        rounds += 1
+        try:
+            with DB(db_path) as db:
+                res = _run_scope(db, pack, w, prov, dry_run)
+        except Exception as exc:
+            print(f"  ! {pack['id']} {w['chat_id']}/{w['topic_id']}: {exc}",
+                  file=sys.stderr, flush=True)
+            break
+        if res is None:
+            break
+        made.append(res)
+        if not dry_run:
+            tail = f" overflow={res['ops_overflow']}" if res["ops_overflow"] else ""
+            print(f"  {res['pack']} {res['chat_id']}/{res['topic_id']}: "
+                  f"msgs={res['messages']} ops={res['ops_applied']} "
+                  f"rejected={res['ops_rejected']}{tail}", flush=True)
+        if not until_done or dry_run or rounds >= max_rounds:
+            break
+    return made
+
+
 def run(db_path: str = DB_PATH, pack_id: str | None = None,
         dry_run: bool = False, provider=None, packs: list | None = None,
         all_indexed: bool = False, until_done: bool = False,
-        max_rounds: int = 100) -> list[dict]:
+        max_rounds: int = 100, workers: int | None = None) -> list[dict]:
     prov = get_provider(provider)
     if packs is None:
         if pack_id is not None:
@@ -508,36 +536,28 @@ def run(db_path: str = DB_PATH, pack_id: str | None = None,
             packs = [PACKS[pack_id]]
         else:
             packs = list(PACKS.values())
-    made: list[dict] = []
-    rounds = 0
-    while True:
-        rounds += 1
-        made_round: list[dict] = []
-        with DB(db_path) as db:
-            for pack in packs:
-                for w in _scopes(db, all_indexed):
-                    if not scope_matches(pack["scope_filter"], w):
-                        continue
-                    try:
-                        res = _run_scope(db, pack, w, prov, dry_run)
-                    except Exception as exc:
-                        db.conn.rollback()
-                        print(f"  ! {pack['id']} {w['chat_id']}/{w['topic_id']}: {exc}",
-                              file=sys.stderr)
-                        continue
-                    if res is not None:
-                        made_round.append(res)
-                        if not dry_run:
-                            tail = f" overflow={res['ops_overflow']}" if res["ops_overflow"] else ""
-                            print(f"  {res['pack']} {res['chat_id']}/{res['topic_id']}: "
-                                  f"msgs={res['messages']} ops={res['ops_applied']} "
-                                  f"rejected={res['ops_rejected']}{tail}", flush=True)
-        made.extend(made_round)
-        if (not until_done or dry_run or not made_round
-                or rounds >= max_rounds):
-            break
-        ops = sum(m["ops_applied"] for m in made_round)
-        print(f"раунд {rounds}: областей {len(made_round)}, операций {ops} — хвост остался, продолжаю")
+    workers = max(1, workers if workers is not None
+                  else int(os.environ.get("EXTRACT_WORKERS") or 1))
+    with DB(db_path) as db:
+        tasks = [(pack, w) for pack in packs
+                 for w in _scopes(db, all_indexed)
+                 if scope_matches(pack["scope_filter"], w)]
+    if not tasks:
+        return []
+    if workers == 1 or dry_run or len(tasks) == 1:
+        made: list[dict] = []
+        for pack, w in tasks:
+            made.extend(_drain_scope(db_path, pack, w, prov, dry_run,
+                                     until_done, max_rounds))
+        return made
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    made = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(_drain_scope, db_path, pack, w, prov, dry_run,
+                            until_done, max_rounds)
+                for pack, w in tasks]
+        for fut in as_completed(futs):
+            made.extend(fut.result())
     return made
 
 
@@ -554,9 +574,11 @@ def main() -> None:
     dry_run = "--dry-run" in args
     pack_id = _arg_value(args, "--pack")
     db_path = _arg_value(args, "--db") or DB_PATH
+    workers = _arg_value(args, "--workers")
     made = run(db_path, pack_id=pack_id, dry_run=dry_run,
                all_indexed="--all-indexed" in args,
-               until_done="--until-done" in args)
+               until_done="--until-done" in args,
+               workers=int(workers) if workers else None)
     total = sum(m["ops_applied"] for m in made)
     overflow = sum(m["ops_overflow"] for m in made)
     print(f"областей обработано: {len(made)}, операций применено: {total}")

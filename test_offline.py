@@ -3443,6 +3443,41 @@ def test_llm_extra_body(db_path: Path) -> None:
                 os.environ[k] = v
 
 
+def test_extract_parallel(db_path: Path) -> None:
+    print("=== extract: параллельные воркеры обрабатывают темы одновременно ===")
+    par_db = db_path.parent / "parallel.sqlite"
+    if par_db.exists():
+        par_db.unlink()
+    now = int(time.time())
+    with DB(par_db) as db:
+        for cid, alias in ((-100701, "альфа"), (-100702, "бета")):
+            db.upsert_chat(cid, f"Чат {alias}", None, "supergroup", False, 3)
+            db.watch_add(cid, 1, project="сервисы")
+            for i in range(1, 4):
+                ts = now - 60 + i
+                db.conn.execute(
+                    "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                    "sender_id, sender_name, is_service, text) "
+                    "VALUES(?, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                    (cid, i, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                     f"сервис {alias}{i}.com — раздача"))
+        db.conn.commit()
+    import extract as extract_mod
+    made = extract_mod.run(str(par_db), pack_id="services",
+                           provider=extract_mod.provider_stub,
+                           until_done=True, workers=2)
+    chats = sorted(m["chat_id"] for m in made)
+    check(chats == [-100702, -100701],
+          "extract: оба чата обработаны параллельно", str(chats))
+    with DB(par_db) as db:
+        n = db.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE pack='services'").fetchone()["c"]
+        by_chat = dict(db.conn.execute(
+            "SELECT chat_id, COUNT(*) FROM entities WHERE pack='services' GROUP BY chat_id").fetchall())
+    check(n == 6 and by_chat == {-100701: 3, -100702: 3},
+          "extract: сущности из обоих параллельных скоупов", str(by_chat))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3493,6 +3528,7 @@ def main() -> int:
     test_extract_until_done(db_path)
     test_watch_suggest(db_path)
     test_llm_extra_body(db_path)
+    test_extract_parallel(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
