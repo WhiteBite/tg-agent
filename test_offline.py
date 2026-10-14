@@ -785,6 +785,47 @@ def test_extract_stub(db_path: Path) -> None:
           "extract: dry-run печатает операции, но ничего не пишет",
           f"ents={n3} runs={runs3} cursor={cur3 and cur3['value']}")
 
+    try:
+        extract_mod.run(str(ex_db), pack_id="bogus")
+        check(False, "extract: неизвестный пакет поднимает SystemExit", "нет исключения")
+    except SystemExit as exc:
+        check(str(exc) == "неизвестный пакет: bogus",
+              "extract: неизвестный пакет поднимает SystemExit", str(exc))
+    except KeyError as exc:
+        check(False, "extract: неизвестный пакет поднимает SystemExit", f"KeyError: {exc}")
+
+    with DB(ex_db) as db:
+        db.upsert_topic(-100777, 44, "Баня")
+        db.watch_add(-100777, 44, project="баня")
+        for mid, text in ((301, "решено: баня по плану"), (302, "привет")):
+            ts = now - 600 + mid
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100777, ?, 44, ?, ?, 1, 'Иван', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+    from packs import PACKS as _PACKS
+    banya = dict(_PACKS["construction"])
+    banya["id"] = "banya"
+    banya["scope_filter"] = {"project_regex": "^баня$"}
+    made_n = extract_mod.run(str(ex_db), packs=[banya])
+    check(len(made_n) == 1 and made_n[0]["topic_id"] == 44 and made_n[0]["pack"] == "banya",
+          "extract: кастомный пакет обрабатывает только свой scope",
+          str([(m["pack"], m["topic_id"]) for m in made_n]))
+    with DB(ex_db) as db:
+        cur44 = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100777:44:banya'").fetchone()
+        cur42 = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100777:42:banya'").fetchone()
+        ents_b = db.entities_list(pack="banya")
+    check(cur44 is not None and cur42 is None,
+          "extract: чужой scope не тронут (курсор только у своего)",
+          f"cur44={cur44 and cur44['value']} cur42={cur42 and cur42['value']}")
+    check(len(ents_b) == 1 and ents_b[0]["project"] == "баня",
+          "extract: сущность кастомного пакета наследует проект темы",
+          str([(e["kind"], e["project"]) for e in ents_b]))
+
 
 def test_extract_validation(db_path: Path) -> None:
     print("=== extract: семантика операций, валидация, ретраи провайдера ===")
@@ -921,6 +962,27 @@ def test_extract_validation(db_path: Path) -> None:
               "extract: (c) update с null/пустыми полями не затирает существующие",
               f"owner={e['owner']} title={e['title']} confidence={e['confidence']}")
 
+    with DB(ex_db) as db:
+        db.conn.execute(
+            "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+            "sender_id, sender_name, is_service, text) "
+            "VALUES(-100700, 14, 7, ?, ?, 1, 'Иван', 0, 'секретная фраза чужого чата')",
+            (now - 586, datetime.fromtimestamp(now - 586, timezone.utc).isoformat()))
+        db.conn.commit()
+    extract_mod.run(str(ex_db), provider=provider([
+        {"op": "update", "kind": "task", "title": "Залить фундамент",
+         "entity_id": 1, "body": "", "owner": "Олег", "due_text": None,
+         "due_ts": None, "confidence": 0.9,
+         "evidence": [ev(14, "секретная фраза", chat=-100700)]}]))
+    with DB(ex_db) as db:
+        run = last_run(db)
+        check(run is not None and run["ops_applied"] == 0 and run["ops_rejected"] == 1,
+              "extract: (c) evidence из чужого чата отклонено",
+              f"applied={run and run['ops_applied']} rejected={run and run['ops_rejected']}")
+        e = db.conn.execute("SELECT owner FROM entities WHERE id=1").fetchone()
+        check(e["owner"] == "Пётр",
+              "extract: (c) чужой чат в evidence не меняет сущность", str(e["owner"]))
+
     extract_mod.run(str(ex_db), provider=provider([op_flip("close", 1, 13, "сдан")]))
     with DB(ex_db) as db:
         e = db.conn.execute("SELECT closed_ts FROM entities WHERE id=1").fetchone()
@@ -931,6 +993,11 @@ def test_extract_validation(db_path: Path) -> None:
         check(evc is not None and evc["msg_id"] == 13,
               "extract: (d) одно событие close с доказательством",
               f"msg_id={evc and evc['msg_id']}")
+        open_ids = [e["id"] for e in db.entities_list(status="open")]
+        closed_ids = [e["id"] for e in db.entities_list(status="closed")]
+        check(1 not in open_ids and 1 in closed_ids,
+              "extract: (d) close перевёл status в closed",
+              f"open={open_ids} closed={closed_ids}")
 
     extract_mod.run(str(ex_db), provider=provider([op_update(1, 12, "прораба", owner="Мария")]))
     with DB(ex_db) as db:
@@ -948,6 +1015,8 @@ def test_extract_validation(db_path: Path) -> None:
         evr = db.conn.execute(
             "SELECT COUNT(*) c FROM entity_events WHERE entity_id=1 AND op='reopen'").fetchone()["c"]
         check(evr == 1, "extract: (d) одно событие reopen", str(evr))
+        open_ids = [e["id"] for e in db.entities_list(status="open")]
+        check(1 in open_ids, "extract: (d) reopen вернул status=open", str(open_ids))
 
     extract_mod.run(str(ex_db), provider=provider(
         [op_new(f"Задача {i}", 14, "арматуры") for i in range(55)]))
@@ -1012,9 +1081,13 @@ def test_extract_validation(db_path: Path) -> None:
               "extract: (g) payload: модель, температура, strict json_schema пакета",
               f"model={p0['model']} temp={p0['temperature']}")
         msgs = calls[1]["messages"]
-        check(len(msgs) == 3 and msgs[1]["role"] == "assistant"
-              and msgs[1]["content"] == "это не JSON" and msgs[2]["role"] == "user"
-              and msgs[2]["content"].startswith("Your output failed:"),
+        check(msgs[0]["role"] == "system" and msgs[1]["role"] == "user"
+              and msgs[1]["content"] == "промпт",
+              "extract: (g) системное сообщение отделено от данных",
+              f"roles={[m['role'] for m in msgs]}")
+        check(len(msgs) == 4 and msgs[2]["role"] == "assistant"
+              and msgs[2]["content"] == "это не JSON" and msgs[3]["role"] == "user"
+              and msgs[3]["content"].startswith("Your output failed:"),
               "extract: (g) ретрай дополнен ответом модели и фидбеком об ошибке",
               f"roles={[m['role'] for m in msgs]}")
 
@@ -1083,6 +1156,108 @@ def test_extract_validation(db_path: Path) -> None:
     check(m8 is not None and m8["messages"] == 50 and m8["upto_msg"] == 549,
           "extract: (h) второй прогон подбирает остаток",
           f"messages={m8 and m8['messages']} upto={m8 and m8['upto_msg']}")
+
+    with DB(ex_db) as db:
+        for mid, text in ((16, "Новая поставка на объект"), (17, "Смета обновлена"),
+                          (18, "Задача C принята в работу"), (19, "Задача C закрыта по факту"),
+                          (20, "Задача C снова открыта"), (21, "Задача C подтверждена"),
+                          (22, "Задача C в работе"), (23, "Задача C почти готова")):
+            ts = now - 600 + mid
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100888, ?, 7, ?, ?, 1, 'Иван', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([], 1))
+    with DB(ex_db) as db:
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
+        check(cur is not None and int(cur["value"]) == 15,
+              "extract: (i) covered меньше курсора не двигает курсор назад",
+              str(cur and cur["value"]))
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([], 17))
+    with DB(ex_db) as db:
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
+        check(cur is not None and int(cur["value"]) == 17,
+              "extract: (i) после клампа курсор двигается вперёд", str(cur and cur["value"]))
+
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_new("Задача C", 18, "принята")], 18))
+    with DB(ex_db) as db:
+        row = db.conn.execute(
+            "SELECT id FROM entities WHERE title='Задача C' AND closed_ts IS NULL").fetchone()
+    check(row is not None, "extract: (j) создана сущность для сценария reopen",
+          str(row and row["id"]))
+    ent_c = row["id"]
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_flip("close", ent_c, 19, "закрыта")], 19))
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_new("Задача C", 20, "снова")], 20))
+    with DB(ex_db) as db:
+        n = db.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE title='Задача C'").fetchone()["c"]
+        check(n == 2, "extract: (j) тот же kind+title после close создаёт вторую сущность", str(n))
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_flip("reopen", ent_c, 21, "подтверждена")], 21))
+    with DB(ex_db) as db:
+        run = last_run(db)
+        check(run is not None and run["ops_applied"] == 0 and run["ops_rejected"] == 1
+              and run["status"] == "partial",
+              "extract: (j) reopen при живом дубле отклонён без исключения",
+              f"applied={run and run['ops_applied']} rejected={run and run['ops_rejected']}")
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
+        check(cur is not None and int(cur["value"]) == 21,
+              "extract: (j) курсор двигается несмотря на отклонённый reopen",
+              str(cur and cur["value"]))
+        e = db.conn.execute("SELECT closed_ts FROM entities WHERE id=?", (ent_c,)).fetchone()
+        check(e["closed_ts"] is not None, "extract: (j) старая сущность осталась закрытой",
+              str(e["closed_ts"]))
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([], 23))
+    with DB(ex_db) as db:
+        run = last_run(db)
+        check(run is not None and run["ops_rejected"] == 0,
+              "extract: (j) следующий прогон здоров", str(dict(run) if run else None))
+
+    with DB(ex_db) as db:
+        db.upsert_topic(-100888, 9, "Бюджет")
+        db.watch_add(-100888, 9, project="стройка")
+        for i in range(5):
+            mid = 600 + i
+            ts = now - 300 + i
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100888, ?, 9, ?, ?, 1, 'Иван', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                 "длинное сообщение " + "x" * 300))
+        db.conn.commit()
+
+    saved_chars = os.environ.get("EXTRACT_MAX_CHARS")
+    os.environ["EXTRACT_MAX_CHARS"] = "800"
+    try:
+        made = extract_mod.run(str(ex_db), provider=lambda prompt, p: result([], 0))
+        m9 = next((m for m in made if m["topic_id"] == 9), None)
+        check(m9 is not None and 0 < m9["messages"] < 5,
+              "extract: (k) бюджет символов режет хвост батча",
+              f"messages={m9 and m9['messages']}")
+        kept = m9["messages"]
+        with DB(ex_db) as db:
+            cur9 = db.conn.execute(
+                "SELECT value FROM meta WHERE key='extract:-100888:9:construction'").fetchone()
+        check(cur9 is not None and int(cur9["value"]) == 600 + kept - 1,
+              "extract: (k) курсор = последнему вошедшему сообщению",
+              str(cur9 and cur9["value"]))
+    finally:
+        if saved_chars is None:
+            os.environ.pop("EXTRACT_MAX_CHARS", None)
+        else:
+            os.environ["EXTRACT_MAX_CHARS"] = saved_chars
+
+    made = extract_mod.run(str(ex_db), provider=lambda prompt, p: result([], 0))
+    m9b = next((m for m in made if m["topic_id"] == 9), None)
+    check(m9b is not None and m9b["messages"] == 5 - kept,
+          "extract: (k) следующий прогон подбирает остаток",
+          f"messages={m9b and m9b['messages']} kept={kept}")
 
 
 def test_entities_mcp(db_path: Path) -> None:
@@ -1379,6 +1554,23 @@ def test_media(db_path: Path) -> None:
         check(len(ents) == 1 and "переносим срок" in ents[0]["title"],
               "media: stub-экстрактор создал decision из транскрипции",
               str([e["title"] for e in ents]))
+
+        vmsg3 = Msg(606, datetime.fromtimestamp(int(time.time()), timezone.utc), users[1],
+                    None, media=MessageMediaVoice())
+        with DB(md_db) as db:
+            live_mod.handle_message(db, vmsg3, -100600, False)
+        secret = "sk-" + "a" * 40
+        res5 = media_mod.run(str(md_db), provider=lambda c, m, k: {
+            "text": f"решено: ключ {secret} утёк", "engine": "custom"})
+        check(res5 == {"done": 1, "failed": 0},
+              "media: транскрипция с секретом обработана", str(res5))
+        with DB(md_db) as db:
+            row = db.conn.execute(
+                "SELECT text FROM media_assets WHERE chat_id=-100600 AND msg_id=606").fetchone()
+        check(row is not None and secret not in (row["text"] or "")
+              and "[скрыто:" in (row["text"] or ""),
+              "media: секрет в транскрипции маскируется до записи",
+              repr(row and (row["text"] or "")[:80]))
     finally:
         for k, v in saved.items():
             if v is None:
@@ -1405,7 +1597,7 @@ def test_export(db_path: Path) -> None:
         for eid, mid in ((1, 11), (2, 12)):
             db.conn.execute(
                 "INSERT INTO entity_events(entity_id, run_id, ts, op, chat_id, msg_id, quote) "
-                "VALUES(?, 1, ?, 'new', -100999, ?, 'фраза')", (eid, now, mid))
+                "VALUES(?, 1, ?, 'new', -100999, ?, 'фраза')", (eid, now - 3600, mid))
         db.conn.commit()
 
     res = export_mod.run(str(exp_db), system="file", out=str(out_path))
@@ -1427,9 +1619,29 @@ def test_export(db_path: Path) -> None:
           "export: без новых событий — 0 выгружено, файл не растёт", str(res2))
 
     with DB(exp_db) as db:
+        synced1 = db.conn.execute(
+            "SELECT synced_ts FROM integrations WHERE entity_id=1 AND system='file'").fetchone()["synced_ts"]
         db.conn.execute(
             "INSERT INTO entity_events(entity_id, run_id, ts, op, chat_id, msg_id, quote) "
-            "VALUES(1, 2, ?, 'update', -100999, 99, 'срок сдвинут')", (now + 3600,))
+            "VALUES(1, 2, ?, 'update', -100999, 98, 'на границе курсора')", (synced1,))
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, run_id, ts, op, chat_id, msg_id, quote) "
+            "VALUES(2, 2, ?, 'update', -100999, 97, 'старое событие')", (synced1 - 100,))
+        db.conn.commit()
+    res_edge = export_mod.run(str(exp_db), system="file", out=str(out_path))
+    last_edge = json.loads(out_path.read_text(encoding="utf-8").splitlines()[-1])
+    check(res_edge.get("exported") == 1 and last_edge["entity"]["id"] == 1
+          and [e["quote"] for e in last_edge["events"]] == ["на границе курсора"],
+          "export: событие с ts == курсору не теряется, более старое не всплывает",
+          str(res_edge))
+    res_edge2 = export_mod.run(str(exp_db), system="file", out=str(out_path))
+    check(res_edge2.get("exported") == 0,
+          "export: после граничного события повторный прогон пуст", str(res_edge2))
+
+    with DB(exp_db) as db:
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, run_id, ts, op, chat_id, msg_id, quote) "
+            "VALUES(1, 3, ?, 'update', -100999, 99, 'срок сдвинут')", (now - 1800,))
         db.conn.commit()
     res3 = export_mod.run(str(exp_db), system="file", out=str(out_path))
     last = json.loads(out_path.read_text(encoding="utf-8").splitlines()[-1])
@@ -1446,6 +1658,18 @@ def test_export(db_path: Path) -> None:
     res_b = export_mod.run(str(exp_db), system="bogus")
     check(res_b.get("ok") is False and "неизвестная система" in res_b.get("error", ""),
           "export: неизвестная система — структурированная ошибка", str(res_b))
+
+    saved_argv = sys.argv
+    try:
+        sys.argv = ["export.py", "--db", str(exp_db), "--system", "bogus"]
+        try:
+            export_mod.main()
+            code = 0
+        except SystemExit as exc:
+            code = exc.code
+        check(code == 1, "export: CLI выходит кодом 1 на структурной ошибке", str(code))
+    finally:
+        sys.argv = saved_argv
 
 
 # ------------------------------------------- 5. настоящий server.py по MCP stdio

@@ -6,10 +6,10 @@
     python3 export.py --system notion                  # структурированная ошибка: нет API-доступа
 
 Путь file-провайдера: --out, иначе TG_EXPORT_PATH, иначе export.jsonl рядом с базой.
-Курсор каждого провайдера живёт в integrations (entity_id, system): выгружаются
-только сущности, у которых есть события свежее synced_ts; первый прогон берёт все
-сущности с событиями, сущности без событий не выгружаются никогда. 101 и notion
-не реализованы — возвращают словарь-ошибку, исключений не бросают.
+Курсор каждого провайдера живёт в integrations (entity_id, system): synced_ts —
+это «первый невыгруженный ts», выгружаются события с synced_ts <= ts < now;
+сущности без новых событий не трогают курсор, без событий не выгружаются никогда.
+101 и notion не реализованы — возвращают словарь-ошибку, исключений не бросают.
 """
 
 from __future__ import annotations
@@ -42,21 +42,20 @@ def _provider_file(db: DB, out: str | None) -> dict:
     ents = [dict(r) for r in db.conn.execute("SELECT * FROM entities ORDER BY id")]
     with path.open("a", encoding="utf-8") as fh:
         for ent in ents:
-            lower = synced.get(ent["id"])
-            sql = "SELECT * FROM entity_events WHERE entity_id=?"
-            args: list = [ent["id"]]
-            if lower is not None:
-                sql += " AND ts>?"
-                args.append(lower)
+            sql = "SELECT * FROM entity_events WHERE entity_id=? AND ts<?"
+            args: list = [ent["id"], now]
+            if ent["id"] in synced:
+                sql += " AND ts>=?"
+                args.append(synced[ent["id"]])
             events = [dict(r) for r in db.conn.execute(sql + " ORDER BY ts, id", args)]
             if not events:
                 continue
-            fh.write(json.dumps({"entity": ent, "events": events, "exported_ts": now},
-                                ensure_ascii=False) + "\n")
+            fh.write(json.dumps({"entity": ent, "events": events,
+                                 "exported_ts": now}, ensure_ascii=False) + "\n")
             db.conn.execute(
                 "INSERT INTO integrations(entity_id, system, synced_ts) VALUES(?,?,?) "
                 "ON CONFLICT(entity_id, system) DO UPDATE SET synced_ts=excluded.synced_ts",
-                (ent["id"], "file", now))
+                (ent["id"], "file", max(e["ts"] for e in events) + 1))
             exported += 1
     db.conn.commit()
     return {"ok": True, "exported": exported, "path": str(path)}
@@ -96,6 +95,7 @@ def main() -> None:
         print(f"экспортировано: {res['exported']} -> {res['path']}")
     else:
         print(f"ошибка: {res['error']}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

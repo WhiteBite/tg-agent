@@ -28,7 +28,7 @@ from env import load_env  # noqa: E402
 
 load_env()
 
-from db import DB  # noqa: E402
+from db import DB, clean_text  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -107,7 +107,8 @@ def run(db_path: str = DB_PATH, provider=None) -> dict:
                 db.conn.execute(
                     "UPDATE media_assets SET status='done', text=?, engine=?, ts=? "
                     "WHERE chat_id=? AND msg_id=?",
-                    (res.get("text"), res.get("engine"), now, r["chat_id"], r["msg_id"]))
+                    (clean_text(res.get("text")), res.get("engine"), now,
+                     r["chat_id"], r["msg_id"]))
                 done += 1
             db.conn.commit()
     return {"done": done, "failed": failed}
