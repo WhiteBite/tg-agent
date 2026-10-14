@@ -68,6 +68,10 @@ _STUB_TRIGGERS = (
 )
 
 
+class ResponseTruncated(Exception):
+    """finish_reason=length: ответ обрезан — батч бисектируется, а не ретраится."""
+
+
 def _norm(text: str | None) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
@@ -183,6 +187,7 @@ def provider_openai(prompt: str, pack: dict) -> dict:
         payload = {
             "model": os.environ.get("EXTRACT_MODEL", "gpt-4o-mini"),
             "temperature": 0.1,
+            "max_tokens": int(os.environ.get("EXTRACT_MAX_TOKENS") or 8192),
             "messages": messages,
             "response_format": {
                 "type": "json_schema",
@@ -201,7 +206,7 @@ def provider_openai(prompt: str, pack: dict) -> dict:
             if message.get("refusal"):
                 raise ValueError(f"отказ модели: {message['refusal']}")
             if choice.get("finish_reason") == "length":
-                raise ValueError("finish_reason=length: ответ обрезан")
+                raise ResponseTruncated("finish_reason=length: ответ обрезан")
             parsed = json.loads(message.get("content"))
             if not isinstance(parsed, dict) or not isinstance(parsed.get("ops"), list):
                 raise ValueError("в ответе нет списка ops")
@@ -212,6 +217,8 @@ def provider_openai(prompt: str, pack: dict) -> dict:
                 "usage_completion": usage.get("completion_tokens"),
             }
             return parsed
+        except ResponseTruncated:
+            raise
         except Exception as exc:
             error = str(exc)
             if raw:
@@ -466,9 +473,18 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
         rows[0]["text"] = text[:max(0, len(text) - cut)]
         lines = _message_lines(db, chat_id, rows)
     from_msg = cursor + 1 if cursor is not None else rows[0]["msg_id"]
-    upto_msg = rows[-1]["msg_id"]
     t0 = time.monotonic()
-    result = prov(build_prompt(db, pack, w, rows), pack)
+    while True:
+        try:
+            result = prov(build_prompt(db, pack, w, rows), pack)
+            break
+        except ResponseTruncated:
+            if len(rows) <= 1:
+                raise
+            rows = rows[:len(rows) // 2]
+            print(f"  ~ {pack['id']} {chat_id}/{topic_id}: ответ обрезан — "
+                  f"бисекция батча до {len(rows)}", flush=True)
+    upto_msg = rows[-1]["msg_id"]
     duration_ms = int((time.monotonic() - t0) * 1000)
     meta = (result.pop("_meta", None) or {}) if isinstance(result, dict) else {}
     valid, rejected = _validate_ops(

@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -3625,6 +3626,80 @@ def test_evidence_norm(db_path: Path) -> None:
           f"applied={row['ops_applied']} rejected={row['ops_rejected']} ents={n}")
 
 
+def test_extract_bisection(db_path: Path) -> None:
+    print("=== extract: ResponseTruncated — бисекция батча, length не ретраится ===")
+    import extract as extract_mod
+    from packs import PACKS
+
+    calls: list[dict] = []
+    real_post = extract_mod._post
+    saved = {k: os.environ.get(k) for k in ("EXTRACT_URL", "EXTRACT_KEY", "EXTRACT_MODEL")}
+    os.environ["EXTRACT_URL"] = "http://stub.invalid/v1"
+    os.environ.pop("EXTRACT_KEY", None)
+    os.environ.pop("EXTRACT_MODEL", None)
+
+    def len_post(url, key, payload):
+        calls.append(payload)
+        return {"choices": [{"message": {"content": "{}"}, "finish_reason": "length"}]}
+
+    extract_mod._post = len_post
+    try:
+        try:
+            extract_mod.provider_openai("промпт", PACKS["construction"])
+            check(False, "extract: length поднимает ResponseTruncated")
+        except extract_mod.ResponseTruncated:
+            check(len(calls) == 1,
+                  "extract: finish_reason=length не расходует ретраи", str(len(calls)))
+        check(calls[0].get("max_tokens") == 8192,
+              "extract: max_tokens в payload (EXTRACT_MAX_TOKENS, дефолт 8192)",
+              str(calls[0].get("max_tokens")))
+    finally:
+        extract_mod._post = real_post
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    bs_db = db_path.parent / "bisection.sqlite"
+    if bs_db.exists():
+        bs_db.unlink()
+    now = int(time.time())
+    with DB(bs_db) as db:
+        db.upsert_chat(-100563, "Бисекция", None, "supergroup", False, 2)
+        db.watch_add(-100563, 1)
+        for mid in range(31, 35):
+            ts = now - 60
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100563, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                 f"задача номер {mid}"))
+        db.conn.commit()
+
+    def trunc_prov(prompt, pack):
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        if len(ids) > 2:
+            raise extract_mod.ResponseTruncated("finish_reason=length")
+        ops = [{"op": "new", "kind": "task", "title": f"Задача {i}", "entity_id": None,
+                "body": None, "owner": None, "due_text": None, "due_ts": None,
+                "confidence": 0.9,
+                "evidence": [{"chat_id": -100563, "msg_id": i, "quote": f"номер {i}"}]}
+               for i in ids]
+        return {"ops": ops, "covered_upto_msg_id": max(ids)}
+
+    made = extract_mod.run(str(bs_db), packs=[PACKS["construction"]],
+                           provider=trunc_prov, until_done=True)
+    with DB(bs_db) as db:
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        runs = [dict(r) for r in db.conn.execute(
+            "SELECT from_msg, upto_msg FROM extraction_runs ORDER BY id")]
+    check(n == 4 and [r["upto_msg"] for r in runs] == [32, 34],
+          "extract: обрезанный батч поделён пополам, хвост дочитан следующим раундом",
+          f"ents={n} runs={[(r['from_msg'], r['upto_msg']) for r in runs]}")
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3678,6 +3753,7 @@ def main() -> int:
     test_extract_parallel(db_path)
     test_extract_telemetry(db_path)
     test_evidence_norm(db_path)
+    test_extract_bisection(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
