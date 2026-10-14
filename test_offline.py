@@ -2689,6 +2689,24 @@ def test_env_loader(db_path: Path) -> None:
             bs.unlink(missing_ok=True)
         check(callable(getattr(login_mod, "main", None)),
               "login: модуль импортируется офлайн (без сети)")
+
+        import io as _io
+        from env import harden_stdio
+        saved_out = sys.stdout
+        buf = _io.TextIOWrapper(_io.BytesIO(), encoding="cp1251", errors="strict")
+        sys.stdout = buf
+        try:
+            harden_stdio()  # переводит текущий stdout в errors=replace
+            print("🔥 Привет — эмодзи вне cp1251")
+            buf.flush()
+            crashed = False
+        except UnicodeEncodeError:
+            crashed = True
+        finally:
+            sys.stdout = saved_out
+        check(not crashed,
+              "env: harden_stdio не роняет print на эмодзи в cp1251-консоли",
+              str(crashed))
     finally:
         for k in ("API_TEST_ONE", "API_TEST_TWO", "API_BOM", "API_U16"):
             os.environ.pop(k, None)

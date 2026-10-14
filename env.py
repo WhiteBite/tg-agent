@@ -8,9 +8,21 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 DEFAULT_PATH = Path(__file__).parent / ".env"
+
+
+def harden_stdio() -> None:
+    """Консоль Windows по умолчанию cp1251: эмодзи в названиях чатов роняли
+    print (UnicodeEncodeError) и обрывали sync/live/digest на ровном месте.
+    Режим replace сохраняет кириллицу и не падает ни на одном символе."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
 
 
 def _read_text(p: Path) -> str:
@@ -21,6 +33,7 @@ def _read_text(p: Path) -> str:
 
 
 def load_env(path: Path | None = None) -> None:
+    harden_stdio()
     if path is None:
         override = os.environ.get("TG_ENV_FILE")
         if override is not None:
