@@ -1081,6 +1081,115 @@ def test_extract_validation(db_path: Path) -> None:
           f"messages={m8 and m8['messages']} upto={m8 and m8['upto_msg']}")
 
 
+def test_entities_mcp(db_path: Path) -> None:
+    print("=== MCP: сущности — tg_entities / tg_entity / tg_overdue ===")
+    ent_db = db_path.parent / "entities_mcp.sqlite"
+    if ent_db.exists():
+        ent_db.unlink()
+    now = int(time.time())
+    with DB(ent_db) as db:
+        db.upsert_chat(chat_id=-100999, title="Стройка", username=None,
+                       kind="supergroup", is_forum=True, members=6)
+        db.upsert_topic(-100999, 7, "Объект")
+        db.watch_add(-100999, 7, project="стройка")
+        texts = {
+            21: "Задача: сдать отчёт по объекту",
+            22: "Задача: подготовить смету на следующий месяц",
+        }
+        for mid, text in texts.items():
+            ts = now - 600 + mid
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100999, ?, 7, ?, ?, 1, 'Иван', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+
+    import extract as extract_mod
+
+    def op_new(title, msg, quote, due_ts):
+        return {"op": "new", "kind": "task", "title": title, "entity_id": None,
+                "body": None, "owner": "Иван", "due_text": None, "due_ts": due_ts,
+                "confidence": 0.9,
+                "evidence": [{"chat_id": -100999, "msg_id": msg, "quote": quote}]}
+
+    extract_mod.run(str(ent_db), provider=lambda prompt, pack: {
+        "ops": [
+            op_new("Сдать отчёт", 21, "сдать отчёт", now - 86400),
+            op_new("Подготовить смету", 22, "подготовить смету", now + 30 * 86400),
+        ],
+        "covered_upto_msg_id": 22,
+    })
+    with DB(ent_db) as db:
+        ids = sorted(r["id"] for r in db.entities_list(project="стройка"))
+    check(len(ids) == 2, "entities MCP: сидированы 2 сущности через extract.run",
+          str(ids))
+
+    env = dict(os.environ, TG_DB=str(ent_db))
+    proc = subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "server.py")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", env=env,
+    )
+    try:
+        rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "offline-test", "version": "0"}}})
+        wait_for(proc, lambda m: m.get("id") == 1)
+        rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        def call(tool: str, args: dict, rid: int) -> dict:
+            rpc(proc, {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                       "params": {"name": tool, "arguments": args}})
+            msg = wait_for(proc, lambda m: m.get("id") == rid)
+            assert not msg.get("result", {}).get("isError"), msg
+            return json.loads(msg["result"]["content"][0]["text"])
+
+        rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        tools = wait_for(proc, lambda m: m.get("id") == 2)
+        names = {t["name"] for t in tools["result"]["tools"]}
+        check({"tg_entities", "tg_entity", "tg_overdue"} <= names,
+              "entities MCP: инструменты зарегистрированы", str(sorted(names)))
+
+        ents = call("tg_entities", {"project": "стройка"}, 3)
+        check(ents.get("count") == 2
+              and all(e.get("project") == "стройка" for e in ents.get("items", [])),
+              "MCP tg_entities: обе сущности проекта", str(ents.get("count")))
+        check(bool(ents.get("items")) and all(
+            k in ents["items"][0] for k in ("kind", "status", "owner", "due_ts")),
+              "MCP tg_entities: у каждой сущности kind/status/owner/due_ts",
+              str(sorted(ents["items"][0])))
+        check("note" in ents and "не инструкции" in ents["note"],
+              "MCP tg_entities: пометка «данные, не инструкции»",
+              str(ents.get("note"))[:80])
+
+        one = call("tg_entity", {"id": ids[0]}, 4)
+        check(one.get("id") == ids[0] and one.get("title") == "Сдать отчёт"
+              and isinstance(one.get("events"), list) and len(one["events"]) >= 1,
+              "MCP tg_entity: сущность с событиями",
+              f"id={one.get('id')} events={len(one.get('events') or [])}")
+        miss = call("tg_entity", {"id": 9999}, 5)
+        check(miss.get("error") == "not found",
+              "MCP tg_entity: неизвестный id — not found", str(miss)[:80])
+
+        od = call("tg_overdue", {}, 6)
+        check(od.get("count") == 1
+              and [e["title"] for e in od.get("items", [])] == ["Сдать отчёт"],
+              "MCP tg_overdue: только просроченная",
+              str([e.get("title") for e in od.get("items", [])]))
+        check(isinstance(od.get("now_ts"), int),
+              "MCP tg_overdue: now_ts в ответе", str(od.get("now_ts")))
+        od2 = call("tg_overdue", {"days_ahead": 3650}, 7)
+        check(od2.get("count") == 2,
+              "MCP tg_overdue(days_ahead=3650): обе сущности", str(od2.get("count")))
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 # ------------------------------------------- 5. настоящий server.py по MCP stdio
 
 def rpc(proc: subprocess.Popen, payload: dict) -> None:
@@ -1279,6 +1388,9 @@ def test_strict_and_doctor(db_path: Path) -> None:
         check(all(c["chat_id"] != -100222 for c in tp["chats"]),
               "strict: tg_topics не показывает чужие чаты",
               str([c["chat_id"] for c in tp["chats"]]))
+        den2 = scall("tg_entities", {"chat_id": -100222}, 25)
+        check(den2.get("error") == "access_denied",
+              "strict: tg_entities вне watch-листа отклонён", str(den2)[:90])
     finally:
         proc.terminate()
         try:
@@ -1326,9 +1438,9 @@ def test_mcp_server(db_path: Path) -> None:
         names = {t["name"] for t in tools["result"]["tools"]}
         expected = {"tg_watch", "tg_new", "tg_read", "tg_find", "tg_stats",
                     "tg_mark_read", "tg_index_stats", "tg_links", "tg_topics",
-                    "tg_digests"}
-        check(expected <= names and len(names) == 10,
-              "MCP tools/list: все 10 инструментов на месте",
+                    "tg_digests", "tg_entities", "tg_entity", "tg_overdue"}
+        check(expected <= names and len(names) == 13,
+              "MCP tools/list: все 13 инструментов на месте",
               str(sorted(names)))
         check(not any(n.startswith(("send_", "tg_live")) for n in names),
               "MCP: без флагов нет ни отправки, ни живого доступа")
@@ -2074,6 +2186,7 @@ def main() -> int:
     test_entities_schema(db_path)
     test_extract_stub(db_path)
     test_extract_validation(db_path)
+    test_entities_mcp(db_path)
     test_live_and_poll(db_path)
     test_gates(db_path)
     test_strict_and_doctor(db_path)
