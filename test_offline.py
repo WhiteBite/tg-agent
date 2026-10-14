@@ -1387,6 +1387,67 @@ def test_media(db_path: Path) -> None:
                 os.environ[k] = v
 
 
+def test_export(db_path: Path) -> None:
+    print("=== export: JSONL-провайдер, курсор integrations, стабы 101/notion ===")
+    exp_db = db_path.parent / "export.sqlite"
+    if exp_db.exists():
+        exp_db.unlink()
+    out_path = db_path.parent / "export_run.jsonl"
+    if out_path.exists():
+        out_path.unlink()
+    now = int(time.time())
+    import export as export_mod
+    with DB(exp_db) as db:
+        for eid, title in ((1, "Залить фундамент"), (2, "Заказать арматуру"), (3, "Без событий")):
+            db.conn.execute(
+                "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, created_ts, updated_ts) "
+                "VALUES(?, 'construction', -100999, 7, 'task', ?, ?, ?)", (eid, title, now, now))
+        for eid, mid in ((1, 11), (2, 12)):
+            db.conn.execute(
+                "INSERT INTO entity_events(entity_id, run_id, ts, op, chat_id, msg_id, quote) "
+                "VALUES(?, 1, ?, 'new', -100999, ?, 'фраза')", (eid, now, mid))
+        db.conn.commit()
+
+    res = export_mod.run(str(exp_db), system="file", out=str(out_path))
+    check(res.get("ok") is True and res.get("exported") == 2 and out_path.exists(),
+          "export: первый прогон выгружает сущности с событиями, без событий — нет", str(res))
+    lines = out_path.read_text(encoding="utf-8").splitlines()
+    recs = [json.loads(x) for x in lines]
+    check(len(lines) == 2 and all("entity" in r and "events" in r and "exported_ts" in r for r in recs),
+          "export: 2 строки JSONL с ключами entity/events/exported_ts", str(len(lines)))
+    with DB(exp_db) as db:
+        ints = db.conn.execute(
+            "SELECT entity_id, synced_ts FROM integrations WHERE system='file' ORDER BY entity_id").fetchall()
+    check([r["entity_id"] for r in ints] == [1, 2] and all(r["synced_ts"] for r in ints),
+          "export: курсор integrations только у выгруженных", str([dict(r) for r in ints]))
+
+    size1 = out_path.stat().st_size
+    res2 = export_mod.run(str(exp_db), system="file", out=str(out_path))
+    check(res2.get("ok") is True and res2.get("exported") == 0 and out_path.stat().st_size == size1,
+          "export: без новых событий — 0 выгружено, файл не растёт", str(res2))
+
+    with DB(exp_db) as db:
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, run_id, ts, op, chat_id, msg_id, quote) "
+            "VALUES(1, 2, ?, 'update', -100999, 99, 'срок сдвинут')", (now + 3600,))
+        db.conn.commit()
+    res3 = export_mod.run(str(exp_db), system="file", out=str(out_path))
+    last = json.loads(out_path.read_text(encoding="utf-8").splitlines()[-1])
+    check(res3.get("ok") is True and res3.get("exported") == 1 and last["entity"]["id"] == 1
+          and len(last["events"]) == 1 and last["events"][0]["quote"] == "срок сдвинут",
+          "export: новое событие выгружает ровно одну сущность и только новое событие", str(res3))
+
+    res_n = export_mod.run(str(exp_db), system="notion")
+    check(res_n.get("ok") is False and "не реализован" in res_n.get("error", ""),
+          "export: notion — структурированная ошибка без исключения", str(res_n))
+    res_1 = export_mod.run(str(exp_db), system="101")
+    check(res_1.get("ok") is False and "не реализован" in res_1.get("error", ""),
+          "export: 101 — структурированная ошибка без исключения", str(res_1))
+    res_b = export_mod.run(str(exp_db), system="bogus")
+    check(res_b.get("ok") is False and "неизвестная система" in res_b.get("error", ""),
+          "export: неизвестная система — структурированная ошибка", str(res_b))
+
+
 # ------------------------------------------- 5. настоящий server.py по MCP stdio
 
 def rpc(proc: subprocess.Popen, payload: dict) -> None:
@@ -2386,6 +2447,7 @@ def main() -> int:
     test_entities_mcp(db_path)
     test_monitor_notify(db_path)
     test_media(db_path)
+    test_export(db_path)
     test_live_and_poll(db_path)
     test_gates(db_path)
     test_strict_and_doctor(db_path)

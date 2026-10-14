@@ -199,6 +199,15 @@ CREATE TABLE IF NOT EXISTS media_assets (
     ts      INTEGER,
     PRIMARY KEY (chat_id, msg_id)
 );
+
+CREATE TABLE IF NOT EXISTS integrations (
+    entity_id   INTEGER NOT NULL,
+    system      TEXT NOT NULL,
+    external_id TEXT,
+    state_json  TEXT,
+    synced_ts   INTEGER,
+    PRIMARY KEY (entity_id, system)
+);
 """
 
 # Полнотекстовый поиск по истории (года переписки через LIKE искать долго).
