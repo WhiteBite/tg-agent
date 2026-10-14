@@ -15,3 +15,8 @@ venv/
 # ОС
 .DS_Store
 Thumbs.db
+
+# локальный tooling агента
+.omo/
+.opencode/
+.playwright-mcp/

@@ -1,7 +1,6 @@
 # Telegram-группы и темы для агента в opencode
 
-![tests](https://github.com/OWNER/tg-agent/actions/workflows/ci.yml/badge.svg)
-<!-- после публикации замени OWNER на свой username -->
+![tests](https://github.com/WhiteBite/tg-agent/actions/workflows/ci.yml/badge.svg)
 
 Read-only связка: **Telethon (твой аккаунт) → локальный SQLite → MCP-сервер → агент**.
 
