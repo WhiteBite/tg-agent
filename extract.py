@@ -473,6 +473,43 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
         rows[0]["text"] = text[:max(0, len(text) - cut)]
         lines = _message_lines(db, chat_id, rows)
     from_msg = cursor + 1 if cursor is not None else rows[0]["msg_id"]
+    pf = pack.get("prefilter")
+    if pf and os.environ.get("EXTRACT_PREFILTER", "1") != "0":
+        rx = re.compile(pf.get("text_regex") or "", re.IGNORECASE)
+        transcripts = media_mod.transcript_map(db, chat_id, [r["msg_id"] for r in rows])
+        ref_ids: set[int] = set()
+        if pf.get("use_refs"):
+            ref_ids = {r["msg_id"] for r in db.conn.execute(
+                "SELECT DISTINCT msg_id FROM refs WHERE chat_id=?", (chat_id,))}
+        kept = [r for r in rows
+                if rx.search(r["text"] or "")
+                or rx.search(transcripts.get(r["msg_id"], ""))
+                or r["msg_id"] in ref_ids]
+        if not kept:
+            upto_all = rows[-1]["msg_id"]
+            if dry_run:
+                print(f"[dry-run] {pack['id']} {chat_id}/{topic_id}: "
+                      f"skipped — триггеров нет в {len(rows)} сообщениях")
+                return {"pack": pack["id"], "chat_id": chat_id, "topic_id": topic_id,
+                        "messages": len(rows), "ops_applied": 0, "ops_rejected": 0,
+                        "ops_overflow": 0, "upto_msg": upto_all, "dry_run": True,
+                        "skipped": True}
+            db.conn.execute(
+                "INSERT INTO extraction_runs(pack, chat_id, topic_id, from_msg, upto_msg, ts, "
+                "ops_applied, ops_rejected, ops_overflow, status, "
+                "duration_ms, finish_reason, usage_prompt, usage_completion) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (pack["id"], chat_id, topic_id, from_msg, upto_all, int(time.time()),
+                 0, 0, 0, "skipped", 0, None, None, None))
+            db.conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(max(cursor or 0, upto_all))))
+            db.conn.commit()
+            return {"pack": pack["id"], "chat_id": chat_id, "topic_id": topic_id,
+                    "messages": len(rows), "ops_applied": 0, "ops_rejected": 0,
+                    "ops_overflow": 0, "upto_msg": upto_all, "skipped": True}
+        rows = kept
     t0 = time.monotonic()
     while True:
         try:

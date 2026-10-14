@@ -58,6 +58,16 @@ PACK: dict = {
     "field_policies": {"body": "append"},
     "backfill_days": 30,
     "ops": ["new", "update", "close", "reopen"],
+    "prefilter": {
+        "text_regex": (
+            r"триал|trial|бесплат|free|freemium|пробн|промо|promo|промокод|coupon|"
+            r"скидк|раздач|giveaway|подписк|subscribe|тариф|аккаунт|ключ|access|"
+            r"invite|инвайт|beta|бета|chatgpt|claude|gemini|midjourney|нейросет|llm|"
+            r"vpn|vps|saas|api|https?://|t\.me/|"
+            r"\b[a-z0-9-]+\.(com|net|io|ai|org|ru|me|pro|app|dev|co)\b"
+        ),
+        "use_refs": True,
+    },
     "json_schema": {
         "type": "object",
         "additionalProperties": False,

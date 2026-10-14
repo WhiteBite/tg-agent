@@ -3700,6 +3700,64 @@ def test_extract_bisection(db_path: Path) -> None:
           f"ents={n} runs={[(r['from_msg'], r['upto_msg']) for r in runs]}")
 
 
+def test_extract_prefilter(db_path: Path) -> None:
+    print("=== extract: prefilter — батчи без триггеров не зовут LLM ===")
+    pf_db = db_path.parent / "prefilter.sqlite"
+    if pf_db.exists():
+        pf_db.unlink()
+    now = int(time.time())
+    with DB(pf_db) as db:
+        db.upsert_chat(-100564, "Поток услуг", None, "supergroup", False, 2)
+        db.watch_add(-100564, 1, project="сервисы")
+
+    def add_msgs(pairs):
+        with DB(pf_db) as db:
+            for mid, text in pairs:
+                ts = now - 60
+                db.conn.execute(
+                    "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                    "sender_id, sender_name, is_service, text) "
+                    "VALUES(-100564, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                    (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+            db.conn.commit()
+
+    import extract as extract_mod
+    from packs import PACKS
+    svc = PACKS["services"]
+    calls: list[str] = []
+
+    def counting(prompt, pack):
+        calls.append(prompt)
+        return {"ops": [], "covered_upto_msg_id": 0}
+
+    add_msgs([(51, "привет как дела"), (52, "обычный разговор")])
+    extract_mod.run(str(pf_db), packs=[svc], provider=counting)
+    with DB(pf_db) as db:
+        st = db.conn.execute(
+            "SELECT status FROM extraction_runs ORDER BY id DESC LIMIT 1").fetchone()
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100564:1:services'").fetchone()
+    check(calls == [] and st is not None and st["status"] == "skipped"
+          and int(cur["value"]) == 52,
+          "extract: префильтр — батч без триггеров skipped, LLM не звался, курсор в конце",
+          f"calls={len(calls)} status={st and st['status']} cur={cur and cur['value']}")
+
+    add_msgs([(53, "сервис beta.io раздаёт триал"), (54, "флудим о погоде")])
+    extract_mod.run(str(pf_db), packs=[svc], provider=counting)
+    check(len(calls) == 1 and "beta.io" in calls[0] and "флудим о погоде" not in calls[0],
+          "extract: префильтр — в промпт попадают только триггерные сообщения",
+          f"calls={len(calls)}")
+
+    os.environ["EXTRACT_PREFILTER"] = "0"
+    try:
+        add_msgs([(55, "сервис gamma.ai"), (56, "снова о погоде")])
+        extract_mod.run(str(pf_db), packs=[svc], provider=counting)
+    finally:
+        os.environ.pop("EXTRACT_PREFILTER", None)
+    check(len(calls) == 2 and "снова о погоде" in calls[1],
+          "extract: EXTRACT_PREFILTER=0 отключает префильтр", f"calls={len(calls)}")
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3754,6 +3812,7 @@ def main() -> int:
     test_extract_telemetry(db_path)
     test_evidence_norm(db_path)
     test_extract_bisection(db_path)
+    test_extract_prefilter(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
