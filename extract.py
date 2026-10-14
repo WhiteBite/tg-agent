@@ -3,17 +3,22 @@
 
     EXTRACT_PROVIDER=stub python3 extract.py            # механический извлекатель (без LLM)
     EXTRACT_PROVIDER=stub python3 extract.py --dry-run  # показать операции, ничего не писать
+    EXTRACT_PROVIDER=stub python3 extract.py --all-indexed  # все чаты индекса, не только watch
     EXTRACT_PROVIDER=openai EXTRACT_URL=https://api.openai.com/v1 \
         EXTRACT_KEY=sk-... python3 extract.py --pack construction --db demo.sqlite
 
-По каждой паре (пакет, watch-тема) берёт сообщения после прошлого прогона
+По каждой паре (пакет, тема) берёт сообщения после прошлого прогона
 (курсор extract:{chat}:{topic}:{pack} в meta; первый прогон — окно backfill_days),
 за один раз не больше 200 сообщений и не больше EXTRACT_MAX_CHARS символов
 (по умолчанию 60000) — остаток подберёт следующий прогон, курсор никогда
 не двигается назад и всегда указывает на последнее реально обработанное.
 Зовёт провайдера (stub или openai-совместимый LLM с ретраями по фидбеку
 об ошибке) и применяет операции new/update/close/reopen одной транзакцией:
-entities, entity_events, extraction_runs, курсор. Сбой провайдера курсор не двигает.
+entities, entity_events, extraction_runs, курсор. Сбой провайдера курсор
+не двигает. Валидных операций больше MAX_OPS_PER_BATCH — применяется
+первые по позиции evidence, остаток считается overflow (ops_overflow,
+status=partial), а курсор остаётся до первой отброшенной — следующий
+прогон дочитает их без потерь.
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ _STUB_TRIGGERS = (
     ("task", "задача"), ("task", "надо "),
     ("promise", "обещаю"), ("promise", "сделаю"),
     ("question", "вопрос"), ("question", "когда "),
+    ("service", "сервис "), ("trial", "триал"), ("promo", "промо"),
 )
 
 
@@ -218,6 +224,8 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
         value = op.get(field)
         if value is not None and not isinstance(value, (int, float)):
             return False
+    if op.get("dedup_hint") is not None and not isinstance(op.get("dedup_hint"), str):
+        return False
     evidence = op.get("evidence")
     if not evidence:
         return False
@@ -265,18 +273,36 @@ def _validate_ops(db: DB, pack: dict, w: dict, ops: list[dict],
     valid: list[dict] = []
     rejected = 0
     for op in ops:
-        if _op_valid(db, pack, w, op, lower, upto_msg) and len(valid) < MAX_OPS_PER_BATCH:
+        if _op_valid(db, pack, w, op, lower, upto_msg):
             valid.append(op)
         else:
             rejected += 1
     return valid, rejected
 
 
+def _op_pos(op: dict) -> int:
+    return min(ev["msg_id"] for ev in op["evidence"])
+
+
+def _split_ops(valid: list[dict]) -> tuple[list[dict], int, int]:
+    """Операции сверх MAX_OPS_PER_BATCH не теряются молча: применяем первые по
+    позиции evidence, остаток считаем overflow, а курсор в _run_scope остаётся
+    до первой отброшенной позиции — следующий прогон дочитает их."""
+    if len(valid) <= MAX_OPS_PER_BATCH:
+        return valid, 0, 0
+    valid.sort(key=_op_pos)
+    dropped_min = _op_pos(valid[MAX_OPS_PER_BATCH])
+    overflow = len(valid) - MAX_OPS_PER_BATCH
+    return valid[:MAX_OPS_PER_BATCH], overflow, dropped_min
+
+
 def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> None:
     kind = op["kind"]
     title = op.get("title") or ""
+    hint = op.get("dedup_hint")
+    hint = _norm(hint).lower() if isinstance(hint, str) else ""
     dedup_key = hashlib.sha1(
-        f"{kind}|{_norm(title).lower()}".encode("utf-8")).hexdigest()
+        f"{kind}|{hint or _norm(title).lower()}".encode("utf-8")).hexdigest()
     attrs = {"due_text": op.get("due_text")} if op.get("due_text") else None
     try:
         cur = db.conn.execute(
@@ -392,8 +418,7 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
     key = f"extract:{chat_id}:{topic_id}:{pack['id']}"
     row = db.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
     cursor = int(row["value"]) if row else None
-    sql = ("SELECT * FROM messages WHERE chat_id=? AND COALESCE(topic_id,1)=? "
-           "AND msg_id>? AND is_service=0")
+    sql = "SELECT * FROM messages WHERE chat_id=? AND topic_id=? AND msg_id>? AND is_service=0"
     args: list = [chat_id, topic_id, cursor if cursor is not None else 0]
     if cursor is None:
         sql += " AND ts>=?"
@@ -417,35 +442,59 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
     result = prov(build_prompt(db, pack, w, rows), pack)
     valid, rejected = _validate_ops(
         db, pack, w, result.get("ops") or [], cursor if cursor is not None else 0, upto_msg)
+    valid, overflow, dropped_min = _split_ops(valid)
     if dry_run:
         print(f"[dry-run] {pack['id']} {chat_id}/{topic_id}: "
-              f"ops={len(valid)} rejected={rejected}")
+              f"ops={len(valid)} rejected={rejected} overflow={overflow}")
         for op in valid:
             print(f"  {op.get('op')} {op.get('kind')}: {op.get('title')}")
         return {"pack": pack["id"], "chat_id": chat_id, "topic_id": topic_id,
                 "messages": len(rows), "ops_applied": 0, "ops_rejected": rejected,
-                "upto_msg": upto_msg, "dry_run": True}
+                "ops_overflow": overflow, "upto_msg": upto_msg, "dry_run": True}
     now = int(time.time())
-    status = "ok" if rejected == 0 else "partial"
+    status = "ok" if rejected == 0 and overflow == 0 else "partial"
     cur = db.conn.execute(
         "INSERT INTO extraction_runs(pack, chat_id, topic_id, from_msg, upto_msg, ts, "
-        "ops_applied, ops_rejected, status) VALUES(?,?,?,?,?,?,?,?,?)",
-        (pack["id"], chat_id, topic_id, from_msg, upto_msg, now, len(valid), rejected, status))
+        "ops_applied, ops_rejected, ops_overflow, status) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (pack["id"], chat_id, topic_id, from_msg, upto_msg, now,
+         len(valid), rejected, overflow, status))
     run_id = cur.lastrowid
     _apply_ops(db, pack, w, valid, run_id)
     covered = result.get("covered_upto_msg_id")
+    new_cursor = max(cursor or 0, min(covered or upto_msg, upto_msg))
+    if overflow:
+        clamp = dropped_min - 1
+        # clamp <= cursor (весь overflow на одном раннем сообщении) — двигаем курсор как обычно, иначе прогон заклинит
+        if clamp > (cursor or 0):
+            new_cursor = min(new_cursor, clamp)
     db.conn.execute(
         "INSERT INTO meta(key, value) VALUES(?,?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, str(max(cursor or 0, min(covered or upto_msg, upto_msg)))))
+        (key, str(new_cursor)))
     db.conn.commit()
     return {"pack": pack["id"], "chat_id": chat_id, "topic_id": topic_id,
             "messages": len(rows), "ops_applied": len(valid), "ops_rejected": rejected,
-            "upto_msg": upto_msg}
+            "ops_overflow": overflow, "upto_msg": new_cursor}
+
+
+def _scopes(db: DB, all_indexed: bool) -> list[dict]:
+    """Области прогона: watch-лист либо все (chat, topic) индекса (--all-indexed)."""
+    if not all_indexed:
+        return db.watch_list()
+    out: list[dict] = []
+    for r in db.conn.execute(
+            "SELECT DISTINCT m.chat_id, m.topic_id, t.title AS topic_title "
+            "FROM messages m LEFT JOIN topics t "
+            "  ON t.chat_id = m.chat_id AND t.topic_id = m.topic_id "
+            "ORDER BY m.chat_id, m.topic_id"):
+        out.append({"chat_id": r["chat_id"], "topic_id": r["topic_id"],
+                    "topic_title": r["topic_title"], "alias": None, "project": None})
+    return out
 
 
 def run(db_path: str = DB_PATH, pack_id: str | None = None,
-        dry_run: bool = False, provider=None, packs: list | None = None) -> list[dict]:
+        dry_run: bool = False, provider=None, packs: list | None = None,
+        all_indexed: bool = False) -> list[dict]:
     prov = get_provider(provider)
     if packs is None:
         if pack_id is not None:
@@ -457,7 +506,7 @@ def run(db_path: str = DB_PATH, pack_id: str | None = None,
     made: list[dict] = []
     with DB(db_path) as db:
         for pack in packs:
-            for w in db.watch_list():
+            for w in _scopes(db, all_indexed):
                 if not scope_matches(pack["scope_filter"], w):
                     continue
                 try:
@@ -485,12 +534,18 @@ def main() -> None:
     dry_run = "--dry-run" in args
     pack_id = _arg_value(args, "--pack")
     db_path = _arg_value(args, "--db") or DB_PATH
-    made = run(db_path, pack_id=pack_id, dry_run=dry_run)
+    made = run(db_path, pack_id=pack_id, dry_run=dry_run,
+               all_indexed="--all-indexed" in args)
     total = sum(m["ops_applied"] for m in made)
+    overflow = sum(m["ops_overflow"] for m in made)
     print(f"областей обработано: {len(made)}, операций применено: {total}")
     for m in made:
         print(f"  {m['pack']} {m['chat_id']}/{m['topic_id']} ({m['messages']} msgs): "
-              f"ops={m['ops_applied']} rejected={m['ops_rejected']}")
+              f"ops={m['ops_applied']} rejected={m['ops_rejected']}"
+              + (f" overflow={m['ops_overflow']}" if m["ops_overflow"] else ""))
+    if overflow:
+        print(f"  ! операций сверх лимита: {overflow} — курсор оставлен до них, "
+              f"следующий прогон дочитает")
 
 
 if __name__ == "__main__":
