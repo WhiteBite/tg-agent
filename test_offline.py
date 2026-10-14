@@ -205,7 +205,7 @@ class FakeClient:
         return peer
 
     async def iter_messages(self, entity, limit=None, reply_to=None,
-                            offset_id=0, reverse=False, **kw):
+                            offset_id=0, reverse=False, offset_date=None, **kw):
         if self.flood_once:  # симуляция лимита Telegram: первый проход падает
             self.flood_once = False
             from telethon.errors import FloodWaitError
@@ -218,6 +218,9 @@ class FakeClient:
             msgs = [m for m in msgs
                     if (getattr(m.reply_to, "reply_to_msg_id", None) == reply_to
                         and getattr(m.reply_to, "forum_topic", False)) or m.id == reply_to]
+        elif offset_date is not None:
+            # date-режим: строго новее границы (offset_date в Telethon exclusive)
+            msgs = [m for m in msgs if m.date > offset_date]
         elif offset_id:
             # backfill идёт снизу вверх: всё, что старше курсора
             msgs = [m for m in msgs if m.id > offset_id]
@@ -426,6 +429,48 @@ def test_sync(db_path: Path) -> None:
 
 
 # ------------------------------------------------ 2. папки и бэкфилл истории
+
+def test_backfill_window(db_path: Path) -> None:
+    print("=== sync --backfill-days: окно по дате, идемпотентность, курсор не трогаем ===")
+    client = build_fixture()
+    u1, u2 = User(1, "Аня"), User(2, "Борис")
+    win = Channel(-100556, "Окно", None, forum=False)
+    win.broadcast, win.megagroup = False, True
+    ages = [120, 100, 80, 60, 30, 10, 2]
+    msgs = [Msg(10 + i, NOW - timedelta(days=a), u1 if i % 2 else u2,
+                f"окно {i}") for i, a in enumerate(ages)]
+    client.groups[-100556] = {"entity": win, "messages": msgs, "topics": []}
+    bw_db = db_path.parent / "bf_window.sqlite"
+    for suf in ("", "-wal", "-shm"):
+        f = bw_db.with_name(bw_db.name + suf)
+        if f.exists():
+            f.unlink()
+    with DB(bw_db) as db:
+        db.upsert_chat(-100556, "Окно", None, "supergroup", False, 2)
+        db.insert_message({"chat_id": -100556, "msg_id": 15, "topic_id": 1,
+                           "ts": int((NOW - timedelta(days=10)).timestamp()),
+                           "text": "окно 5"})
+        db.set_cursor(-100556, 0, 9999)
+
+    res = asyncio.run(sync_mod.run(db_path=str(bw_db), client=client, backfill_days=90))
+    rep = res["backfill_window"]
+    with DB(bw_db) as db:
+        got = [r["msg_id"] for r in db.conn.execute(
+            "SELECT msg_id FROM messages WHERE chat_id=-100556 ORDER BY msg_id")]
+        cur = db.get_cursor(-100556, 0)
+        t = db.conn.execute(
+            "SELECT messages FROM topics WHERE chat_id=-100556 AND topic_id=1").fetchone()
+    check(got == [12, 13, 14, 15, 16],
+          "backfill-days: взяты только сообщения окна 90д (120/100д — вне)", str(got))
+    check(rep["new"] == 4, "backfill-days: уже лежащее в базе не задвоено", str(rep))
+    check(cur == 9999, "backfill-days: курсор sync не снижен", str(cur))
+    check(t is not None and t["messages"] == 5,
+          "backfill-days: счётчик темы пересчитан", str(t and t["messages"]))
+
+    res2 = asyncio.run(sync_mod.run(db_path=str(bw_db), client=client, backfill_days=90))
+    check(res2["backfill_window"]["new"] == 0,
+          "backfill-days: повторный прогон идемпотентен", str(res2["backfill_window"]))
+
 
 def test_folder_fallback(db_path: Path) -> None:
     print("=== sync --folder: FolderIdInvalid -> состав из include_peers ===")
@@ -3491,7 +3536,7 @@ def main() -> int:
     test_sync(db_path)
     test_folder_and_backfill(db_path)
     test_folder_fallback(db_path)
-    test_folder_edit(db_path)
+    test_backfill_window(db_path)
     test_backfill_resume(db_path)
     test_marked_ids(db_path)
     test_reads(db_path)

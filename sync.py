@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from db import DB, clean_text, extract_refs
@@ -585,6 +585,71 @@ async def backfill(
     return {"new": total_new, "seen": total_seen, "cursor": cursor}
 
 
+async def backfill_window(
+    client: Any,
+    db: DB,
+    days: int,
+    dry_run: bool = False,
+) -> dict:
+    """Досинк истории за окно N дней по всем чатам индекса (date-режим).
+
+    iter_messages(offset_date=..., reverse=True) — только offset_date, любой
+    ненулевой offset_id молча его перекрывает; limit=None держит автоматический
+    пейсинг 1с (иначе FloodWait-шторм). Граница exclusive — +1с делает сообщение
+    на границе включённым. meta:backfill не пишется: это окно, а не курсор;
+    вставки идемпотентны, курсоры sync не трогаем.
+    """
+    boundary = datetime.now(timezone.utc) - timedelta(seconds=days * 86400 + 1)
+    chats = [r["id"] for r in db.conn.execute("SELECT id FROM chats ORDER BY id")]
+    forums = {r["id"] for r in db.conn.execute(
+        "SELECT id FROM chats WHERE is_forum=1")}
+    total_new = total_seen = 0
+    for cid in chats:
+        rows: list[dict[str, Any]] = []
+        attempt = 0
+        try:
+            while True:  # FloodWait: повторяем чат
+                rows = []
+                try:
+                    async for msg in client.iter_messages(
+                            cid, offset_date=boundary, reverse=True, limit=None):
+                        tid = topic_of_message(msg) if cid in forums else None
+                        if tid is None:
+                            tid = 1
+                        if not dry_run:
+                            rows.append(message_row(msg, cid, tid, client))
+                        total_seen += 1
+                    break
+                except _FloodWait as exc:
+                    attempt += 1
+                    if attempt > 3:
+                        raise
+                    await _flood_sleep(exc, attempt)
+        except Exception as exc:
+            print(f"  ! {cid}: окно не прочитано ({exc})", file=sys.stderr)
+            continue
+        if dry_run:
+            print(f"  {cid}: окно {days}д — {total_seen} сообщений (dry-run)", flush=True)
+            continue
+        if not rows:
+            continue
+        new = db.insert_messages(rows)
+        for row in rows:
+            db.insert_refs(cid, row["msg_id"],
+                           extract_refs(row["text"], row["fwd_from"]))
+        for row in rows:
+            if row["media"] in media_mod.MEDIA_KINDS:
+                media_mod.enqueue(db, cid, row["msg_id"], row["media"])
+        db.conn.commit()
+        total_new += new
+        print(f"  {cid}: окно {days}д — {len(rows)} сообщений, новых {new}", flush=True)
+    if not dry_run:
+        for cid in chats:
+            db.recount_topics(cid)
+        db.conn.commit()
+    return {"chats": len(chats), "seen": total_seen, "new": total_new, "days": days}
+
+
 async def sync_watched(
     client: Any,
     db: DB,
@@ -698,6 +763,7 @@ async def run(
     limit: Optional[int] = None,
     days: Optional[int] = None,
     backfill_chunk: int = 0,
+    backfill_days: int = 0,
     watched_only: bool = False,
     dry_run: bool = False,
 ) -> dict:
@@ -726,6 +792,13 @@ async def run(
                         print(f"  ! папка {folder} не найдена в аккаунте", file=sys.stderr)
             except Exception as exc:  # папки — best effort, не роняем синк
                 print(f"  ! папки не получены: {exc}", file=sys.stderr)
+        if backfill_days:
+            rep = await backfill_window(client, db, backfill_days, dry_run=dry_run)
+            print(f"окно-бэкфилл: чатов {rep['chats']}, просмотрено {rep['seen']}, "
+                  f"новых {rep['new']}")
+            if own_client:
+                await client.disconnect()
+            return {"backfill_window": rep, "chats": [], "dry_run": dry_run}
         if watched_only:
             reports = await sync_watched(
                 client, db, limit=limit, days=days,
@@ -774,6 +847,9 @@ def main() -> None:
     ap.add_argument("--backfill", type=int, metavar="CHUNK",
                     help="дососать историю снизу вверх чанками по N сообщений "
                          "(для каналов с историей в годы); прогресс сохраняется")
+    ap.add_argument("--backfill-days", type=int, metavar="N",
+                    help="досинкать историю за окно N дней по всем чатам индекса "
+                         "(date-режим, без курсоров)")
     ap.add_argument("--watched", action="store_true",
                     help="синхронизировать только группы из watch-листа")
     ap.add_argument("--dry-run", action="store_true")
@@ -789,6 +865,7 @@ def main() -> None:
             limit=args.limit,
             days=args.days,
             backfill_chunk=args.backfill or 0,
+            backfill_days=args.backfill_days or 0,
             watched_only=args.watched,
             dry_run=args.dry_run,
         )
