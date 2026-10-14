@@ -1190,6 +1190,85 @@ def test_entities_mcp(db_path: Path) -> None:
             proc.kill()
 
 
+def test_monitor_notify(db_path: Path) -> None:
+    print("=== monitor + notify: сводка по проектам и само-уведомление ===")
+    mon_db = db_path.parent / "monitor_notify.sqlite"
+    if mon_db.exists():
+        mon_db.unlink()
+    now = int(time.time())
+    with DB(mon_db) as db:
+        db.upsert_chat(chat_id=-1007001, title="Стройка", username=None,
+                       kind="supergroup", is_forum=True, members=3)
+        db.upsert_topic(-1007001, 11, "Объект")
+        db.watch_add(-1007001, 11, project="стройка")
+        db.upsert_chat(chat_id=-1007002, title="Баня", username=None,
+                       kind="supergroup", is_forum=True, members=2)
+        db.upsert_topic(-1007002, 12, "Печь")
+        db.watch_add(-1007002, 12, project="баня")
+
+        def ent(project: str, title: str, due_ts: int, closed_ts: int | None = None) -> None:
+            db.conn.execute(
+                "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+                "due_ts, project, created_ts, updated_ts, closed_ts) "
+                "VALUES('tg', ?, ?, 'task', ?, ?, ?, ?, ?, ?, ?)",
+                (-1007001 if project == "стройка" else -1007002,
+                 11 if project == "стройка" else 12,
+                 title, "closed" if closed_ts else "open", due_ts, project,
+                 now - 7200, now - 7200, closed_ts))
+
+        ent("стройка", "Покрасить забор", now - 86400)
+        ent("стройка", "Заказать окна", now + 30 * 86400)
+        ent("стройка", "Сдать фундамент", now - 2 * 86400, closed_ts=now)
+        ent("баня", "Купить дрова", now - 3600)
+        db.conn.commit()
+
+    import monitor as monitor_mod
+    import notify as notify_mod
+
+    summary = monitor_mod.collect(str(mon_db))
+    check(set(summary["projects"]) == {"стройка", "баня"},
+          "monitor.collect: оба проекта в сводке", str(sorted(summary["projects"])))
+    od_titles = sorted(e["title"] for e in summary["overdue"])
+    check(od_titles == ["Купить дрова", "Покрасить забор"],
+          "monitor.collect: overdue — ровно 2 открытые просроченные, закрытая отсутствует",
+          str(od_titles))
+
+    res = monitor_mod.run(str(mon_db), days_ahead=3650)
+    check(isinstance(res.get("overdue"), list) and len(res["overdue"]) == 2,
+          "monitor.run(days_ahead=3650): просроченные остались просроченными",
+          str(len(res.get("overdue") or [])))
+    check(isinstance(res.get("upcoming"), list)
+          and [e["title"] for e in res["upcoming"]] == ["Заказать окна"],
+          "monitor.run(days_ahead=3650): будущий срок в upcoming",
+          str([e.get("title") for e in res.get("upcoming") or []]))
+    check(res.get("notify") is None,
+          "monitor.run без send: notify не вызывался", str(res.get("notify")))
+
+    lines = monitor_mod.format_report(summary)
+    check(bool(lines) and any("стройка" in ln for ln in lines)
+          and any("баня" in ln for ln in lines)
+          and all(len(ln) <= 300 for ln in lines),
+          "monitor.format_report: строки по обоим проектам, <=300 симв.",
+          str(len(lines)))
+
+    dry = notify_mod.notify(["x"], dry_run=True)
+    check(dry.get("ok") is True and dry.get("dry_run") is True
+          and dry.get("planned") == ["x"],
+          "notify dry_run: planned без telethon и без сети", str(dry)[:120])
+
+    saved = os.environ.pop("TG_ALLOW_SEND", None)
+    try:
+        blocked = notify_mod.notify(["x"], dry_run=False)
+        check(blocked.get("ok") is False and "TG_ALLOW_SEND" in str(blocked.get("error", "")),
+              "notify без TG_ALLOW_SEND: отправка заблокирована", str(blocked)[:120])
+    finally:
+        if saved is not None:
+            os.environ["TG_ALLOW_SEND"] = saved
+
+    srv = (Path(__file__).parent / "server.py").read_text(encoding="utf-8")
+    check("notify" not in srv, "server.py не содержит notify (MCP остаётся read-only)")
+
+
 # ------------------------------------------- 5. настоящий server.py по MCP stdio
 
 def rpc(proc: subprocess.Popen, payload: dict) -> None:
@@ -2187,6 +2266,7 @@ def main() -> int:
     test_extract_stub(db_path)
     test_extract_validation(db_path)
     test_entities_mcp(db_path)
+    test_monitor_notify(db_path)
     test_live_and_poll(db_path)
     test_gates(db_path)
     test_strict_and_doctor(db_path)
