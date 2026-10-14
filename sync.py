@@ -113,7 +113,8 @@ def make_client() -> Any:
     api_id = os.environ.get("TELEGRAM_API_ID")
     api_hash = os.environ.get("TELEGRAM_API_HASH")
     if not api_id or not api_hash:
-        raise SystemExit("нет TELEGRAM_API_ID / TELEGRAM_API_HASH — запусти python login.py")
+        raise SystemExit("нет TELEGRAM_API_ID / TELEGRAM_API_HASH — "
+                         "запусти python start.py: спросит один раз и запомнит")
     sess = os.environ.get("TELEGRAM_SESSION_STRING")
     name = os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session")
     return TelegramClient(StringSession(sess) if sess else name, int(api_id), api_hash)

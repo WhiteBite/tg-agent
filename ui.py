@@ -13,12 +13,14 @@ sync.py --watched в фоне (нужны креды, без них покаже
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -28,6 +30,8 @@ from sanitize import sanitize_name
 from env import load_env
 
 load_env()
+
+import sync as sync_mod  # noqa: E402
 
 HERE = Path(__file__).parent
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
@@ -102,14 +106,15 @@ def build_state() -> dict:
     return {"chats": chats, "stats": stats, "folders": folders}
 
 
-def run_sync() -> None:
+def _spawn_sync(args: list[str]) -> None:
+    """Запускает sync.py фоном; прогресс читается из /api/sync_status."""
     with _lock:
         if _sync["running"]:
             return
         _sync.update(running=True, lines=[], code=None)
     env = dict(os.environ, TG_DB=DB_PATH)
     proc = subprocess.Popen(
-        [sys.executable, str(HERE / "sync.py"), "--watched"],
+        [sys.executable, str(HERE / "sync.py")] + args,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
     )
 
@@ -124,6 +129,58 @@ def run_sync() -> None:
             _sync["code"] = proc.returncode
 
     threading.Thread(target=pump, daemon=True).start()
+
+
+def run_sync() -> None:
+    _spawn_sync(["--watched"])
+
+
+def run_sync_chat(chat: str, days: int) -> None:
+    args = ["--chat", chat]
+    if days:
+        args += ["--days", str(days)]
+    _spawn_sync(args)
+
+
+_avail_cache: dict = {}
+_avail_lock = threading.Lock()
+
+
+def tg_chats() -> dict:
+    """Список чатов из Telegram для «добавить чат» (кэш 5 минут)."""
+    now = time.time()
+    with _avail_lock:
+        if _avail_cache.get("ts", 0) + 300 > now:
+            return _avail_cache["data"]
+    if not (os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH")):
+        return {"ok": False, "error": "нет ключей Telegram: запусти python start.py"}
+
+    async def _run() -> dict:
+        client = sync_mod.make_client()
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                return {"ok": False, "error": "нет сессии: запусти python start.py "
+                                              "(QR-логин в терминале)"}
+            chats = await sync_mod.list_chat_choices(client)
+        finally:
+            await client.disconnect()
+        with _db() as db:
+            known = {c["id"] for c in db.chats(limit=5000)}
+        for c in chats:
+            c["in_index"] = c["id"] in known
+        return {"ok": True, "chats": chats}
+
+    try:
+        data = asyncio.run(_run())
+    except SystemExit as exc:
+        data = {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        data = {"ok": False, "error": f"telegram: {exc}"}
+    if data.get("ok"):
+        with _avail_lock:
+            _avail_cache.update(ts=now, data=data)
+    return data
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -246,6 +303,8 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 self._json({"running": _sync["running"], "code": _sync["code"],
                             "lines": _sync["lines"][-20:]})
+        elif u.path == "/api/available":
+            self._json(tg_chats())
         else:
             self._json({"error": "not found"}, 404)
 
@@ -304,6 +363,18 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/sync":
                 run_sync()
                 self._json({"ok": True, "started": True})
+            elif u.path == "/api/sync_chat":
+                chat = str(b.get("chat") or "").strip()
+                if not chat or len(chat) > 64 or " " in chat:
+                    self._json({"error": "нужен @username или числовой id"}, 400)
+                    return
+                try:
+                    days = int(b.get("days", 30))
+                except (TypeError, ValueError):
+                    days = 30
+                days = max(0, min(days, 3650))
+                run_sync_chat(chat, days)
+                self._json({"ok": True, "started": True, "chat": chat, "days": days})
             else:
                 self._json({"error": "not found"}, 404)
         except (KeyError, ValueError, TypeError) as e:

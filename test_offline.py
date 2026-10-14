@@ -1610,6 +1610,40 @@ def test_ui_security(db_path: Path) -> None:
         un = json.loads(urlreq.urlopen(req4, timeout=2).read())
         check(got.get("ok") and un.get("ok"),
               "ui: JSON POST работает (watch + unwatch)", f"{got}/{un}")
+
+        # визард в UI: список чатов из Telegram (в тестах кредов нет — внятная ошибка)
+        avail = json.loads(urlreq.urlopen(
+            f"http://127.0.0.1:{port}/api/available", timeout=15).read())
+        check(avail.get("ok") is False and avail.get("error"),
+              "ui /api/available: без ключей понятная ошибка, не 500",
+              str(avail.get("error"))[:70])
+
+        bad = urlreq.Request(f"http://127.0.0.1:{port}/api/sync_chat",
+                             data=json.dumps({"chat": ""}).encode(),
+                             headers={"Content-Type": "application/json"})
+        try:
+            urlreq.urlopen(bad, timeout=2)
+            bad_code = 200
+        except urlerr.HTTPError as e:
+            bad_code = e.code
+        check(bad_code == 400, "ui /api/sync_chat: пустой чат -> 400", str(bad_code))
+
+        ok_req = urlreq.Request(f"http://127.0.0.1:{port}/api/sync_chat",
+                                data=json.dumps({"chat": "@nobody", "days": 3}).encode(),
+                                headers={"Content-Type": "application/json"})
+        started = json.loads(urlreq.urlopen(ok_req, timeout=5).read())
+        check(started.get("started") is True and started.get("days") == 3,
+              "ui /api/sync_chat: запуск синка принят", str(started))
+        status = None
+        for _ in range(60):
+            status = json.loads(urlreq.urlopen(
+                f"http://127.0.0.1:{port}/api/sync_status", timeout=2).read())
+            if not status.get("running"):
+                break
+            time.sleep(0.25)
+        check(status is not None and status.get("code") is not None,
+              "ui /api/sync_chat: прогресс долетает до /api/sync_status",
+              str(status)[:80])
     finally:
         proc.terminate()
         try:
@@ -2018,7 +2052,7 @@ def test_start_wizard(db_path: Path) -> None:
         sync_mod.make_client()
         check(False, "make_client: без ключей должен быть понятный SystemExit")
     except SystemExit as exc:
-        check("login.py" in str(exc), "make_client: без ключей отсылает к login.py", str(exc))
+        check("start.py" in str(exc), "make_client: без ключей отсылает к start.py", str(exc))
 
 
 def main() -> int:

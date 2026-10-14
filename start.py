@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Одна команда вместо десяти: логин (если нужно) -> синк -> визуал.
+"""Одна команда: войти (если нужно) и открыть визуал в браузере.
 
-    python start.py
+    python start.py          # QR (если нет сессии) -> браузер: выбираешь чаты, дни, ★
+    python start.py --cli    # то же, но выбор чатов вопросами в терминале
 
-Первый раз: спросит ключи, покажет QR, предложит выбрать чаты списком по номерам.
-Дальше: сам обновляет отмеченное и открывает визуал — без флагов и имён.
+Все настройки — в визуале: список чатов из Telegram, окно дней, синк, отметки тем.
 """
 
 from __future__ import annotations
@@ -104,24 +104,19 @@ async def main() -> None:
         print("Нужно войти в Telegram — сейчас покажу QR.")
         await login_mod.run_login()
 
-    with DB(DB_PATH) as db:
-        watched = db.watch_list()
-        n_msgs = db.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-
-    if n_msgs and watched:
-        print(f"Обновляю отмеченное ({len(watched)} тем)…")
-        await sync_mod.run(db_path=DB_PATH, watched_only=True)
-    else:
+    if "--cli" in sys.argv:
         await pick_and_sync()
+        return
 
-    if input("\nОткрыть визуал в браузере? [Y/n]: ").strip().lower() != "n":
-        subprocess.Popen([sys.executable, str(HERE / "ui.py")], cwd=str(HERE),
-                         env=dict(os.environ, TG_DB=DB_PATH))
-        webbrowser.open(UI_URL)
-        print(f"Визуал: {UI_URL}\nОтметь темы звёздочкой — их увидит агент.\n"
-              f"В следующий раз просто: python start.py")
-    else:
-        print("ок — вернуться можно той же командой: python start.py")
+    open_ui()
+
+
+def open_ui() -> None:
+    subprocess.Popen([sys.executable, str(HERE / "ui.py")], cwd=str(HERE),
+                     env=dict(os.environ, TG_DB=DB_PATH))
+    webbrowser.open(UI_URL)
+    print(f"Визуал: {UI_URL}\n"
+          f"В браузере: «＋ из Telegram» — выбрать чаты и окно; ★ — отдать тему агенту.")
 
 
 if __name__ == "__main__":

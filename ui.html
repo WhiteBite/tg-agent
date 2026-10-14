@@ -72,6 +72,21 @@
   #status{color:var(--muted); font-size:11px; margin-top:6px; min-height:14px;
        white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 
+  /* ------- панель «＋ из Telegram» ------- */
+  #addpanel{background:var(--bg2); border:1px solid var(--line); border-radius:8px; margin:8px; padding:8px}
+  #addpanel .addhead{display:flex; align-items:center; gap:6px; font-size:13px}
+  #addpanel .addhead .btn{margin-left:auto}
+  #addpanel .addctrl{display:flex; gap:6px; align-items:center; margin-top:8px; font-size:12px; color:var(--muted)}
+  #addpanel .addctrl input[type=text]{flex:1; min-width:0}
+  #adddays{width:70px; background:var(--bg2); border:1px solid #24313d; border-radius:8px;
+       color:var(--text); padding:6px; font-size:12px; outline:none}
+  #adddays:focus{border-color:var(--accent)}
+  #addstatus{color:var(--muted); font-size:11px; margin-top:6px; min-height:14px}
+  #addstatus.err{color:var(--red)}
+  #addrows{margin-top:4px}
+  #addrows .hint{color:var(--muted); font-size:11px; padding:6px 2px}
+  .addrow{display:flex; gap:6px; align-items:center; padding:6px 2px; border-top:1px solid var(--line)}
+
   /* ------- сообщения ------- */
   #msgs{background:var(--bg2); display:flex; flex-direction:column; min-width:0}
   #msgs header{padding:10px 14px; background:var(--bg); border-bottom:1px solid var(--line)}
@@ -123,6 +138,7 @@
       <div class="searchbar">
         <input id="q" type="search" placeholder="Поиск по чатам">
         <button class="btn" id="sync" title="sync.py --watched">⟳</button>
+        <button class="btn" id="add" title="добавить чат из Telegram">＋ из Telegram</button>
       </div>
       <div id="status"></div>
     </header>
@@ -438,6 +454,83 @@ function pollSync(){
     await loadState();
   }, 1500);
 }
+
+/* ---------------- панель «＋ из Telegram» ---------------- */
+let ADDCHATS = [];
+const addPanel = document.createElement("div");
+addPanel.id = "addpanel";
+addPanel.hidden = true;
+addPanel.innerHTML = `
+  <div class="addhead"><b>Добавить чат из Telegram</b><button class="btn" id="addclose" title="закрыть">✕</button></div>
+  <div class="addctrl">
+    <input id="addfilter" type="text" placeholder="фильтр по названию">
+    <input id="adddays" type="number" value="30" min="0" max="3650" title="за сколько дней; 0 — вся история">
+    <span>дней</span>
+  </div>
+  <div id="addstatus"></div>
+  <div id="addrows"></div>`;
+const $p = s => addPanel.querySelector(s);
+addPanel.addEventListener("click", e=>e.stopPropagation());
+function setAddStatus(t, err){ $p("#addstatus").textContent = t; $p("#addstatus").classList.toggle("err", !!err); }
+const addName = c => c.username ? "@"+c.username : String(c.id);
+function addRowHtml(c){
+  const kind = c.kind==="forum" ? "форум" : c.kind==="channel" ? "канал" : "группа";
+  return `<div class="addrow">
+    <div class="grow">
+      <div class="t1"><b>${esc(c.title||c.id)}</b> <span class="chip">${kind}</span></div>
+      <div class="t2">${c.username?`@${esc(c.username)} `:""}${c.in_index?`<span class="chip">в индексе</span>`:""}</div>
+    </div>
+    <button class="btn accent" data-sync="${esc(addName(c))}">Слить</button>
+  </div>`;
+}
+function renderAddRows(){
+  const f = $p("#addfilter").value.trim().toLowerCase();
+  const list = ADDCHATS.filter(c=> !f || ((c.title||"")+" "+(c.username||"")).toLowerCase().includes(f));
+  $p("#addrows").innerHTML = list.slice(0,60).map(addRowHtml).join("") +
+    (list.length>60 ? `<div class="hint">показано 60 из ${list.length} — уточни фильтр</div>` : "");
+}
+async function loadAvailable(){
+  setAddStatus("загружаю список…"); $p("#addrows").innerHTML = "";
+  const r = await api("/api/available");
+  if (!r.ok){
+    ADDCHATS = [];
+    setAddStatus(r.error||"ошибка", true);
+    $p("#addrows").innerHTML = `<div class="hint">сессия/ключи не заведены: запусти python start.py в терминале</div>`;
+    return;
+  }
+  ADDCHATS = (r.chats||[]).sort((a,b)=>(a.in_index?1:0)-(b.in_index?1:0));
+  setAddStatus("");
+  renderAddRows();
+}
+$("#add").onclick = ()=>{
+  addPanel.hidden = !addPanel.hidden;
+  $("#chatlist").prepend(addPanel);
+  if (!addPanel.hidden) loadAvailable();
+};
+$p("#addfilter").oninput = renderAddRows;
+addPanel.addEventListener("click", async e=>{
+  if (e.target.closest("#addclose")){ addPanel.hidden = true; return; }
+  const b = e.target.closest("[data-sync]"); if(!b || b.disabled) return;
+  const name = b.dataset.sync;
+  const c = ADDCHATS.find(x=>addName(x)===name);
+  let days = parseInt($p("#adddays").value, 10);
+  if (isNaN(days) || days<0) days = 30;
+  document.querySelectorAll("[data-sync]").forEach(x=>x.disabled=true);
+  setAddStatus(`синхронизация ${name}…`);
+  await post("/api/sync_chat", {chat:name, days});
+  pollSync();
+  const t = setInterval(async ()=>{
+    const s = await api("/api/sync_status");
+    if (s.running) return;
+    clearInterval(t);
+    document.querySelectorAll("[data-sync]").forEach(x=>x.disabled=false);
+    if (s.code===0){ await loadAvailable(); setAddStatus(`слито: ${c?.title||name}`); }
+    else setAddStatus(`ошибка синка (код ${s.code}) — смотри #status`, true);
+  }, 1500);
+});
+const _renderChats = renderChats;
+renderChats = function(){ _renderChats(); $("#chatlist").prepend(addPanel); };
+
 let LASTPOLL = Math.floor(Date.now()/1000);
 setInterval(async ()=>{
   try{
