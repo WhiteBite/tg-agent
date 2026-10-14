@@ -89,8 +89,12 @@ def kind_of(chat: Any) -> str:
 
 try:  # телега не обязательна в офлайн-тестах
     from telethon.errors import FloodWaitError as _FloodWait
+    from telethon.errors import FolderIdInvalidError as _FolderIdInvalid
 except Exception:  # pragma: no cover
     class _FloodWait(Exception):  # type: ignore[no-redef]
+        pass
+
+    class _FolderIdInvalid(Exception):  # type: ignore[no-redef]
         pass
 
 
@@ -613,6 +617,7 @@ async def sync_watched(
 async def select_chats(
     client: Any, names: list[str], pattern: Optional[str], forums_only: bool = False,
     folder: Optional[int] = None, include_channels: bool = False,
+    folder_peers: Optional[list[int]] = None,
 ) -> list[Any]:
     """folder: id папки Telegram — отбор «как я накликал в приложении».
 
@@ -621,7 +626,23 @@ async def select_chats(
     """
     if folder is not None:
         include_channels = True
-        dialogs = [d async for d in client.iter_dialogs(folder=folder)]
+        try:
+            dialogs = [d async for d in client.iter_dialogs(folder=folder)]
+        except _FolderIdInvalid:
+            # слой 229+: getDialogs отклоняет folder_id — состав берём из include_peers (getDialogFilters)
+            dialogs = []
+            peers = list(folder_peers or [])
+            try:
+                got = await client.get_entity(peers)
+                dialogs = list(got) if isinstance(got, (list, tuple)) else [got]
+            except Exception:
+                for pid in peers:
+                    try:
+                        dialogs.append(await client.get_entity(pid))
+                    except Exception as exc:
+                        print(f"  ! чат папки {pid} не получен: {exc}", file=sys.stderr)
+            print(f"  папка {folder}: getDialogs отклонил folder_id, "
+                  f"беру {len(dialogs)} чатов из состава папки")
     else:
         dialogs = await client.get_dialogs()
     picked = []
@@ -686,11 +707,18 @@ async def run(
 
     reports = []
     with DB(db_path) as db:
-        if not dry_run:
+        folder_peers = None
+        # папки нужны не только для записи: при folder их состав — фолбэк select_chats
+        if not dry_run or folder is not None:
             try:
                 fl = await fetch_folders(client)
-                db.save_folders(fl)
-                folders_saved = len(fl)
+                if not dry_run:
+                    db.save_folders(fl)
+                    folders_saved = len(fl)
+                if folder is not None:
+                    folder_peers = next((f["peers"] for f in fl if f["id"] == folder), None)
+                    if folder_peers is None:
+                        print(f"  ! папка {folder} не найдена в аккаунте", file=sys.stderr)
             except Exception as exc:  # папки — best effort, не роняем синк
                 print(f"  ! папки не получены: {exc}", file=sys.stderr)
         if watched_only:
@@ -702,6 +730,7 @@ async def run(
         else:
             chats = await select_chats(
                 client, names or [], pattern, forums_only=topics_only, folder=folder,
+                folder_peers=folder_peers,
             )
             print(f"чатов к синхронизации: {len(chats)}")
             for chat in chats:

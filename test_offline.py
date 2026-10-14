@@ -171,6 +171,7 @@ class FakeClient:
         self.folders = folders or {}
         self.flood_once = False
         self.flood_mid = 0  # >0: FloodWait после N-го сообщения первой итерации
+        self.folder_id_invalid = False  # getDialogs(folder=) отвечает FolderIdInvalid
         self.global_chats: list = []   # ответ на SearchGlobalRequest
         self.global_users: list = []
         self.last_global_req = None
@@ -236,6 +237,9 @@ class FakeClient:
         return msgs[:limit] if limit else msgs
 
     async def iter_dialogs(self, folder=None, **kw):
+        if folder is not None and self.folder_id_invalid:
+            from telethon.errors import FolderIdInvalidError
+            raise FolderIdInvalidError(None)
         if folder is None:
             for g in self.groups.values():
                 yield Dialog(g["entity"], g["entity"].title)
@@ -410,6 +414,25 @@ def test_sync(db_path: Path) -> None:
 
 
 # ------------------------------------------------ 2. папки и бэкфилл истории
+
+def test_folder_fallback(db_path: Path) -> None:
+    print("=== sync --folder: FolderIdInvalid -> состав из include_peers ===")
+    client = build_fixture()
+    client.folder_id_invalid = True
+    fb_db = db_path.parent / "folder_fb.sqlite"
+    for suf in ("", "-wal", "-shm"):
+        f = fb_db.with_name(fb_db.name + suf)
+        if f.exists():
+            f.unlink()
+    r = asyncio.run(sync_mod.run(db_path=str(fb_db), client=client, folder=7))
+    ids = {c["chat_id"] for c in r["chats"]}
+    check(ids == {-100111, -100333},
+          "sync --folder: FolderIdInvalid — чаты взяты из include_peers папки",
+          str(ids))
+    news = next((c for c in r["chats"] if c["chat_id"] == -100333), None)
+    check(news is not None and news["new_messages"] == 3,
+          "sync --folder: фолбэк синхронизировал канал-вещание", str(news))
+
 
 def test_folder_and_backfill(db_path: Path) -> None:
     client = build_fixture()
@@ -3225,6 +3248,7 @@ def main() -> int:
             f.unlink()
     test_sync(db_path)
     test_folder_and_backfill(db_path)
+    test_folder_fallback(db_path)
     test_backfill_resume(db_path)
     test_marked_ids(db_path)
     test_reads(db_path)
