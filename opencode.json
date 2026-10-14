@@ -9,7 +9,8 @@
       ],
       "cwd": "D:\\Sources\\WhiteBite\\tg-agent",
       "environment": {
-        "TG_DB": "D:\\Sources\\WhiteBite\\tg-agent\\tg_index.sqlite"
+        "TG_DB": "D:\\Sources\\WhiteBite\\tg-agent\\tg_index.sqlite",
+        "TG_ALLOW_LIVE": "1"
       },
       "enabled": true,
       "timeout": 30000
