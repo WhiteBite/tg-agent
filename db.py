@@ -158,7 +158,11 @@ CREATE TABLE IF NOT EXISTS extraction_runs (
     ops_applied   INTEGER DEFAULT 0,
     ops_rejected  INTEGER DEFAULT 0,
     ops_overflow  INTEGER DEFAULT 0,
-    status        TEXT
+    status        TEXT,
+    duration_ms   INTEGER,
+    finish_reason TEXT,
+    usage_prompt  INTEGER,
+    usage_completion INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS ix_ent_scope   ON entities (pack, chat_id, topic_id, status);
@@ -250,6 +254,7 @@ class DB:
         self._migrate_entity_status()
         self._migrate_topic_ids()
         self._migrate_ops_overflow()
+        self._migrate_extract_telemetry()
         self.conn.commit()
 
     def close(self) -> None:
@@ -349,6 +354,17 @@ class DB:
             self.conn.execute("ALTER TABLE extraction_runs ADD COLUMN ops_overflow INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_extract_telemetry(self) -> None:
+        for ddl in (
+                "ALTER TABLE extraction_runs ADD COLUMN duration_ms INTEGER",
+                "ALTER TABLE extraction_runs ADD COLUMN finish_reason TEXT",
+                "ALTER TABLE extraction_runs ADD COLUMN usage_prompt INTEGER",
+                "ALTER TABLE extraction_runs ADD COLUMN usage_completion INTEGER"):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 

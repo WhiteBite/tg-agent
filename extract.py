@@ -198,6 +198,12 @@ def provider_openai(prompt: str, pack: dict) -> dict:
             parsed = json.loads(message.get("content"))
             if not isinstance(parsed, dict) or not isinstance(parsed.get("ops"), list):
                 raise ValueError("в ответе нет списка ops")
+            usage = data.get("usage") or {}
+            parsed["_meta"] = {
+                "finish_reason": choice.get("finish_reason"),
+                "usage_prompt": usage.get("prompt_tokens"),
+                "usage_completion": usage.get("completion_tokens"),
+            }
             return parsed
         except Exception as exc:
             error = str(exc)
@@ -221,56 +227,62 @@ def get_provider(provider=None):
 
 
 def _op_valid(db: DB, pack: dict, w: dict, op: dict,
-              lower: int, upto_msg: int) -> bool:
+              lower: int, upto_msg: int) -> tuple[bool, str]:
     name = op.get("op")
-    if name not in pack["ops"] or op.get("kind") not in pack["kinds"]:
-        return False
+    if name not in pack["ops"]:
+        return False, f"op вне пакета: {name}"
+    if op.get("kind") not in pack["kinds"]:
+        return False, f"kind вне пакета: {op.get('kind')}"
     for field in ("confidence", "due_ts"):
         value = op.get(field)
         if value is not None and not isinstance(value, (int, float)):
-            return False
+            return False, f"{field} не число"
     if op.get("dedup_hint") is not None and not isinstance(op.get("dedup_hint"), str):
-        return False
+        return False, "dedup_hint не строка"
     evidence = op.get("evidence")
     if not evidence:
-        return False
+        return False, "нет evidence"
     for ev in evidence:
         if ev.get("chat_id") != w["chat_id"]:
-            return False
+            return False, "evidence из чужого чата"
         msg_id = ev.get("msg_id")
         if not isinstance(msg_id, int) or not lower < msg_id <= upto_msg:
-            return False
+            return False, f"evidence msg вне окна ({lower}, {upto_msg}]"
         row = db.conn.execute(
             "SELECT m.text, m.media, a.text AS transcript FROM messages m "
             "LEFT JOIN media_assets a ON a.chat_id=m.chat_id AND a.msg_id=m.msg_id "
             "AND a.status='done' WHERE m.chat_id=? AND m.msg_id=?",
             (ev.get("chat_id"), msg_id)).fetchone()
         if row is None:
-            return False
+            return False, f"нет сообщения {msg_id}"
         hay = _norm(row["text"])
         if row["media"] and row["transcript"] is not None:
             hay = _norm(f"{row['text'] or ''} [{row['media']}: {row['transcript']}]")
         if _norm(ev.get("quote")) not in hay:
-            return False
+            return False, "quote не подстрока сообщения"
     if name == "new":
-        return True
+        return True, ""
     entity_id = op.get("entity_id")
     if not isinstance(entity_id, int):
-        return False
+        return False, f"{name} без entity_id"
     row = db.conn.execute(
         "SELECT closed_ts, dedup_key FROM entities WHERE id=? AND pack=? AND chat_id=? AND topic_id=?",
         (entity_id, pack["id"], w["chat_id"], w["topic_id"])).fetchone()
     if row is None:
-        return False
+        return False, f"сущность {entity_id} вне скоупа"
     if name == "reopen":
         if row["closed_ts"] is None:
-            return False
+            return False, "reopen: сущность не закрыта"
         twin = db.conn.execute(
             "SELECT 1 FROM entities WHERE pack=? AND chat_id=? AND topic_id=? "
             "AND dedup_key=? AND closed_ts IS NULL AND id != ?",
             (pack["id"], w["chat_id"], w["topic_id"], row["dedup_key"], entity_id)).fetchone()
-        return twin is None
-    return row["closed_ts"] is None
+        if twin is not None:
+            return False, "reopen: есть живой дубль"
+        return True, ""
+    if row["closed_ts"] is not None:
+        return False, f"{name}: сущность закрыта"
+    return True, ""
 
 
 def _validate_ops(db: DB, pack: dict, w: dict, ops: list[dict],
@@ -278,10 +290,14 @@ def _validate_ops(db: DB, pack: dict, w: dict, ops: list[dict],
     valid: list[dict] = []
     rejected = 0
     for op in ops:
-        if _op_valid(db, pack, w, op, lower, upto_msg):
+        ok, reason = _op_valid(db, pack, w, op, lower, upto_msg)
+        if ok:
             valid.append(op)
         else:
             rejected += 1
+            print(f"  - rejected {w['chat_id']}/{w['topic_id']} "
+                  f"{op.get('op')}/{op.get('kind')} {(op.get('title') or '')[:40]!r}: {reason}",
+                  file=sys.stderr)
     return valid, rejected
 
 
@@ -444,7 +460,10 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
         lines = _message_lines(db, chat_id, rows)
     from_msg = cursor + 1 if cursor is not None else rows[0]["msg_id"]
     upto_msg = rows[-1]["msg_id"]
+    t0 = time.monotonic()
     result = prov(build_prompt(db, pack, w, rows), pack)
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    meta = (result.pop("_meta", None) or {}) if isinstance(result, dict) else {}
     valid, rejected = _validate_ops(
         db, pack, w, result.get("ops") or [], cursor if cursor is not None else 0, upto_msg)
     valid, overflow, dropped_min = _split_ops(valid)
@@ -460,9 +479,13 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
     status = "ok" if rejected == 0 and overflow == 0 else "partial"
     cur = db.conn.execute(
         "INSERT INTO extraction_runs(pack, chat_id, topic_id, from_msg, upto_msg, ts, "
-        "ops_applied, ops_rejected, ops_overflow, status) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "ops_applied, ops_rejected, ops_overflow, status, "
+        "duration_ms, finish_reason, usage_prompt, usage_completion) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (pack["id"], chat_id, topic_id, from_msg, upto_msg, now,
-         len(valid), rejected, overflow, status))
+         len(valid), rejected, overflow, status,
+         duration_ms, meta.get("finish_reason"), meta.get("usage_prompt"),
+         meta.get("usage_completion")))
     run_id = cur.lastrowid
     _apply_ops(db, pack, w, valid, run_id)
     covered = result.get("covered_upto_msg_id")

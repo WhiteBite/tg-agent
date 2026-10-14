@@ -3523,6 +3523,63 @@ def test_extract_parallel(db_path: Path) -> None:
           "extract: сущности из обоих параллельных скоупов", str(by_chat))
 
 
+def test_extract_telemetry(db_path: Path) -> None:
+    print("=== extract: телеметрия прогонов + лог отклонённых ops ===")
+    tl_db = db_path.parent / "telemetry.sqlite"
+    if tl_db.exists():
+        tl_db.unlink()
+    now = int(time.time())
+    with DB(tl_db) as db:
+        db.upsert_chat(-100561, "Телеметрия", None, "supergroup", False, 2)
+        db.watch_add(-100561, 1)
+        for mid, text in ((11, "решено: ставить телеметрию"), (12, "обычное сообщение")):
+            ts = now - 60
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100561, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+    import io
+    import contextlib
+    import extract as extract_mod
+    from packs import PACKS
+
+    def prov(prompt, pack):
+        return {
+            "ops": [
+                {"op": "new", "kind": "decision", "title": "Телеметрия", "entity_id": None,
+                 "body": None, "owner": None, "due_text": None, "due_ts": None,
+                 "confidence": 0.9,
+                 "evidence": [{"chat_id": -100561, "msg_id": 11, "quote": "решено"}]},
+                {"op": "new", "kind": "decision", "title": "Вне окна", "entity_id": None,
+                 "body": None, "owner": None, "due_text": None, "due_ts": None,
+                 "confidence": 0.9,
+                 "evidence": [{"chat_id": -100561, "msg_id": 999, "quote": "нет"}]},
+            ],
+            "covered_upto_msg_id": 12,
+            "_meta": {"finish_reason": "stop", "usage_prompt": 111,
+                      "usage_completion": 222},
+        }
+
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        extract_mod.run(str(tl_db), packs=[PACKS["construction"]], provider=prov)
+    with DB(tl_db) as db:
+        row = db.conn.execute(
+            "SELECT * FROM extraction_runs ORDER BY id DESC LIMIT 1").fetchone()
+    check(row["duration_ms"] is not None and row["duration_ms"] >= 0,
+          "extract: телеметрия — duration_ms записан", str(row["duration_ms"]))
+    check(row["finish_reason"] == "stop" and row["usage_prompt"] == 111
+          and row["usage_completion"] == 222,
+          "extract: телеметрия — finish_reason и usage из _meta провайдера",
+          f"{row['finish_reason']}/{row['usage_prompt']}/{row['usage_completion']}")
+    logged = err.getvalue()
+    check("rejected" in logged and "Вне окна" in logged and "вне окна" in logged,
+          "extract: отклонённый op залогирован с причиной",
+          logged.strip().splitlines()[-1][:120] if logged.strip() else "(пусто)")
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3574,6 +3631,7 @@ def main() -> int:
     test_watch_suggest(db_path)
     test_llm_extra_body(db_path)
     test_extract_parallel(db_path)
+    test_extract_telemetry(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
