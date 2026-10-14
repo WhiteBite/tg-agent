@@ -113,8 +113,9 @@ def mk_group(cid, title, username, topics, counts, forum=True, days=45):
                         f"вопросы — @moderator", pinned=True, reply_to=reply))
         mid += 1
         n = counts.get(tid, 10)
+        step = max(span // max(n, 1), 60)
         for i in range(n):
-            ts = NOW - timedelta(seconds=R.randint(60, span))
+            ts = NOW - timedelta(seconds=span - i * step - R.randint(0, step // 2))
             pool = LINES.get(ttitle, LINES["General"])
             media = MessageMediaPhoto() if R.random() < 0.06 else None
             reply = MessageReplyHeader(tid, True) if forum and tid != 1 else None
@@ -127,8 +128,10 @@ def mk_group(cid, title, username, topics, counts, forum=True, days=45):
             mid += 1
     # без темы (General в форуме)
     if forum:
-        for i in range(counts.get(1, 5)):
-            ts = NOW - timedelta(seconds=R.randint(60, span))
+        gn = counts.get(1, 5)
+        gstep = max(span // max(gn, 1), 60)
+        for i in range(gn):
+            ts = NOW - timedelta(seconds=span - i * gstep - R.randint(0, gstep // 2))
             msgs.append(Msg(mid, ts, R.choice(USERS), R.choice(LINES["General"])))
             mid += 1
     msgs.sort(key=lambda m: m.id)
