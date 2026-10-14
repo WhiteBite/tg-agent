@@ -782,6 +782,305 @@ def test_extract_stub(db_path: Path) -> None:
           f"ents={n3} runs={runs3} cursor={cur3 and cur3['value']}")
 
 
+def test_extract_validation(db_path: Path) -> None:
+    print("=== extract: семантика операций, валидация, ретраи провайдера ===")
+    ex_db = db_path.parent / "extract_validation.sqlite"
+    if ex_db.exists():
+        ex_db.unlink()
+    now = int(time.time())
+    with DB(ex_db) as db:
+        db.upsert_chat(chat_id=-100888, title="Объект", username=None,
+                       kind="supergroup", is_forum=True, members=6)
+        db.upsert_topic(-100888, 7, "Объект")
+        db.watch_add(-100888, 7, project="стройка")
+        texts = {
+            11: "Приняли фундамент, заливка в пятницу",
+            12: "Смена прораба на объекте согласована",
+            13: "Объект сдан, работы завершены",
+            14: "Поставка арматуры и сетки подтверждена поставщиком",
+            15: "Контроль качества пройден без замечаний",
+        }
+        for mid, text in texts.items():
+            ts = now - 600 + mid
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100888, ?, 7, ?, ?, 1, 'Иван', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+
+    import extract as extract_mod
+    from packs import PACKS
+    pack = PACKS["construction"]
+
+    def result(ops, covered=11):
+        return {"ops": ops, "covered_upto_msg_id": covered}
+
+    def ev(msg, quote, chat=-100888):
+        return {"chat_id": chat, "msg_id": msg, "quote": quote}
+
+    def op_new(title, msg, quote, owner=None, body=None):
+        return {"op": "new", "kind": "task", "title": title, "entity_id": None,
+                "body": body, "owner": owner, "due_text": None, "due_ts": None,
+                "confidence": 0.9, "evidence": [ev(msg, quote)]}
+
+    def op_update(entity_id, msg, quote, owner=None, body=""):
+        return {"op": "update", "kind": "task", "title": "Залить фундамент",
+                "entity_id": entity_id, "body": body, "owner": owner,
+                "due_text": None, "due_ts": None, "confidence": 0.9,
+                "evidence": [ev(msg, quote)]}
+
+    def op_flip(name, entity_id, msg, quote):
+        return {"op": name, "kind": "task", "title": "Залить фундамент",
+                "entity_id": entity_id, "body": "", "owner": None,
+                "due_text": None, "due_ts": None, "confidence": 0.9,
+                "evidence": [ev(msg, quote)]}
+
+    def provider(ops):
+        return lambda prompt, p: result(ops)
+
+    def last_run(db):
+        return db.conn.execute(
+            "SELECT * FROM extraction_runs ORDER BY id DESC LIMIT 1").fetchone()
+
+    extract_mod.run(str(ex_db), provider=provider([
+        op_new("Залить фундамент", 11, "фундамент", owner="Иван", body="Заливка запланирована"),
+        op_new("Галлюцинация", 999, "нет такого сообщения"),
+    ]))
+    with DB(ex_db) as db:
+        run = last_run(db)
+        check(run is not None and run["ops_applied"] == 1 and run["ops_rejected"] == 1
+              and run["status"] == "partial",
+              "extract: (a) 1 применён, 1 отклонён, статус partial",
+              f"applied={run and run['ops_applied']} rejected={run and run['ops_rejected']} "
+              f"status={run and run['status']}")
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        check(n == 1, "extract: (a) создана ровно одна сущность", str(n))
+
+    upd = op_update(1, 12, "прораба", owner="Мария", body="Прораб назначен")
+    extract_mod.run(str(ex_db), provider=provider([upd]))
+    with DB(ex_db) as db:
+        e = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
+        check(e["owner"] == "Мария", "extract: (b) owner обновлён", str(e["owner"]))
+        check(e["body"] == "Заливка запланирована\nПрораб назначен",
+              "extract: (b) body дополнен по политике append", repr(e["body"]))
+        evs = db.conn.execute(
+            "SELECT * FROM entity_events WHERE entity_id=1 AND op='update' ORDER BY id").fetchall()
+        check(sorted(r["field"] for r in evs) == ["body", "owner"],
+              "extract: (b) по одному событию на изменённое поле",
+              str([r["field"] for r in evs]))
+        own = next((r for r in evs if r["field"] == "owner"), None)
+        check(own is not None and own["from_val"] == "Иван" and own["to_val"] == "Мария"
+              and own["msg_id"] == 12 and own["quote"] == "прораба",
+              "extract: (b) событие owner с from/to и доказательством",
+              f"from={own and own['from_val']} to={own and own['to_val']}")
+        upd_ts = e["updated_ts"]
+
+    time.sleep(1.1)
+    extract_mod.run(str(ex_db), provider=provider([upd]))
+    with DB(ex_db) as db:
+        evs = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE entity_id=1").fetchone()["c"]
+        check(evs == 3, "extract: (b) повторный update без изменений не пишет события", str(evs))
+        e = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
+        check(e["updated_ts"] == upd_ts, "extract: (b) no-op не трогает updated_ts",
+              f"{e['updated_ts']} vs {upd_ts}")
+        run = last_run(db)
+        check(run["ops_applied"] == 1 and run["ops_rejected"] == 0,
+              "extract: (b) no-op update всё равно считается применённым",
+              f"applied={run['ops_applied']} rejected={run['ops_rejected']}")
+
+    extract_mod.run(str(ex_db), provider=provider([
+        op_update(999, 14, "арматуры", owner="Пётр"),
+        op_update(1, 999, "вне окна"),
+        op_update(1, 14, "арматуры   и сетки", owner="Пётр"),
+    ]))
+    with DB(ex_db) as db:
+        run = last_run(db)
+        check(run["ops_applied"] == 1 and run["ops_rejected"] == 2 and run["status"] == "partial",
+              "extract: (c) несуществующий entity_id и evidence вне окна отклонены",
+              f"applied={run['ops_applied']} rejected={run['ops_rejected']}")
+        e = db.conn.execute("SELECT owner FROM entities WHERE id=1").fetchone()
+        check(e["owner"] == "Пётр",
+              "extract: (c) quote с лишними пробелами принят, owner обновлён", str(e["owner"]))
+
+    extract_mod.run(str(ex_db), provider=provider([
+        {"op": "update", "kind": "task", "title": "", "entity_id": 1,
+         "body": "", "owner": None, "due_text": None, "due_ts": None,
+         "confidence": None, "evidence": [ev(15, "без замечаний")]},
+    ]))
+    with DB(ex_db) as db:
+        e = db.conn.execute(
+            "SELECT owner, title, confidence FROM entities WHERE id=1").fetchone()
+        check(e["owner"] == "Пётр" and e["title"] == "Залить фундамент"
+              and e["confidence"] == 0.9,
+              "extract: (c) update с null/пустыми полями не затирает существующие",
+              f"owner={e['owner']} title={e['title']} confidence={e['confidence']}")
+
+    extract_mod.run(str(ex_db), provider=provider([op_flip("close", 1, 13, "сдан")]))
+    with DB(ex_db) as db:
+        e = db.conn.execute("SELECT closed_ts FROM entities WHERE id=1").fetchone()
+        check(e["closed_ts"] is not None, "extract: (d) close выставил closed_ts",
+              str(e["closed_ts"]))
+        evc = db.conn.execute(
+            "SELECT * FROM entity_events WHERE entity_id=1 AND op='close'").fetchone()
+        check(evc is not None and evc["msg_id"] == 13,
+              "extract: (d) одно событие close с доказательством",
+              f"msg_id={evc and evc['msg_id']}")
+
+    extract_mod.run(str(ex_db), provider=provider([op_update(1, 12, "прораба", owner="Мария")]))
+    with DB(ex_db) as db:
+        run = last_run(db)
+        check(run["ops_applied"] == 0 and run["ops_rejected"] == 1,
+              "extract: (d) update по закрытой сущности отклонён",
+              f"applied={run['ops_applied']} rejected={run['ops_rejected']}")
+        e = db.conn.execute("SELECT owner FROM entities WHERE id=1").fetchone()
+        check(e["owner"] == "Пётр", "extract: (d) закрытая сущность не изменена", str(e["owner"]))
+
+    extract_mod.run(str(ex_db), provider=provider([op_flip("reopen", 1, 13, "сдан")]))
+    with DB(ex_db) as db:
+        e = db.conn.execute("SELECT closed_ts FROM entities WHERE id=1").fetchone()
+        check(e["closed_ts"] is None, "extract: (d) reopen сбросил closed_ts", str(e["closed_ts"]))
+        evr = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE entity_id=1 AND op='reopen'").fetchone()["c"]
+        check(evr == 1, "extract: (d) одно событие reopen", str(evr))
+
+    extract_mod.run(str(ex_db), provider=provider(
+        [op_new(f"Задача {i}", 14, "арматуры") for i in range(55)]))
+    with DB(ex_db) as db:
+        run = last_run(db)
+        check(run["ops_applied"] == 50 and run["ops_rejected"] == 5 and run["status"] == "partial",
+              "extract: (e) 55 валидных new: 50 применено, 5 сверх лимита отклонено",
+              f"applied={run['ops_applied']} rejected={run['ops_rejected']}")
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        check(n == 51, "extract: (e) сущностей 1+50", str(n))
+
+    extract_mod.run(str(ex_db), provider=provider([op_new("Залить фундамент", 14, "арматуры")]))
+    with DB(ex_db) as db:
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        check(n == 51, "extract: (f) дубликат не создаёт вторую сущность", str(n))
+        evd = db.conn.execute(
+            "SELECT * FROM entity_events WHERE entity_id=1 AND op='update' AND field='dedup'").fetchone()
+        check(evd is not None, "extract: (f) дубликат конвертирован в update/dedup", str(evd))
+        run = last_run(db)
+        check(run["ops_applied"] == 1 and run["ops_rejected"] == 0,
+              "extract: (f) конвертация дубликата считается применённой",
+              f"applied={run['ops_applied']}")
+
+    twin = op_new("Двойная задача", 14, "арматуры")
+    extract_mod.run(str(ex_db), provider=provider([twin, dict(twin)]))
+    with DB(ex_db) as db:
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        check(n == 52, "extract: (f) два одинаковых new в одном батче дают одну сущность", str(n))
+        evs = db.conn.execute(
+            "SELECT op, field FROM entity_events WHERE entity_id=52 ORDER BY id").fetchall()
+        check([(r["op"], r["field"]) for r in evs] == [("new", None), ("update", "dedup")],
+              "extract: (f) второй new конвертирован в update первого",
+              str([(r["op"], r["field"]) for r in evs]))
+        run = last_run(db)
+        check(run["ops_applied"] == 2, "extract: (f) обе операции засчитаны", str(run["ops_applied"]))
+
+    real_post = extract_mod._post
+    saved = {k: os.environ.get(k) for k in ("EXTRACT_URL", "EXTRACT_KEY", "EXTRACT_MODEL")}
+    os.environ["EXTRACT_URL"] = "http://stub.invalid/v1"
+    os.environ.pop("EXTRACT_KEY", None)
+    os.environ.pop("EXTRACT_MODEL", None)
+    calls: list[dict] = []
+    try:
+        def fake_post(url, key, payload):
+            calls.append(payload)
+            if len(calls) == 1:
+                return {"choices": [{"message": {"content": "это не JSON"},
+                                     "finish_reason": "stop"}]}
+            return {"choices": [{"message": {"content": json.dumps(
+                {"ops": [], "covered_upto_msg_id": 11})}, "finish_reason": "stop"}]}
+
+        extract_mod._post = fake_post
+        res = extract_mod.provider_openai("промпт", pack)
+        check(isinstance(res, dict) and res["ops"] == [] and len(calls) == 2,
+              "extract: (g) после мусора провайдер вернул dict за 2 вызова",
+              f"calls={len(calls)}")
+        p0 = calls[0]
+        check(p0["model"] == "gpt-4o-mini" and p0["temperature"] == 0.1
+              and p0["response_format"]["json_schema"]["name"] == "entity_ops"
+              and p0["response_format"]["json_schema"]["strict"] is True
+              and p0["response_format"]["json_schema"]["schema"] == pack["json_schema"],
+              "extract: (g) payload: модель, температура, strict json_schema пакета",
+              f"model={p0['model']} temp={p0['temperature']}")
+        msgs = calls[1]["messages"]
+        check(len(msgs) == 3 and msgs[1]["role"] == "assistant"
+              and msgs[1]["content"] == "это не JSON" and msgs[2]["role"] == "user"
+              and msgs[2]["content"].startswith("Your output failed:"),
+              "extract: (g) ретрай дополнен ответом модели и фидбеком об ошибке",
+              f"roles={[m['role'] for m in msgs]}")
+
+        def fail_post(url, key, payload):
+            calls.append(payload)
+            raise OSError("сеть недоступна")
+
+        extract_mod._post = fail_post
+        try:
+            extract_mod.provider_openai("промпт", pack)
+            check(False, "extract: (g) вечный сбой провайдера поднимает исключение")
+        except RuntimeError:
+            check(True, "extract: (g) вечный сбой провайдера поднимает исключение")
+        check(len(calls) == 5, "extract: (g) три попытки до исключения", str(len(calls)))
+
+        with DB(ex_db) as db:
+            runs_before = db.conn.execute(
+                "SELECT COUNT(*) c FROM extraction_runs").fetchone()["c"]
+            cur_before = db.conn.execute(
+                "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
+        extract_mod.run(str(ex_db), provider=extract_mod.provider_openai)
+        with DB(ex_db) as db:
+            runs_after = db.conn.execute(
+                "SELECT COUNT(*) c FROM extraction_runs").fetchone()["c"]
+            cur_after = db.conn.execute(
+                "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
+        check(runs_after == runs_before and cur_before is not None and cur_after is not None
+              and cur_after["value"] == cur_before["value"],
+              "extract: (g) сбой провайдера: курсор не двинут, прогон не записан",
+              f"runs {runs_before}->{runs_after} "
+              f"cursor {cur_before and cur_before['value']}->{cur_after and cur_after['value']}")
+    finally:
+        extract_mod._post = real_post
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    with DB(ex_db) as db:
+        db.upsert_topic(-100888, 8, "Поток")
+        db.watch_add(-100888, 8, project="стройка")
+        for i in range(250):
+            mid = 300 + i
+            ts = now - 300 + i
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100888, ?, 8, ?, ?, 1, 'Иван', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), f"сообщение {i}"))
+        db.conn.commit()
+
+    made = extract_mod.run(str(ex_db), provider=extract_mod.provider_stub)
+    m8 = next((m for m in made if m["topic_id"] == 8), None)
+    check(m8 is not None and m8["messages"] == 200 and m8["upto_msg"] == 499,
+          "extract: (h) первый прогон берёт только 200 сообщений",
+          f"messages={m8 and m8['messages']} upto={m8 and m8['upto_msg']}")
+    with DB(ex_db) as db:
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100888:8:construction'").fetchone()
+        check(cur is not None and int(cur["value"]) == 499,
+              "extract: (h) курсор = последнему msg_id среза", str(cur and cur["value"]))
+
+    made = extract_mod.run(str(ex_db), provider=extract_mod.provider_stub)
+    m8 = next((m for m in made if m["topic_id"] == 8), None)
+    check(m8 is not None and m8["messages"] == 50 and m8["upto_msg"] == 549,
+          "extract: (h) второй прогон подбирает остаток",
+          f"messages={m8 and m8['messages']} upto={m8 and m8['upto_msg']}")
+
+
 # ------------------------------------------- 5. настоящий server.py по MCP stdio
 
 def rpc(proc: subprocess.Popen, payload: dict) -> None:
@@ -1740,6 +2039,7 @@ def main() -> int:
     test_watch(db_path)
     test_entities_schema(db_path)
     test_extract_stub(db_path)
+    test_extract_validation(db_path)
     test_live_and_poll(db_path)
     test_gates(db_path)
     test_strict_and_doctor(db_path)

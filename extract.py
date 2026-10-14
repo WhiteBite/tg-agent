@@ -3,12 +3,15 @@
 
     EXTRACT_PROVIDER=stub python3 extract.py            # механический извлекатель (без LLM)
     EXTRACT_PROVIDER=stub python3 extract.py --dry-run  # показать операции, ничего не писать
-    python3 extract.py --pack construction --db demo.sqlite
+    EXTRACT_PROVIDER=openai EXTRACT_URL=https://api.openai.com/v1 \
+        EXTRACT_KEY=sk-... python3 extract.py --pack construction --db demo.sqlite
 
 По каждой паре (пакет, watch-тема) берёт сообщения после прошлого прогона
 (курсор extract:{chat}:{topic}:{pack} в meta; первый прогон — окно backfill_days),
-зовёт провайдера и применяет его операции new одной транзакцией: entities,
-entity_events, extraction_runs, курсор. Сбой провайдера курсор не двигает.
+за один раз не больше 200 сообщений — остаток подберёт следующий прогон.
+Зовёт провайдера (stub или openai-совместимый LLM с ретраями по фидбеку
+об ошибке) и применяет операции new/update/close/reopen одной транзакцией:
+entities, entity_events, extraction_runs, курсор. Сбой провайдера курсор не двигает.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import re
 import sqlite3
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +41,7 @@ DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
 MAX_OPS_PER_BATCH = 50
 OPEN_ENTITIES_CAP = 50
+MAX_MESSAGES_PER_RUN = 200
 
 _LINE_RE = re.compile(r"^\[(\d+)\] (\S+) (.*?): (.*)$")
 _CHAT_RE = re.compile(r"чат (-?\d+)")
@@ -120,8 +125,54 @@ def provider_stub(prompt: str, pack: dict) -> dict:
     return {"ops": ops, "covered_upto_msg_id": covered}
 
 
+def _post(url: str, key: str | None, payload: dict) -> dict:
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"})
+    if key:
+        req.add_header("Authorization", f"Bearer {key}")
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read())
+
+
 def provider_openai(prompt: str, pack: dict) -> dict:
-    raise NotImplementedError("openai provider: T3b")
+    url = os.environ["EXTRACT_URL"].rstrip("/") + "/chat/completions"
+    key = os.environ.get("EXTRACT_KEY")
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    error = "нет ответа"
+    for _ in range(3):
+        payload = {
+            "model": os.environ.get("EXTRACT_MODEL", "gpt-4o-mini"),
+            "temperature": 0.1,
+            "messages": messages,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "entity_ops", "strict": True,
+                                "schema": pack["json_schema"]},
+            },
+        }
+        raw = ""
+        try:
+            data = _post(url, key, payload)
+            choice = (data.get("choices") or [{}])[0]
+            message = choice.get("message") or {}
+            raw = message.get("content") or message.get("refusal") or ""
+            if message.get("refusal"):
+                raise ValueError(f"отказ модели: {message['refusal']}")
+            if choice.get("finish_reason") == "length":
+                raise ValueError("finish_reason=length: ответ обрезан")
+            parsed = json.loads(message.get("content"))
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("ops"), list):
+                raise ValueError("в ответе нет списка ops")
+            return parsed
+        except Exception as exc:
+            error = str(exc)
+            if raw:
+                messages.append({"role": "assistant", "content": raw})
+            messages.append({"role": "user",
+                             "content": f"Your output failed: {error}. "
+                                        "Return corrected JSON only."})
+    raise RuntimeError(f"openai-провайдер не дал валидный ответ: {error}")
 
 
 def get_provider(provider=None):
@@ -135,64 +186,156 @@ def get_provider(provider=None):
     raise RuntimeError(f"неизвестный EXTRACT_PROVIDER: {name}")
 
 
-def _validate_ops(db: DB, pack: dict, ops: list[dict],
+def _op_valid(db: DB, pack: dict, w: dict, op: dict,
+              lower: int, upto_msg: int) -> bool:
+    name = op.get("op")
+    if name not in pack["ops"] or op.get("kind") not in pack["kinds"]:
+        return False
+    for field in ("confidence", "due_ts"):
+        value = op.get(field)
+        if value is not None and not isinstance(value, (int, float)):
+            return False
+    evidence = op.get("evidence")
+    if not evidence:
+        return False
+    for ev in evidence:
+        msg_id = ev.get("msg_id")
+        if not isinstance(msg_id, int) or not lower < msg_id <= upto_msg:
+            return False
+        row = db.conn.execute(
+            "SELECT text FROM messages WHERE chat_id=? AND msg_id=?",
+            (ev.get("chat_id"), msg_id)).fetchone()
+        if row is None or _norm(ev.get("quote")) not in _norm(row["text"]):
+            return False
+    if name == "new":
+        return True
+    entity_id = op.get("entity_id")
+    if not isinstance(entity_id, int):
+        return False
+    row = db.conn.execute(
+        "SELECT closed_ts FROM entities WHERE id=? AND pack=? AND chat_id=? AND topic_id=?",
+        (entity_id, pack["id"], w["chat_id"], w["topic_id"])).fetchone()
+    if row is None:
+        return False
+    if name == "reopen":
+        return row["closed_ts"] is not None
+    return row["closed_ts"] is None
+
+
+def _validate_ops(db: DB, pack: dict, w: dict, ops: list[dict],
                   lower: int, upto_msg: int) -> tuple[list[dict], int]:
     valid: list[dict] = []
     rejected = 0
     for op in ops:
-        ok = (op.get("op") == "new" and op.get("kind") in pack["kinds"]
-              and bool(op.get("evidence")))
-        for ev in op.get("evidence") or []:
-            msg_id = ev.get("msg_id")
-            if not isinstance(msg_id, int) or not lower < msg_id <= upto_msg:
-                ok = False
-                break
-            row = db.conn.execute(
-                "SELECT text FROM messages WHERE chat_id=? AND msg_id=?",
-                (ev.get("chat_id"), msg_id)).fetchone()
-            if row is None or _norm(ev.get("quote")) not in _norm(row["text"]):
-                ok = False
-                break
-        if ok and len(valid) < MAX_OPS_PER_BATCH:
+        if _op_valid(db, pack, w, op, lower, upto_msg) and len(valid) < MAX_OPS_PER_BATCH:
             valid.append(op)
         else:
             rejected += 1
     return valid, rejected
 
 
+def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> None:
+    kind = op["kind"]
+    title = op.get("title") or ""
+    dedup_key = hashlib.sha1(
+        f"{kind}|{_norm(title).lower()}".encode("utf-8")).hexdigest()
+    attrs = {"due_text": op.get("due_text")} if op.get("due_text") else None
+    try:
+        cur = db.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, body, owner, "
+            "due_ts, project, confidence, attrs_json, dedup_key, created_ts, updated_ts) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (pack["id"], w["chat_id"], w["topic_id"], kind, title, op.get("body"),
+             op.get("owner"), op.get("due_ts"), w.get("project"), op.get("confidence"),
+             json.dumps(attrs, ensure_ascii=False) if attrs is not None else None,
+             dedup_key, now, now))
+        entity_id, ev_op, field = cur.lastrowid, "new", None
+    except sqlite3.IntegrityError:
+        row = db.conn.execute(
+            "SELECT id FROM entities WHERE pack=? AND chat_id=? AND topic_id=? "
+            "AND dedup_key=? AND closed_ts IS NULL",
+            (pack["id"], w["chat_id"], w["topic_id"], dedup_key)).fetchone()
+        if row is None:
+            raise
+        entity_id, ev_op, field = row["id"], "update", "dedup"
+        db.conn.execute("UPDATE entities SET updated_ts=? WHERE id=?", (now, entity_id))
+    for ev in op.get("evidence") or []:
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
+            "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
+            (entity_id, run_id, now, ev_op, field,
+             ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+
+
+def _apply_update(db: DB, pack: dict, op: dict, run_id: int, now: int) -> None:
+    entity_id = op["entity_id"]
+    row = db.conn.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
+    if row is None:
+        return
+    title = op.get("title") or row["title"]
+    owner = op.get("owner") if op.get("owner") is not None else row["owner"]
+    due_ts = op.get("due_ts") if op.get("due_ts") is not None else row["due_ts"]
+    confidence = op.get("confidence") if op.get("confidence") is not None else row["confidence"]
+    attrs = {"due_text": op.get("due_text")} if op.get("due_text") else None
+    attrs_json = json.dumps(attrs, ensure_ascii=False) if attrs is not None else row["attrs_json"]
+    old_body = row["body"] or ""
+    body = row["body"]
+    if (pack.get("field_policies") or {}).get("body") == "append":
+        add_body = op.get("body") or ""
+        if add_body and add_body not in old_body:
+            body = add_body if not old_body else old_body + "\n" + add_body
+    else:
+        body = op.get("body") or None
+    changes = [item for item in (
+        ("title", row["title"], title),
+        ("body", row["body"], body),
+        ("owner", row["owner"], owner),
+        ("due_ts", row["due_ts"], due_ts),
+        ("confidence", row["confidence"], confidence),
+        ("attrs_json", row["attrs_json"], attrs_json),
+    ) if item[1] != item[2]]
+    if not changes:
+        return
+    db.conn.execute(
+        "UPDATE entities SET title=?, body=?, owner=?, due_ts=?, confidence=?, "
+        "attrs_json=?, updated_ts=? WHERE id=?",
+        (title, body, owner, due_ts, confidence, attrs_json, now, entity_id))
+    ev = (op.get("evidence") or [{}])[0]
+    for field, old, new in changes:
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, to_val, "
+            "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (entity_id, run_id, now, "update", field,
+             None if old is None else str(old), None if new is None else str(new),
+             ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+
+
+def _apply_flip(db: DB, op: dict, run_id: int, now: int,
+                name: str, closed_ts: int | None) -> None:
+    entity_id = op["entity_id"]
+    db.conn.execute(
+        "UPDATE entities SET closed_ts=?, updated_ts=? WHERE id=?",
+        (closed_ts, now, entity_id))
+    ev = (op.get("evidence") or [{}])[0]
+    db.conn.execute(
+        "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
+        "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
+        (entity_id, run_id, now, name, None,
+         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+
+
 def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int) -> None:
     now = int(time.time())
     for op in valid:
-        kind = op["kind"]
-        title = op.get("title") or ""
-        dedup_key = hashlib.sha1(
-            f"{kind}|{_norm(title).lower()}".encode("utf-8")).hexdigest()
-        attrs = {"due_text": op["due_text"]} if op.get("due_text") else None
-        try:
-            cur = db.conn.execute(
-                "INSERT INTO entities(pack, chat_id, topic_id, kind, title, body, owner, "
-                "due_ts, project, confidence, attrs_json, dedup_key, created_ts, updated_ts) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (pack["id"], w["chat_id"], w["topic_id"], kind, title, op.get("body"),
-                 op.get("owner"), op.get("due_ts"), w.get("project"), op.get("confidence"),
-                 json.dumps(attrs, ensure_ascii=False) if attrs is not None else None,
-                 dedup_key, now, now))
-            entity_id, ev_op, field = cur.lastrowid, "new", None
-        except sqlite3.IntegrityError:
-            row = db.conn.execute(
-                "SELECT id FROM entities WHERE pack=? AND chat_id=? AND topic_id=? "
-                "AND dedup_key=? AND closed_ts IS NULL",
-                (pack["id"], w["chat_id"], w["topic_id"], dedup_key)).fetchone()
-            if row is None:
-                raise
-            entity_id, ev_op, field = row["id"], "update", "dedup"
-            db.conn.execute("UPDATE entities SET updated_ts=? WHERE id=?", (now, entity_id))
-        for ev in op.get("evidence") or []:
-            db.conn.execute(
-                "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
-                "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
-                (entity_id, run_id, now, ev_op, field,
-                 ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+        name = op.get("op")
+        if name == "update":
+            _apply_update(db, pack, op, run_id, now)
+        elif name == "close":
+            _apply_flip(db, op, run_id, now, "close", now)
+        elif name == "reopen":
+            _apply_flip(db, op, run_id, now, "reopen", None)
+        else:
+            _apply_new(db, pack, w, op, run_id, now)
 
 
 def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
@@ -209,11 +352,13 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
     rows = [dict(r) for r in db.conn.execute(sql + " ORDER BY msg_id", args)]
     if not rows:
         return None
+    if len(rows) > MAX_MESSAGES_PER_RUN:
+        rows = rows[:MAX_MESSAGES_PER_RUN]
     from_msg = cursor + 1 if cursor is not None else rows[0]["msg_id"]
     upto_msg = rows[-1]["msg_id"]
     result = prov(build_prompt(db, pack, w, rows), pack)
     valid, rejected = _validate_ops(
-        db, pack, result.get("ops") or [], cursor if cursor is not None else 0, upto_msg)
+        db, pack, w, result.get("ops") or [], cursor if cursor is not None else 0, upto_msg)
     if dry_run:
         print(f"[dry-run] {pack['id']} {chat_id}/{topic_id}: "
               f"ops={len(valid)} rejected={rejected}")
