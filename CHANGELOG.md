@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0 — 2026-10-14
+Слой извлечения сущностей поверх индекса (сообщения остаются источником истины, сущности — пересчитываемая проекция):
+- Новый `extract.py`: generic движок по декларативным пакетам `packs/`; курсор `extract:<chat>:<topic>:<pack>`, первое окно `backfill_days`, до 200 сообщений за прогон; операции new/update/close/reopen одной транзакцией (`entities`, `entity_events`, `extraction_runs`); сбой провайдера курсор не двигает; `EXTRACT_PROVIDER=stub|openai` (`EXTRACT_URL`/`EXTRACT_KEY`/`EXTRACT_MODEL`), `--pack`, `--dry-run`.
+- Новый пакет `packs/construction.py` (PM для стройки): kinds decision/task/promise/question; каждая операция обязана evidence-цитатой, цитата проверяется подстрокой текста сохранённого сообщения (плюс транскрипты) — без валидного evidence операция отклоняется.
+- MCP: инструментов стало 13 вместо 10 — новые `tg_entities` (фильтры pack/kind/status/project/chat_id), `tg_entity` (история событий с доказательствами), `tg_overdue` (просроченное и горизонт `days_ahead`). Сервер по-прежнему read-only и не импортирует extract/notify/media.
+- Новый `monitor.py`: сводка просроченного и дедлайнов по проектам (`--days-ahead`, `--project`, `--send`); новый `notify.py`: отправка в Saved Messages — единственный пишущий в Telegram модуль, dry-run по умолчанию, реальная отправка только за `TG_ALLOW_SEND=1`, cap `TG_NOTIFY_CAP` (10).
+- Новый `media.py`: очередь транскрипции голосовых/документов (`media_assets`) из sync/live; `MEDIA_PROVIDER=stub|openai` (`MEDIA_URL`/`MEDIA_KEY`/`MEDIA_MODEL`); транскрипты подмешиваются в промпт извлечения; openai без скачанных байтов — `NotImplementedError` (загрузка файлов — отдельный инкремент).
+- Новый `export.py`: выгрузка сущностей во внешние системы; file-провайдер (JSONL, `--out`/`TG_EXPORT_PATH`), курсор в таблице `integrations`; 101/notion — структурированная ошибка без исключений.
+- Мульти-проектность: тег `project` у строк watch-листа (`watch.py add --project`, подкоманда `project`); сущности наследуют проект от темы.
+- Тесты: 285 офлайн-проверок.
+
 ## 0.3.1 — 2026-10-12
 Фиксы аудита (безопасность, корректность, Windows):
 - Новый `start.py`: одна команда вместо десяти — логин (если нужно), выбор чатов по номерам, синк, открытие визуала.

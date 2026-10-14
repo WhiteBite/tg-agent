@@ -11,7 +11,7 @@ Read-only связка: **Telethon (твой аккаунт) → локальн�
 
 1. ты выделяешь нужное (папка в Telegram **или** точечно темы через `watch.py`),
 2. это синхронизируется в локальный индекс (инкрементально, старая история — чанками),
-3. агент получает 10 read-only инструментов, которые знают твои алиасы и «что нового с прошлого раза».
+3. агент получает 13 read-only инструментов, которые знают твои алиасы и «что нового с прошлого раза».
 
 ---
 
@@ -106,10 +106,14 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_links` | Что шерили: топ @упоминаний, t.me, инвайтов, URL и источников пересылок |
 | `tg_topics` | Структура индекса: чаты, а по chat_id — его темы со счётчиками |
 | `tg_digests` | Готовые выжимки новых сообщений (создаёт `digest.py`) |
+| `tg_entities` | Извлечённые сущности (задачи, решения, обещания, вопросы): project, kind, status, owner, due_ts; фильтры pack/kind/status/project/chat_id |
+| `tg_entity` | Одна сущность по id: все поля и история событий — какое поле менялось, когда и с каким доказательством из сообщения |
+| `tg_overdue` | Открытые сущности со сроком: просроченные (`days_ahead=0`) или на горизонте N дней, по возрастанию due_ts |
 
 Отправки нет вообще: в `server.py` не существует инструмента, который что-то
-пишет в Telegram. `tg_sql` (произвольный read-only SQL) скрыт по умолчанию,
-включается `TG_EXPOSE_SQL=1`.
+пишет в Telegram (единственный пишущий модуль репозитория — `notify.py`, он
+живёт вне MCP-сервера и за гейтом `TG_ALLOW_SEND=1`). `tg_sql` (произвольный
+read-only SQL) скрыт по умолчанию, включается `TG_EXPOSE_SQL=1`.
 
 ---
 
@@ -212,7 +216,7 @@ offset_topic, limit)`. Обёртки в Telethon нет, а в `functions.chann
 opencode mcp add telegram --global -- \
   ~/.venvs/tg-agent/bin/python ~/tg-agent/server.py
 opencode mcp list        # должно быть connected
-python3 server.py --list # проверить сервер отдельно: печатает 7 инструментов
+python3 server.py --list # проверить сервер отдельно: печатает 13 инструментов
 ```
 
 Файл `tg-agent.md` — пример промпта агента: порядок работы, требование начинать с
@@ -250,9 +254,101 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 через `tg_digests`, UI показывает баннером 📝 в теме. Проще всего гонять
 по cron раз в день.
 
+## Извлечение сущностей (packs)
+
+```bash
+EXTRACT_PROVIDER=stub python3 extract.py            # механический извлекатель (без LLM)
+EXTRACT_PROVIDER=stub python3 extract.py --dry-run  # показать операции, ничего не писать
+EXTRACT_PROVIDER=openai EXTRACT_URL=https://api.openai.com/v1 \
+    EXTRACT_KEY=sk-... EXTRACT_MODEL=gpt-4o-mini python3 extract.py --pack construction
+```
+
+Сообщения остаются неизменяемым источником истины; сущности — пересчитываемая
+проекция: удалил и перегенерил заново, ничего не потеряно. Движок `extract.py`
+generic, предметная область описана декларативным пакетом в `packs/`; пакет
+задаёт kinds, prompt-шаблон, окно первого прогона (`backfill_days`) и scope.
+Сейчас один пакет — `construction` (PM для стройки): decision / task / promise
+/ question.
+
+По каждой паре (пакет, watch-тема) курсор `extract:<chat>:<topic>:<pack>` в
+`meta`; за один прогон не больше 200 сообщений, остаток подберёт следующий.
+Провайдер отвечает JSON-операциями new/update/close/reopen; каждая обязана
+нести evidence — цитаты сообщений. Цитата проверяется как подстрока текста
+сохранённого сообщения (плюс транскрипты медиа); операция без валидного
+evidence отклоняется. Операции применяются одной транзакцией
+(`entities`, `entity_events`, `extraction_runs`), сбой провайдера курсор не
+двигает.
+
+Теги проектов: `python3 watch.py add ... --project "Объекд"` или
+`python3 watch.py project --chat @mygroup --topic 789 --project "Объекд"`.
+Проект у строки watch — сущности наследуют его от темы.
+
+## Мониторинг и уведомления
+
+```bash
+python3 monitor.py                       # dry-run: сводка по проектам и дедлайны
+python3 monitor.py --days-ahead 7        # добавить задачи на неделю вперёд
+python3 monitor.py --project "Объекд"    # один проект
+python3 monitor.py --send                # отправить сводку в Saved Messages
+```
+
+Считает по `entities`: просроченные — открытые сущности со сроком, чей due_ts
+в прошлом; `--days-ahead N` дополнительно достаёт задачи до N дней включительно.
+`--send` — это `notify.py`:
+
+```bash
+python3 notify.py "текст"                # dry-run: показать, что ушло бы
+TG_ALLOW_SEND=1 python3 notify.py --send "текст"
+echo "текст" | TG_ALLOW_SEND=1 python3 notify.py --send   # из stdin, построчно
+```
+
+`notify.py` — единственный модуль репозитория, который умеет писать в Telegram
+(в свои Saved Messages). Реальная отправка только при `TG_ALLOW_SEND=1`, по
+умолчанию везде dry-run; `TG_NOTIFY_CAP` (по умолчанию 10) ограничивает число
+сообщений за вызов. MCP-сервер `notify.py` не импортирует — агент отправки
+по-прежнему не видит.
+
+## Медиа-транскрипция
+
+```bash
+MEDIA_PROVIDER=stub python3 media.py
+MEDIA_PROVIDER=openai MEDIA_URL=https://api.openai.com/v1 \
+    MEDIA_KEY=sk-... MEDIA_MODEL=whisper-1 python3 media.py
+```
+
+`sync.py` и `live.py` ставят голосовые и документы в очередь (таблица
+`media_assets`, status=pending); этот воркер её разгребает. stub пишет
+детерминированную заглушку, openai шлёт multipart-запрос в
+`{MEDIA_URL}/audio/transcriptions`. Готовые транскрипции `extract.py`
+подмешивает в промпт извлечения (и evidence-проверка учитывает их текст).
+Скачивание файла из Telegram — отдельный инкремент: openai-провайдер без
+готовых байтов поднимает `NotImplementedError`.
+
+## Экспорт
+
+```bash
+python3 export.py                                  # JSONL рядом с базой
+python3 export.py --system file --out /tmp/export.jsonl
+python3 export.py --system notion                  # структурированная ошибка: нет API-доступа
+```
+
+Выгружает сущности и их события во внешние системы. Путь file-провайдера:
+`--out`, иначе `TG_EXPORT_PATH`, иначе `export.jsonl` рядом с базой. Курсор
+каждого провайдера живёт в таблице `integrations` (entity_id, system):
+выгружаются только сущности с событиями свежее `synced_ts`; сущности без
+событий не выгружаются никогда. `101` и `notion` не реализованы — отвечают
+словарём-ошибкой, исключений не бросают (у 101 есть публичный REST API: JWT,
+swagger на app.101-group.ru — ждёт кредов).
+
 ## Безопасность
 
-- **Отправить что-либо в Telegram агент не может** — таких инструментов нет.
+- **Отправить что-либо в Telegram агент не может** — таких инструментов нет;
+  `notify.py` (единственный пишущий модуль) вне MCP-сервера и за гейтом
+  `TG_ALLOW_SEND=1`.
+- **Сообщения — неизменяемый источник истины.** Извлечение сущностей —
+  пересчитываемая проекция: каждая сущность обязана цитатами из сохранённых
+  сообщений (проверка на подстроку), без валидного evidence операция не
+  применяется.
 - **Секреты маскируются на инджесте** (`redact.py`): API-ключи (openai/github/
   groq/slack/nvidia), бот-токены, JWT, приватные ключи и «пароль: …»-паттерны
   заменяются на `[скрыто: …]` до записи в индекс — агент сырые креды не видит.
@@ -287,17 +383,23 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 |---|---|
 | `sync.py` | Telethon → SQLite: инкрементальная синхронизация, бэкфилл чанками, папки, пины |
 | `db.py` | Индекс: схема, FTS5, watch-лист, refs, пины, дайджесты, `run_sql` с блокировками |
-| `server.py` | MCP-сервер (stdio): 10 read-only инструментов |
+| `server.py` | MCP-сервер (stdio): 13 read-only инструментов |
 | `live.py` | Новые сообщения в реальном времени (`events.NewMessage`) |
 | `digest.py` | Дайджесты: stub или openai-совместимый LLM |
+| `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт |
+| `packs/` | Декларативные пакеты извлечения (`construction`: decision/task/promise/question) |
+| `monitor.py` | Сводка просроченного и дедлайнов по проектам; `--send` через `notify.py` |
+| `notify.py` | Уведомления в Saved Messages; единственный пишущий модуль, гейт `TG_ALLOW_SEND=1` |
+| `media.py` | Очередь транскрипции голосовых и документов (stub/openai) |
+| `export.py` | Выгрузка сущностей во внешние системы (file / 101 / notion) |
 | `ui.py` + `ui.html` | Веб-визуал «как в TG Desktop» (кураторство watch-листа) |
-| `watch.py` | То же в терминале |
+| `watch.py` | То же в терминале; `--project` и подкоманда `project` — тег проекта у темы |
 | `login.py` | Логин QR-кодом (или телефон+код), `--export` — строка сессии |
 | `env.py` | Чтение `.env` всеми скриптами (env-переменные приоритетнее) |
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 155 офлайн-проверок (без аккаунта Telegram), гоняются в CI |
+| `test_offline.py` | 285 офлайн-проверок (без аккаунта Telegram), гоняются в CI |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -346,7 +448,7 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **155 проверки, все зелёные** (работают и на Linux,
+`python3 test_offline.py` — **285 проверок, все зелёные** (работают и на Linux,
 и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
@@ -364,7 +466,7 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
   `raw_json` и `refs`; LIKE-фолбэк и `run_sql` выдают замаскированное
 - **FTS-триггёр удаления**: `DELETE FROM messages` чистит индекс (раньше падал)
 - **настоящий `server.py` как подпроцесс по MCP stdio**: `initialize` →
-  `tools/list` (10 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
+  `tools/list` (13 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
   включая сценарий «прочитал → отметил → непрочитанного нет»; `tg_new` честно
   держит `truncated` при лимите; отдельный прогон с `TG_ALLOW_LIVE=1` —
   live-инструменты регистрируются, без кредов отвечают JSON-ошибкой, а не
@@ -387,6 +489,19 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 - `doctor.run_checks()`: формат чеков, FTS5 и redact self-test
 - бюджет контекста дайджеста: `build_context` вписывается в `DIGEST_MAX_CHARS`
   и честно помечает обрезку
+- `extract.run`: курсор по (пакет, тема), окно `backfill_days` на первом прогоне,
+  лимит 200 сообщений; операции new/update/close/reopen одной транзакцией;
+  **evidence-гейт**: цитата вне текста сообщения отклоняется, сбой провайдера
+  курсор не двигает; отдаётся через MCP `tg_entities`/`tg_entity`/`tg_overdue`
+- `monitor.collect`: просрочка и горизонт `--days-ahead`, фильтр по проекту;
+  `notify`: dry-run по умолчанию, реальная отправка только за `TG_ALLOW_SEND=1`,
+  cap `TG_NOTIFY_CAP`; `server.py` его не импортирует
+- `media`: sync/live ставят voice/document в очередь, stub-транскрипт попадает
+  в промпт извлечения; openai без байтов — `NotImplementedError`
+- `export.run`: file-провайдер пишет JSONL, курсор в `integrations` (повторный
+  прогон дубликатов не даёт); 101/notion — словарь-ошибка без исключения
+- проект у тем watch (`watch.py --project`, подкоманда `project`) наследуется
+  сущностями и фильтруется в `tg_entities`/`tg_overdue`/`monitor`
 
 **Не проверено:** реальные вызовы к Telegram — здесь нет аккаунта. Сигнатура
 `messages.GetForumTopicsRequest` снята с установленного Telethon 1.45, но живой
