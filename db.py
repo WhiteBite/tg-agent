@@ -188,6 +188,17 @@ CREATE TABLE IF NOT EXISTS pins (
     text        TEXT,
     PRIMARY KEY (chat_id, msg_id)
 );
+
+CREATE TABLE IF NOT EXISTS media_assets (
+    chat_id INTEGER NOT NULL,
+    msg_id  INTEGER NOT NULL,
+    kind    TEXT NOT NULL,
+    status  TEXT NOT NULL DEFAULT 'pending',
+    text    TEXT,
+    engine  TEXT,
+    ts      INTEGER,
+    PRIMARY KEY (chat_id, msg_id)
+);
 """
 
 # Полнотекстовый поиск по истории (года переписки через LIKE искать долго).
@@ -251,6 +262,7 @@ class DB:
         ("entities", "pack, chat_id, topic_id, kind, title, body, status, owner, due_ts, "
                      "project, confidence, attrs_json, dedup_key, created_ts, updated_ts, closed_ts"),
         ("entity_events", "entity_id, run_id, ts, op, field, from_val, to_val, chat_id, msg_id, quote"),
+        ("media_assets", "chat_id, msg_id, kind, status, text, engine, ts"),
     )
 
     def _migrate_marked_ids(self) -> None:

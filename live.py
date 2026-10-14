@@ -28,6 +28,7 @@ load_env()
 
 from db import DB, extract_refs  # noqa: E402
 import sync as sync_mod  # noqa: E402
+import media as media_mod  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -58,6 +59,7 @@ def handle_message(db: DB, msg, chat_id: int, forum: bool) -> bool:
     if not db.insert_message(row):
         return False
     db.insert_refs(chat_id, row["msg_id"], extract_refs(row["text"], row["fwd_from"]))
+    media_mod.enqueue(db, chat_id, row["msg_id"], row["media"])
     return True
 
 

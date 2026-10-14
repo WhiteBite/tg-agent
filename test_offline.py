@@ -49,6 +49,10 @@ class MessageMediaPhoto(FakeMedia):
     pass
 
 
+class MessageMediaVoice(FakeMedia):
+    pass
+
+
 class MessageActionTopicCreated:
     def __init__(self, title: str = "новая тема"):
         self.title = title
@@ -1269,6 +1273,120 @@ def test_monitor_notify(db_path: Path) -> None:
     check("notify" not in srv, "server.py не содержит notify (MCP остаётся read-only)")
 
 
+def test_media(db_path: Path) -> None:
+    print("=== media: очередь транскрипций, воркер, экстракция ===")
+    md_db = db_path.parent / "media.sqlite"
+    if md_db.exists():
+        md_db.unlink()
+    import live as live_mod
+    import media as media_mod
+    import extract as extract_mod
+
+    users = {1: User(1, "Иван")}
+    group = Channel(-100600, "Голосовая", None, forum=False)
+    client = FakeClient({
+        -100600: {"entity": group, "messages": [
+            Msg(601, NOW - timedelta(hours=1), users[1], None, media=MessageMediaVoice()),
+        ], "topics": []},
+    })
+    asyncio.run(sync_mod.run(db_path=str(md_db), client=client, names=["-100600"]))
+    with DB(md_db) as db:
+        row = db.conn.execute(
+            "SELECT kind, status, text FROM media_assets "
+            "WHERE chat_id=-100600 AND msg_id=601").fetchone()
+    check(row is not None and row["kind"] == "voice" and row["status"] == "pending"
+          and row["text"] is None,
+          "media: sync ставит голосовое в очередь (pending)",
+          str(dict(row) if row else None))
+
+    vmsg = Msg(602, datetime.fromtimestamp(int(time.time()), timezone.utc), users[1], None,
+               media=MessageMediaVoice())
+    with DB(md_db) as db:
+        ok = live_mod.handle_message(db, vmsg, -100600, False)
+        row = db.conn.execute(
+            "SELECT status FROM media_assets WHERE chat_id=-100600 AND msg_id=602").fetchone()
+    check(ok and row is not None and row["status"] == "pending",
+          "media: live ставит голосовое в очередь", str(dict(row) if row else None))
+
+    saved = {k: os.environ.get(k) for k in
+             ("MEDIA_PROVIDER", "MEDIA_URL", "MEDIA_KEY", "MEDIA_MODEL")}
+    for k in saved:
+        os.environ.pop(k, None)
+    try:
+        res = media_mod.run(str(md_db))
+        check(res == {"done": 2, "failed": 0},
+              "media: stub-воркер обработал оба голосовых", str(res))
+        with DB(md_db) as db:
+            row = db.conn.execute(
+                "SELECT status, text, engine FROM media_assets "
+                "WHERE chat_id=-100600 AND msg_id=601").fetchone()
+        check(row is not None and row["status"] == "done" and row["engine"] == "stub"
+              and row["text"] == "[транскрипция voice -100600/601]",
+              "media: детерминированная stub-транскрипция", str(dict(row) if row else None))
+
+        with DB(md_db) as db:
+            media_mod.enqueue(db, -100600, 603, "voice")
+            media_mod.enqueue(db, -100600, 603, "voice")
+            media_mod.enqueue(db, -100600, 604, "photo")
+            n603 = db.conn.execute(
+                "SELECT COUNT(*) FROM media_assets WHERE chat_id=-100600 AND msg_id=603"
+            ).fetchone()[0]
+            n604 = db.conn.execute(
+                "SELECT COUNT(*) FROM media_assets WHERE chat_id=-100600 AND msg_id=604"
+            ).fetchone()[0]
+        check(n603 == 1, "media: повторный enqueue не дублирует строку", str(n603))
+        check(n604 == 0, "media: фото в очередь транскрипции не ставится", str(n604))
+
+        def boom(chat_id: int, msg_id: int, kind: str) -> dict:
+            raise RuntimeError("провайдер недоступен")
+
+        res2 = media_mod.run(str(md_db), provider=boom)
+        check(res2 == {"done": 0, "failed": 1},
+              "media: сбой провайдера помечает строку failed", str(res2))
+        res3 = media_mod.run(str(md_db))
+        check(res3 == {"done": 0, "failed": 0},
+              "media: failed-строка не перерабатывается повторно", str(res3))
+
+        vmsg2 = Msg(605, datetime.fromtimestamp(int(time.time()), timezone.utc), users[1],
+                    None, media=MessageMediaVoice())
+        with DB(md_db) as db:
+            live_mod.handle_message(db, vmsg2, -100600, False)
+            db.watch_add(-100600, 1, project="стройка")
+
+        def voice_prov(chat_id: int, msg_id: int, kind: str) -> dict:
+            return {"text": "решено: переносим срок", "engine": "custom"}
+
+        res4 = media_mod.run(str(md_db), provider=voice_prov)
+        check(res4 == {"done": 1, "failed": 0},
+              "media: кастомный провайдер расшифровал голосовое", str(res4))
+
+        captured: dict = {}
+
+        def capture_prov(prompt: str, pack: dict) -> dict:
+            captured["prompt"] = prompt
+            return {"ops": [], "covered_upto_msg_id": 605}
+
+        extract_mod.run(str(md_db), provider=capture_prov)
+        check("решено: переносим срок" in captured.get("prompt", ""),
+              "media: транскрипция доезжает до промпта экстракции")
+
+        with DB(md_db) as db:
+            db.conn.execute("DELETE FROM meta WHERE key='extract:-100600:1:construction'")
+            db.conn.commit()
+        extract_mod.run(str(md_db), provider=extract_mod.provider_stub)
+        with DB(md_db) as db:
+            ents = db.entities_list(pack="construction", kind="decision")
+        check(len(ents) == 1 and "переносим срок" in ents[0]["title"],
+              "media: stub-экстрактор создал decision из транскрипции",
+              str([e["title"] for e in ents]))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 # ------------------------------------------- 5. настоящий server.py по MCP stdio
 
 def rpc(proc: subprocess.Popen, payload: dict) -> None:
@@ -2267,6 +2385,7 @@ def main() -> int:
     test_extract_validation(db_path)
     test_entities_mcp(db_path)
     test_monitor_notify(db_path)
+    test_media(db_path)
     test_live_and_poll(db_path)
     test_gates(db_path)
     test_strict_and_doctor(db_path)

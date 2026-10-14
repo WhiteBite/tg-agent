@@ -28,6 +28,7 @@ from typing import Any, Optional
 from db import DB, clean_text, extract_refs
 from sanitize import sanitize_name
 from env import load_env
+import media as media_mod
 
 load_env()
 
@@ -342,6 +343,7 @@ async def pull_chat(
                     per_topic[tid] = per_topic.get(tid, 0) + 1
                     db.insert_refs(chat_id, row["msg_id"],
                                    extract_refs(row["text"], row["fwd_from"]))
+                    media_mod.enqueue(db, chat_id, row["msg_id"], row["media"])
                 max_id = max(max_id, msg.id)
             break
         except _FloodWait as exc:
@@ -534,6 +536,9 @@ async def backfill(
             for row in rows:
                 db.insert_refs(chat_id, row["msg_id"],
                                extract_refs(row["text"], row["fwd_from"]))
+            for row in rows:
+                if row["media"] in media_mod.MEDIA_KINDS:
+                    media_mod.enqueue(db, chat_id, row["msg_id"], row["media"])
             db.set_meta(f"backfill:{chat_id}", str(chunk_max))
             db.conn.commit()
         total_new += chunk_new

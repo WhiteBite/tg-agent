@@ -36,6 +36,7 @@ load_env()
 
 from db import DB  # noqa: E402
 from packs import PACKS  # noqa: E402
+import media as media_mod  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -77,6 +78,10 @@ def build_prompt(db: DB, pack: dict, w: dict, rows: list[dict]) -> str:
     scope_header = f"Тема «{alias}», чат {w['chat_id']}, новых сообщений: {len(rows)}"
     lines = [f"[{r['msg_id']}] {r['date_iso'] or '-'} {r['sender_name'] or '?'}: {r['text'] or ''}"
              for r in rows]
+    transcripts = media_mod.transcript_map(db, w["chat_id"], [r["msg_id"] for r in rows])
+    for i, r in enumerate(rows):
+        if r.get("media") and r["msg_id"] in transcripts:
+            lines[i] += f" [{r['media']}: {transcripts[r['msg_id']]}]"
     open_rows = db.conn.execute(
         "SELECT id, kind, title, owner, due_ts FROM entities "
         "WHERE pack=? AND chat_id=? AND topic_id=? AND closed_ts IS NULL "
@@ -203,9 +208,16 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
         if not isinstance(msg_id, int) or not lower < msg_id <= upto_msg:
             return False
         row = db.conn.execute(
-            "SELECT text FROM messages WHERE chat_id=? AND msg_id=?",
+            "SELECT m.text, m.media, a.text AS transcript FROM messages m "
+            "LEFT JOIN media_assets a ON a.chat_id=m.chat_id AND a.msg_id=m.msg_id "
+            "AND a.status='done' WHERE m.chat_id=? AND m.msg_id=?",
             (ev.get("chat_id"), msg_id)).fetchone()
-        if row is None or _norm(ev.get("quote")) not in _norm(row["text"]):
+        if row is None:
+            return False
+        hay = _norm(row["text"])
+        if row["media"] and row["transcript"] is not None:
+            hay = _norm(f"{row['text'] or ''} [{row['media']}: {row['transcript']}]")
+        if _norm(ev.get("quote")) not in hay:
             return False
     if name == "new":
         return True
