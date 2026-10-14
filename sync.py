@@ -380,13 +380,20 @@ def _peer_marked(p: Any) -> Optional[int]:
 async def fetch_folders(client: Any) -> list[dict]:
     """Папки аккаунта: messages.GetDialogFiltersRequest; состав — include_peers.
 
-    Схема вызова — как в chigwell/telegram-mcp (folders.py), но берём только чтение."""
+    Схема вызова — как в chigwell/telegram-mcp (folders.py), но берём только чтение.
+    Слой 229+ заворачивает ответ в объект DialogFilters (список в .filters), а
+    title папки — TextWithEntities; старые Telethon и фейки отдают плоский список."""
     from telethon.tl import functions
     res = await client(functions.messages.GetDialogFiltersRequest())
+    rows = getattr(res, "filters", None)
+    if rows is None:
+        rows = res or []
     out: list[dict] = []
-    for f in res or []:
+    for f in rows:
         fid = getattr(f, "id", None)
         title = getattr(f, "title", None)
+        if title is not None and not isinstance(title, str):
+            title = getattr(title, "text", None)
         if fid is None or not title:
             continue
         peers = [m for m in (_peer_marked(p) for p in (getattr(f, "include_peers", None) or [])) if m]

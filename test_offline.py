@@ -422,6 +422,36 @@ def test_folder_and_backfill(db_path: Path) -> None:
     check(news["new_messages"] == 3, "sync --folder: канал-вещание синхронизирован",
           f"new={news['new_messages']}")
 
+    # слой 229: getDialogFilters отвечает объектом с .filters, title — TextWithEntities
+    from telethon.tl.types import TextWithEntities
+
+    class WrapFiltersRes:
+        def __init__(self, filters):
+            self.filters = filters
+
+    class FoldersClient:
+        def __init__(self, res):
+            self._res = res
+
+        async def __call__(self, req):
+            assert type(req).__name__ == "GetDialogFiltersRequest", req
+            return self._res
+
+    wrap = FoldersClient(WrapFiltersRes([
+        FakeFilter(7, TextWithEntities("AI Agent", []), [FakePeerChat(111)]),
+        FakeFilter(3, "Dev", [FakePeerChat(222)]),
+    ]))
+    fl = asyncio.run(sync_mod.fetch_folders(wrap))
+    check(fl == [{"id": 7, "title": "AI Agent", "peers": [-111]},
+                 {"id": 3, "title": "Dev", "peers": [-222]}],
+          "sync: fetch_folders разворачивает DialogFilters и TextWithEntities-title",
+          str(fl))
+    flat = FoldersClient([FakeFilter(5, "Plain", [FakePeerChat(333)])])
+    fl2 = asyncio.run(sync_mod.fetch_folders(flat))
+    check(fl2 == [{"id": 5, "title": "Plain", "peers": [-333]}],
+          "sync: fetch_folders принимает и плоский список (старый Telethon)",
+          str(fl2))
+
     # бэкфилл: повторный проход не должен ничего добавить
     with DB(db_path) as db:
         bf = asyncio.run(sync_mod.backfill(client, db, -100333, forum=False,
