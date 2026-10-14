@@ -52,12 +52,14 @@ def _provider_file(db: DB, out: str | None) -> dict:
                 continue
             fh.write(json.dumps({"entity": ent, "events": events,
                                  "exported_ts": now}, ensure_ascii=False) + "\n")
+            # flush+commit на сущность: crash оставляет максимум один дубль строки
+            fh.flush()
             db.conn.execute(
                 "INSERT INTO integrations(entity_id, system, synced_ts) VALUES(?,?,?) "
                 "ON CONFLICT(entity_id, system) DO UPDATE SET synced_ts=excluded.synced_ts",
                 (ent["id"], "file", max(e["ts"] for e in events) + 1))
+            db.conn.commit()
             exported += 1
-    db.conn.commit()
     return {"ok": True, "exported": exported, "path": str(path)}
 
 

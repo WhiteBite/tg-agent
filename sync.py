@@ -319,10 +319,12 @@ async def pull_chat(
     как только сообщение старше границы.
     """
     attempt = 0
+    total_new = 0
+    total_per_topic: dict[int, int] = {}
     while True:  # FloodWait: повторяем проход; вставки идемпотентны
         new = seen = 0
         max_id = min_id
-        per_topic: dict[Optional[int], int] = {}
+        per_topic: dict[int, int] = {}
         try:
             async for msg in client.iter_messages(chat_id, limit=limit):
                 if since_ts and msg.date is not None and int(msg.date.timestamp()) < since_ts:
@@ -347,11 +349,18 @@ async def pull_chat(
                 max_id = max(max_id, msg.id)
             break
         except _FloodWait as exc:
+            # вставленные до FloodWait строки в ретрае вернут False — считаем их сразу
+            total_new += new
+            for tid, cnt in per_topic.items():
+                total_per_topic[tid] = total_per_topic.get(tid, 0) + cnt
             attempt += 1
             if attempt > 3:
                 raise
             await _flood_sleep(exc, attempt)
-    return {"new": new, "seen": seen, "max_id": max_id, "per_topic": per_topic}
+    total_new += new
+    for tid, cnt in per_topic.items():
+        total_per_topic[tid] = total_per_topic.get(tid, 0) + cnt
+    return {"new": total_new, "seen": seen, "max_id": max_id, "per_topic": total_per_topic}
 
 
 def _peer_marked(p: Any) -> Optional[int]:
