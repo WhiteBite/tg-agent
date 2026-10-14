@@ -45,6 +45,7 @@ load_env()
 from db import DB  # noqa: E402
 from packs import PACKS  # noqa: E402
 import media as media_mod  # noqa: E402
+from llm_http import extra_body  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -150,7 +151,7 @@ def _post(url: str, key: str | None, payload: dict) -> dict:
         headers={"Content-Type": "application/json"})
     if key:
         req.add_header("Authorization", f"Bearer {key}")
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=300) as resp:
         return json.loads(resp.read())
 
 
@@ -181,6 +182,7 @@ def provider_openai(prompt: str, pack: dict) -> dict:
                                 "schema": pack["json_schema"]},
             },
         }
+        payload.update(extra_body(url))
         raw = ""
         try:
             data = _post(url, key, payload)

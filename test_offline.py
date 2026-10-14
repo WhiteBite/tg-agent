@@ -3388,6 +3388,44 @@ def test_watch_suggest(db_path: Path) -> None:
           "watch suggest: уже отмеченная тема не предлагается", out[-200:])
 
 
+def test_llm_extra_body(db_path: Path) -> None:
+    print("=== llm_http: dashscope отключает thinking в payload ===")
+    from llm_http import extra_body
+    check(extra_body("https://dashscope.aliyuncs.com/compatible-mode/v1")
+          == {"enable_thinking": False},
+          "llm_http: dashscope URL глушит thinking", str(extra_body("dashscope")))
+    check(extra_body("https://api.openai.com/v1") == {} and extra_body(None) == {},
+          "llm_http: прочие провайдеры не трогаются", str(extra_body("openai")))
+    import extract as extract_mod
+    from packs import PACKS
+    calls: list[dict] = []
+    orig_post = extract_mod._post
+    saved = {k: os.environ.get(k) for k in ("EXTRACT_URL", "EXTRACT_KEY", "EXTRACT_MODEL")}
+    os.environ["EXTRACT_URL"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    os.environ.pop("EXTRACT_KEY", None)
+    os.environ.pop("EXTRACT_MODEL", None)
+
+    def fake_post(url, key, payload):
+        calls.append(payload)
+        return {"choices": [{"message": {
+            "content": '{"ops": [], "covered_upto_msg_id": 5}'},
+            "finish_reason": "stop"}]}
+
+    extract_mod._post = fake_post
+    try:
+        extract_mod.provider_openai("промпт", PACKS["services"])
+        check(calls and calls[0].get("enable_thinking") is False,
+              "extract: provider_openai кладёт enable_thinking=False для dashscope",
+              str({k: v for k, v in calls[0].items() if k != "messages"})[:120])
+    finally:
+        extract_mod._post = orig_post
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3437,6 +3475,7 @@ def main() -> int:
     test_pipeline(db_path)
     test_extract_until_done(db_path)
     test_watch_suggest(db_path)
+    test_llm_extra_body(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

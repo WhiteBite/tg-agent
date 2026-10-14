@@ -30,6 +30,7 @@ from env import load_env  # noqa: E402
 load_env()
 
 from db import DB  # noqa: E402
+from llm_http import extra_body  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -79,6 +80,7 @@ def summarize_openai(context: str) -> str:
             {"role": "user", "content": context},
         ],
     }
+    body.update(extra_body(url))
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
