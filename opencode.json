@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "telegram": {
+      "type": "local",
+      "command": [
+        "D:\\SDKs\\Python\\Python312\\python.exe",
+        "D:\\Sources\\WhiteBite\\tg-agent\\server.py"
+      ],
+      "cwd": "D:\\Sources\\WhiteBite\\tg-agent",
+      "environment": {
+        "TG_DB": "D:\\Sources\\WhiteBite\\tg-agent\\tg_index.sqlite"
+      },
+      "enabled": true,
+      "timeout": 30000
+    }
+  },
+  "agent": {
+    "tg-analyst": {
+      "description": "Аналитик Telegram-групп и тем по локальному индексу",
+      "prompt": "{file:./tg-agent.md}",
+      "tools": {
+        "telegram*": true,
+        "write": false,
+        "edit": false,
+        "bash": false
+      }
+    }
+  }
+}
