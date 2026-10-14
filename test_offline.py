@@ -3580,6 +3580,51 @@ def test_extract_telemetry(db_path: Path) -> None:
           logged.strip().splitlines()[-1][:120] if logged.strip() else "(пусто)")
 
 
+def test_evidence_norm(db_path: Path) -> None:
+    print("=== extract: детерминированная нормализация evidence ===")
+    ev_db = db_path.parent / "ev_norm.sqlite"
+    if ev_db.exists():
+        ev_db.unlink()
+    now = int(time.time())
+    with DB(ev_db) as db:
+        db.upsert_chat(-100562, "Нормализация", None, "supergroup", False, 2)
+        db.watch_add(-100562, 1)
+        for mid, text in ((21, "Регистр СМЕШАН и\u00a0неразрывный пробел"),
+                          (22, "ＦＵＬＬWIDTH знаки в тексте")):
+            ts = now - 60
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100562, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+    import extract as extract_mod
+    from packs import PACKS
+
+    def q_op(title, msg, quote):
+        return {"op": "new", "kind": "decision", "title": title, "entity_id": None,
+                "body": None, "owner": None, "due_text": None, "due_ts": None,
+                "confidence": 0.9,
+                "evidence": [{"chat_id": -100562, "msg_id": msg, "quote": quote}]}
+
+    made = extract_mod.run(str(ev_db), packs=[PACKS["construction"]],
+                           provider=lambda p, pk: {
+                               "ops": [
+                                   q_op("Кейс+NBSP", 21, "регистр смешан и неразрывный пробел"),
+                                   q_op("Fullwidth", 22, "fullwidth знаки"),
+                                   q_op("Нет в тексте", 21, "чего в сообщении нет"),
+                               ],
+                               "covered_upto_msg_id": 22})
+    with DB(ev_db) as db:
+        row = db.conn.execute(
+            "SELECT ops_applied, ops_rejected FROM extraction_runs "
+            "ORDER BY id DESC LIMIT 1").fetchone()
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+    check(row["ops_applied"] == 2 and row["ops_rejected"] == 1 and n == 2,
+          "extract: case/NBSP/fullwidth-цитаты приняты, чужая — отклонена",
+          f"applied={row['ops_applied']} rejected={row['ops_rejected']} ents={n}")
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3632,6 +3677,7 @@ def main() -> int:
     test_llm_extra_body(db_path)
     test_extract_parallel(db_path)
     test_extract_telemetry(db_path)
+    test_evidence_norm(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

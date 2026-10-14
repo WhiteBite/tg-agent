@@ -32,6 +32,7 @@ import re
 import sqlite3
 import sys
 import time
+import unicodedata
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +70,12 @@ _STUB_TRIGGERS = (
 
 def _norm(text: str | None) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _norm_cmp(text: str | None) -> str:
+    """Детерминированная нормализация для сравнения цитат: NFKC + casefold +
+    схлопывание пробелов. Цитата обязана остаться подстрокой — provenance цел."""
+    return " ".join(unicodedata.normalize("NFKC", text or "").casefold().split())
 
 
 def scope_matches(scope_filter: dict, w: dict) -> bool:
@@ -255,10 +262,10 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
             (ev.get("chat_id"), msg_id)).fetchone()
         if row is None:
             return False, f"нет сообщения {msg_id}"
-        hay = _norm(row["text"])
+        hay = _norm_cmp(row["text"])
         if row["media"] and row["transcript"] is not None:
-            hay = _norm(f"{row['text'] or ''} [{row['media']}: {row['transcript']}]")
-        if _norm(ev.get("quote")) not in hay:
+            hay = _norm_cmp(f"{row['text'] or ''} [{row['media']}: {row['transcript']}]")
+        if _norm_cmp(ev.get("quote")) not in hay:
             return False, "quote не подстрока сообщения"
     if name == "new":
         return True, ""
