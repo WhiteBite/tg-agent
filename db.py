@@ -246,6 +246,7 @@ class DB:
             self.fts = False  # поиск уедет на LIKE
         self._migrate_marked_ids()
         self._migrate_watch_project()
+        self._migrate_entity_status()
         self.conn.commit()
 
     def close(self) -> None:
@@ -328,6 +329,11 @@ class DB:
             self.conn.execute("ALTER TABLE watch ADD COLUMN project TEXT")
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_entity_status(self) -> None:
+        self.conn.execute(
+            "UPDATE entities SET status='closed' "
+            "WHERE closed_ts IS NOT NULL AND status <> 'closed'")
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 

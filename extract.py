@@ -351,6 +351,17 @@ def _apply_update(db: DB, pack: dict, op: dict, run_id: int, now: int) -> None:
 def _apply_flip(db: DB, op: dict, run_id: int, now: int,
                 name: str, closed_ts: int | None) -> None:
     entity_id = op["entity_id"]
+    if name == "reopen":
+        row = db.conn.execute(
+            "SELECT pack, chat_id, topic_id, dedup_key FROM entities WHERE id=?",
+            (entity_id,)).fetchone()
+        twin = db.conn.execute(
+            "SELECT 1 FROM entities WHERE pack=? AND chat_id=? AND topic_id=? "
+            "AND dedup_key=? AND closed_ts IS NULL AND id != ?",
+            (row["pack"], row["chat_id"], row["topic_id"], row["dedup_key"],
+             entity_id)).fetchone()
+        if twin is not None:
+            return
     db.conn.execute(
         "UPDATE entities SET closed_ts=?, status=?, updated_ts=? WHERE id=?",
         (closed_ts, "closed" if name == "close" else "open", now, entity_id))

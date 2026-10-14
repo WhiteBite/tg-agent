@@ -700,6 +700,15 @@ def test_entities_schema(db_path: Path) -> None:
     with DB(ent_db) as db:
         n = len(db.entities_list())
         check(n == 3, "entities: повторное открытие БД идемпотентно", str(n))
+        db.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "closed_ts, created_ts, updated_ts) "
+            "VALUES('demo', -100555, 1, 'task', 'Старая закрытая', 'open', 1, 1, 1)")
+        db.conn.commit()
+    with DB(ent_db) as db:
+        st = db.conn.execute(
+            "SELECT status FROM entities WHERE title='Старая закрытая'").fetchone()["status"]
+        check(st == "closed", "entities: бэкфилл status для закрытых до фикса", st)
 
 
 def test_extract_stub(db_path: Path) -> None:
@@ -1217,6 +1226,41 @@ def test_extract_validation(db_path: Path) -> None:
         run = last_run(db)
         check(run is not None and run["ops_rejected"] == 0,
               "extract: (j) следующий прогон здоров", str(dict(run) if run else None))
+
+    with DB(ex_db) as db:
+        for mid, text in ((24, "Задача E принята"), (25, "Задача E закрыта"),
+                          (26, "Задача E снова в работе"), (27, "переоткрываем старую задачу")):
+            ts = now - 600 + mid
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100888, ?, 7, ?, ?, 1, 'Иван', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_new("Задача E", 24, "принята")], 24))
+    with DB(ex_db) as db:
+        ent_e = db.conn.execute(
+            "SELECT id FROM entities WHERE title='Задача E'").fetchone()["id"]
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_flip("close", ent_e, 25, "закрыта")], 25))
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result(
+        [op_new("Задача E", 26, "снова"), op_flip("reopen", ent_e, 27, "переоткрываем")], 27))
+    with DB(ex_db) as db:
+        run = last_run(db)
+        check(run is not None and run["ops_applied"] == 2 and run["ops_rejected"] == 0,
+              "extract: (j) new+reopen одним батчем не роняет прогон",
+              str(dict(run) if run else None))
+        n_open = db.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE title='Задача E' "
+            "AND closed_ts IS NULL").fetchone()["c"]
+        e_closed = db.conn.execute(
+            "SELECT closed_ts FROM entities WHERE id=?", (ent_e,)).fetchone()["closed_ts"]
+        check(n_open == 1 and e_closed is not None,
+              "extract: (j) reopen при внутрибатчевом дубле пропущен, краша нет",
+              f"open={n_open} closed_ts={e_closed}")
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
+        check(cur is not None and int(cur["value"]) == 27,
+              "extract: (j) курсор дошёл до конца батча", str(cur and cur["value"]))
 
     with DB(ex_db) as db:
         db.upsert_topic(-100888, 9, "Бюджет")
