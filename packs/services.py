@@ -68,7 +68,18 @@ PACK: dict = {
             r"скидк|раздач|giveaway|подписк|subscribe|тариф|аккаунт|ключ|access|"
             r"invite|инвайт|beta|бета|chatgpt|claude|gemini|midjourney|нейросет|llm|"
             r"vpn|vps|saas|api|https?://|t\.me/|"
-            r"\b[a-z0-9-]+\.(com|net|io|ai|org|ru|me|pro|app|dev|co)\b"
+            r"\b[a-z0-9-]+\.(com|net|io|ai|org|ru|me|pro|app|dev|co)\b|"
+            r"модел|model|опус|opus|соннет|sonnet|хайку|haiku|аргон|астр|astra|"
+            r"вео|veo|muse|mythos|глм|glm|qwen|квен|deepseek|сиденс|seedance|sora|"
+            r"нано банан|wonder|омни|omni|vertex|unity|antigravity|антигравит|"
+            r"synthid|daybreak|fairwind|bytedance|openai|anthropic|антропик|"
+            r"гугл|google|facebook|jio|"
+            r"токен|token|кредит|credit|рубл|доллар|usd|"
+            r"доступ|абуз|abuse|лимит|quota|квот|"
+            r"введи|введите|активируй|регистрац|регистрир|sign.?up|"
+            r"выдаёт|выдают|выдач|дадут|дают|"
+            r"потест|тестир|попробу|\btry\b|"
+            r"релиз|анонс|запустил|выпустил|вышла|вышло|переименов"
         ),
         "use_refs": True,
     },
