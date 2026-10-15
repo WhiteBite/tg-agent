@@ -3328,14 +3328,30 @@ def test_pipeline(db_path: Path) -> None:
     with DB(pl_db) as db:
         db.watch_add(-100222, 1)
         db.watch_add(-100333, 1)
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
+            "created_ts, updated_ts) VALUES"
+            "(501, 'tg', -100222, 1, 'task', 'Экспортная', 'open', 100, 100)")
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, ts, op) VALUES(501, 100, 'new')")
+        db.conn.commit()
     client = build_fixture()
 
+    ex_path = db_path.parent / "pipeline_export.jsonl"
+    saved_exp = os.environ.get("TG_EXPORT_PATH")
+    os.environ["TG_EXPORT_PATH"] = str(ex_path)
     rep = asyncio.run(pipeline_mod.run(str(pl_db), client=client))
     check(rep["sync"]["ok"] and rep["sync"]["new_messages"] == 10 and rep["sync"]["chats"] == 2,
           "pipeline: sync по watch-листу синхронизировал обе группы",
           str(rep["sync"]))
     check(rep["extract"]["ok"] and rep["extract"]["areas"] > 0,
           "pipeline: extract отработал по свежим сообщениям", str(rep["extract"]))
+    check(rep.get("fuzzy", {}).get("ok") is True,
+          "pipeline: fuzzy-шаг в отчёте", str(rep.get("fuzzy")))
+    check(rep.get("export", {}).get("ok") is True
+          and (rep["export"].get("exported") or 0) > 0
+          and ex_path.exists() and ex_path.stat().st_size > 0,
+          "pipeline: export-шаг пишет JSONL-фид", str(rep.get("export")))
     check(rep["digest"]["ok"] and rep["digest"]["made"] == 2,
           "pipeline: digest собран по каждой watch-теме", str(rep["digest"]))
     check(rep["monitor"]["ok"] and len(rep["monitor"]["lines"]) >= 1,
@@ -3346,16 +3362,33 @@ def test_pipeline(db_path: Path) -> None:
     check(n_msgs == 10 and n_dig == 2,
           "pipeline: данные в базе после одного прогона", f"msgs={n_msgs} digests={n_dig}")
 
+    with DB(pl_db) as db:
+        now2 = int(time.time())
+        db.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "dedup_key, created_ts, updated_ts) VALUES"
+            "('tg', -100222, 1, 'task', 'Fuzzy Twin', 'open', 'fzA', ?, ?),"
+            "('tg', -100333, 1, 'task', 'fuzzy  twin!', 'open', 'fzB', ?, ?)",
+            (now2, now2, now2, now2))
+        db.conn.commit()
     rep2 = asyncio.run(pipeline_mod.run(str(pl_db), client=client))
     check(rep2["sync"]["ok"] and rep2["sync"]["new_messages"] == 0
           and rep2["digest"]["made"] == 0 and rep2["extract"]["areas"] == 0,
           "pipeline: второй прогон инкрементален",
           f"sync={rep2['sync']} digest={rep2['digest']} extract={rep2['extract']}")
+    check(rep2.get("fuzzy", {}).get("merged", 0) >= 1,
+          "pipeline: fuzzy сливает посеянный дубль между прогонами",
+          str(rep2.get("fuzzy")))
 
     rep3 = asyncio.run(pipeline_mod.run(str(pl_db), client=None, skip_sync=True))
-    check("sync" not in rep3 and rep3["extract"]["ok"] and rep3["monitor"]["ok"],
+    check("sync" not in rep3 and rep3["extract"]["ok"] and rep3["monitor"]["ok"]
+          and rep3.get("fuzzy", {}).get("ok") is True,
           "pipeline: --skip sync гоняет офлайн-шаги без Telegram",
           str(sorted(rep3)))
+    if saved_exp is None:
+        os.environ.pop("TG_EXPORT_PATH", None)
+    else:
+        os.environ["TG_EXPORT_PATH"] = saved_exp
 
 
 def test_extract_until_done(db_path: Path) -> None:

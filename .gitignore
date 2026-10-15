@@ -5,6 +5,7 @@
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.jsonl
 
 # python
 __pycache__/

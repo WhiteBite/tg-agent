@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Автономный конвейер: sync (watch) -> extract -> digest -> monitor.
+"""Автономный конвейер: sync (watch) -> extract -> fuzzy -> export -> digest -> monitor.
 
     python3 pipeline.py                      # полный прогон по watch-листу
     python3 pipeline.py --pack services      # один пакет извлечения
@@ -31,6 +31,8 @@ load_env()
 
 import sync as sync_mod  # noqa: E402
 import extract as extract_mod  # noqa: E402
+import fuzzy_dedup as fuzzy_mod  # noqa: E402
+import export as export_mod  # noqa: E402
 import digest as digest_mod  # noqa: E402
 import monitor as monitor_mod  # noqa: E402
 
@@ -39,6 +41,7 @@ DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
 async def run(db_path: str = DB_PATH, pack_id: str | None = None,
               days_ahead: int = 7, send: bool = False, skip_sync: bool = False,
+              skip_fuzzy: bool = False, skip_export: bool = False,
               client=None) -> dict:
     report: dict[str, dict] = {}
     if not skip_sync:
@@ -61,6 +64,24 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         }
     except Exception as exc:
         report["extract"] = {"ok": False, "error": str(exc)}
+    if not skip_fuzzy:
+        try:
+            fz = fuzzy_mod.run(db_path, pack=pack_id,
+                               max_merges=int(os.environ.get("FUZZY_MAX_MERGES") or 500))
+            report["fuzzy"] = {"ok": True, "clusters": fz["clusters"],
+                               "merged": fz["merged"]}
+        except Exception as exc:
+            report["fuzzy"] = {"ok": False, "error": str(exc)}
+    if not skip_export:
+        try:
+            ex = export_mod.run(db_path, system="file")
+            report["export"] = {"ok": bool(ex.get("ok")),
+                                "exported": ex.get("exported"),
+                                "path": ex.get("path")}
+            if not ex.get("ok"):
+                report["export"]["error"] = ex.get("error")
+        except Exception as exc:
+            report["export"] = {"ok": False, "error": str(exc)}
     try:
         digests = digest_mod.run(db_path)
         report["digest"] = {"ok": True, "made": len(digests)}
@@ -104,8 +125,9 @@ def main() -> None:
                     help="горизонт сроков в сводке мониторинга")
     ap.add_argument("--send", action="store_true",
                     help="отправить сводку в Saved Messages (нужен TG_ALLOW_SEND=1)")
-    ap.add_argument("--skip", action="append", default=[], choices=["sync"],
-                    metavar="STEP", help="пропустить шаг (sync)")
+    ap.add_argument("--skip", action="append", default=[],
+                    choices=["sync", "fuzzy", "export"],
+                    metavar="STEP", help="пропустить шаг (sync/fuzzy/export)")
     ap.add_argument("--loop", type=int, metavar="MIN",
                     help="демон: повторять цикл каждые N минут (cron не нужен)")
     args = ap.parse_args()
@@ -114,7 +136,9 @@ def main() -> None:
                              args.send, args.loop))
         return
     report = asyncio.run(run(args.db, pack_id=args.pack, days_ahead=args.days_ahead,
-                             send=args.send, skip_sync="sync" in args.skip))
+                             send=args.send, skip_sync="sync" in args.skip,
+                             skip_fuzzy="fuzzy" in args.skip,
+                             skip_export="export" in args.skip))
     for name, res in report.items():
         if res.get("ok"):
             details = "  ".join(f"{k}={v}" for k, v in res.items()

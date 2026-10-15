@@ -336,18 +336,22 @@ run `status='filtered'`, остальные сообщения обрабаты�
 ## Автономный конвейер
 
 ```bash
-python3 pipeline.py                  # sync (watch) -> extract -> digest -> monitor
+python3 pipeline.py                  # sync -> extract -> fuzzy -> export -> digest -> monitor
 python3 pipeline.py --pack services  # один пакет извлечения
-python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram
+python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram (--skip fuzzy/export тоже можно)
 python3 pipeline.py --days-ahead 7 --send
 python3 pipeline.py --loop 30 --send # демон: полный цикл каждые 30 минут
 ```
 
 Одна команда для автономного режима: шаги независимы, сбой одного не
 останавливает остальные (упавший шаг — в отчёте и в exit code 1); extract
-дожёвывает хвост сообщений до конца. Регулярность — `--loop N` (демон,
-cron не нужен) или cron; `live.py` остаётся отдельным демоном для мгновенной
-подхватки новых сообщений.
+дожёвывает хвост сообщений до конца. После извлечения `fuzzy` сливает дубли
+сущностей по нормализованному title (`FUZZY_MAX_MERGES`, дефолт 500), а
+`export` дописывает JSONL-фид для внешних потребителей (по умолчанию
+`export.jsonl` рядом с базой, путь — `TG_EXPORT_PATH`; формат строки
+`{"entity", "events", "exported_ts"}`, курсор в `integrations`).
+Регулярность — `--loop N` (демон, cron не нужен) или cron; `live.py` остаётся
+отдельным демоном для мгновенной подхватки новых сообщений.
 
 ## Мониторинг и уведомления
 
