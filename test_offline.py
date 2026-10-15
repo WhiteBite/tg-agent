@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import asyncio
 import json
 import os
@@ -925,7 +927,7 @@ def test_extract_stub(db_path: Path) -> None:
 
     import extract as extract_mod
 
-    made = extract_mod.run(str(ex_db))
+    extract_mod.run(str(ex_db))
     with DB(ex_db) as db:
         ents = db.entities_list(pack="construction")
         kinds = sorted(e["kind"] for e in ents)
@@ -3673,7 +3675,7 @@ def test_evidence_norm(db_path: Path) -> None:
                 "confidence": 0.9,
                 "evidence": [{"chat_id": -100562, "msg_id": msg, "quote": quote}]}
 
-    made = extract_mod.run(str(ev_db), packs=[PACKS["construction"]],
+    extract_mod.run(str(ev_db), packs=[PACKS["construction"]],
                            provider=lambda p, pk: {
                                "ops": [
                                    q_op("Кейс+NBSP", 21, "регистр смешан и неразрывный пробел"),
@@ -3754,7 +3756,7 @@ def test_extract_bisection(db_path: Path) -> None:
                for i in ids]
         return {"ops": ops, "covered_upto_msg_id": max(ids)}
 
-    made = extract_mod.run(str(bs_db), packs=[PACKS["construction"]],
+    extract_mod.run(str(bs_db), packs=[PACKS["construction"]],
                            provider=trunc_prov, until_done=True)
     with DB(bs_db) as db:
         n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
