@@ -340,9 +340,9 @@ run `status='filtered'`, остальные сообщения обрабаты�
 ## Автономный конвейер
 
 ```bash
-python3 pipeline.py                  # sync -> extract -> fuzzy -> export -> digest -> monitor
+python3 pipeline.py                  # sync -> media -> extract -> fuzzy -> export -> digest -> monitor
 python3 pipeline.py --pack services  # один пакет извлечения
-python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram (--skip fuzzy/export тоже можно)
+python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram (--skip media/fuzzy/export тоже можно)
 python3 pipeline.py --days-ahead 7 --send
 python3 pipeline.py --loop 30 --send # демон: полный цикл каждые 30 минут
 ```
@@ -390,18 +390,23 @@ echo "текст" | TG_ALLOW_SEND=1 python3 notify.py --send   # из stdin, п�
 ## Медиа-транскрипция
 
 ```bash
-MEDIA_PROVIDER=stub python3 media.py
-MEDIA_PROVIDER=openai MEDIA_URL=https://api.openai.com/v1 \
-    MEDIA_KEY=sk-... MEDIA_MODEL=whisper-1 python3 media.py
+MEDIA_PROVIDER=stub python3 media.py                    # заглушка без сети
+MEDIA_PROVIDER=openai python3 media.py --limit 50       # скачивание + транскрипция
 ```
 
 `sync.py` и `live.py` ставят голосовые и документы в очередь (таблица
-`media_assets`, status=pending); этот воркер её разгребает. stub пишет
-детерминированную заглушку, openai шлёт multipart-запрос в
-`{MEDIA_URL}/audio/transcriptions`. Готовые транскрипции `extract.py`
+`media_assets`, status=pending); воркер рефетчит сообщение из Telegram по id
+(файловая ссылка живёт только на свежем объекте), классифицирует аудио по
+атрибутам (`DocumentAttributeVoice/Audio`, mime `audio/*` как фолбэк) и до
+скачивания отсекает не-аудио, файлы крупнее 10MB и длиннее 5 минут статусом
+`skipped`; удалённые сообщения — `missing`, сбой провайдера — `failed`.
+openai-провайдер — DashScope `qwen3-asr-flash` через chat/completions: аудио
+инлайнится base64 data-URL, `asr_options` идёт верхним уровнем
+(`MEDIA_URL`/`MEDIA_KEY`/`MEDIA_MODEL`/`MEDIA_TIMEOUT`; ключ — список через
+запятую с ротацией на 401/403). `MEDIA_LIMIT` (дефолт 25) ограничивает ассеты
+за прогон, `--limit`/`--kinds` — то же в CLI. Готовые транскрипции `extract.py`
 подмешивает в промпт извлечения (и evidence-проверка учитывает их текст).
-Скачивание файла из Telegram — отдельный инкремент: openai-провайдер без
-готовых байтов поднимает `NotImplementedError`.
+`pipeline.py` гоняет шаг автоматически после sync.
 
 ## Экспорт
 

@@ -239,12 +239,22 @@ class FakeClient:
                 raise e
             yield m
 
-    async def get_messages(self, entity, limit=None, filter=None, **kw):
+    async def get_messages(self, entity, limit=None, filter=None, ids=None, **kw):
         msgs = self._group(entity)["messages"]
+        if ids is not None:
+            by_id = {m.id: m for m in msgs}
+            seq = ids if isinstance(ids, (list, tuple)) else [ids]
+            return [by_id.get(i) for i in seq]
         if filter is not None:  # InputMessagesFilterPinned
             msgs = [m for m in msgs if getattr(m, "pinned", False)]
         msgs = sorted(msgs, key=lambda m: m.id, reverse=True)
         return msgs[:limit] if limit else msgs
+
+    async def download_media(self, what, file=None, **kw):
+        if file is not None:
+            file.write(b"stub-media-bytes")
+            return file
+        return b"stub-media-bytes"
 
     async def iter_dialogs(self, folder=None, **kw):
         if folder is not None and self.folder_id_invalid:
@@ -3348,6 +3358,8 @@ def test_pipeline(db_path: Path) -> None:
           str(rep["sync"]))
     check(rep["extract"]["ok"] and rep["extract"]["areas"] > 0,
           "pipeline: extract отработал по свежим сообщениям", str(rep["extract"]))
+    check(rep.get("media", {}).get("ok") is True,
+          "pipeline: media-шаг в отчёте", str(rep.get("media")))
     check(rep.get("fuzzy", {}).get("ok") is True,
           "pipeline: fuzzy-шаг в отчёте", str(rep.get("fuzzy")))
     check(rep.get("export", {}).get("ok") is True
@@ -3384,7 +3396,8 @@ def test_pipeline(db_path: Path) -> None:
 
     rep3 = asyncio.run(pipeline_mod.run(str(pl_db), client=None, skip_sync=True))
     check("sync" not in rep3 and rep3["extract"]["ok"] and rep3["monitor"]["ok"]
-          and rep3.get("fuzzy", {}).get("ok") is True,
+          and rep3.get("fuzzy", {}).get("ok") is True
+          and rep3.get("media", {}).get("ok") is True,
           "pipeline: --skip sync гоняет офлайн-шаги без Telegram",
           str(sorted(rep3)))
     if saved_exp is None:
@@ -4705,6 +4718,127 @@ def test_extract_windows(db_path: Path) -> None:
         os.environ.pop("EXTRACT_WINDOW_MIN", None)
 
 
+def test_media_download(db_path: Path) -> None:
+    print("=== media: рефетч + классификация + qwen3-asr-flash ===")
+    md_db = db_path.parent / "mediadl.sqlite"
+    if md_db.exists():
+        md_db.unlink()
+    with DB(md_db) as db:
+        db.upsert_chat(-100600, "Медиа", None, "supergroup", False, 2)
+        for mid, kind in ((601, "voice"), (602, "document"), (603, "voice"),
+                          (604, "document"), (605, "document"), (606, "voice")):
+            db.conn.execute(
+                "INSERT INTO media_assets(chat_id, msg_id, kind, status) "
+                "VALUES(-100600, ?, ?, 'pending')", (mid, kind))
+        db.conn.commit()
+
+    import media as media_mod
+
+    class DocumentAttributeVoice:
+        def __init__(self, duration=5):
+            self.duration = duration
+
+    class FakeDoc:
+        def __init__(self, size=1000, mime="audio/ogg", voice=True, duration=5):
+            self.size = size
+            self.mime_type = mime
+            self.attributes = [DocumentAttributeVoice(duration)] if voice else []
+
+    class FakeDocMedia:
+        def __init__(self, doc):
+            self.document = doc
+
+    class MediaClient:
+        def __init__(self, msgs):
+            self.msgs = msgs
+            self.calls: list = []
+
+        async def get_messages(self, entity, ids=None, **kw):
+            self.calls.append(tuple(ids or ()))
+            return [self.msgs.get(i) for i in (ids or [])]
+
+        async def download_media(self, what, file=None, **kw):
+            file.write(b"fakeogg")
+            return file
+
+    d = datetime.now(timezone.utc)
+    msgs = {
+        601: Msg(601, d, None, "", media=FakeDocMedia(FakeDoc())),
+        602: Msg(602, d, None, "", media=FakeDocMedia(
+            FakeDoc(voice=False, mime="application/pdf"))),
+        604: Msg(604, d, None, "", media=FakeDocMedia(
+            FakeDoc(size=20 * 1024 * 1024))),
+        605: Msg(605, d, None, "", media=FakeDocMedia(FakeDoc(duration=400))),
+        606: Msg(606, d, None, "", media=FakeDocMedia(FakeDoc())),
+    }
+    client = MediaClient(msgs)
+    seen: list = []
+
+    def cap_prov(chat_id, msg_id, kind, audio=None, mime=None):
+        seen.append((msg_id, audio, mime))
+        if msg_id == 606:
+            raise RuntimeError("asr down")
+        return {"text": f"речь {msg_id}", "engine": "fake"}
+
+    res = asyncio.run(media_mod.run_async(str(md_db), provider=cap_prov,
+                                          client=client, limit=10))
+    with DB(md_db) as db:
+        st = {r["msg_id"]: r["status"] for r in db.conn.execute(
+            "SELECT msg_id, status FROM media_assets")}
+        txt = db.conn.execute(
+            "SELECT text FROM media_assets WHERE msg_id=601").fetchone()["text"]
+    check(st == {601: "done", 602: "skipped", 603: "missing",
+                 604: "skipped", 605: "skipped", 606: "failed"},
+          "media: статусы done/skipped/missing/failed по классификации", str(st))
+    check(txt == "речь 601", "media: транскрипт сохранён в ассет", str(txt))
+    check(res == {"done": 1, "skipped": 3, "missing": 1, "failed": 1},
+          "media: статистика download-воркера", str(res))
+    check(seen == [(601, b"fakeogg", "audio/ogg"), (606, b"fakeogg", "audio/ogg")],
+          "media: скачивается только аудио, прошедшее гейты", str(seen))
+    check(len(client.calls) == 1
+          and set(client.calls[0]) == {601, 602, 603, 604, 605, 606},
+          "media: get_messages батчится на чат (один вызов на 6 id)",
+          str(client.calls))
+
+    calls: list = []
+    orig = media_mod.post_json_keys
+    saved = {k: os.environ.get(k) for k in ("MEDIA_URL", "MEDIA_KEY", "MEDIA_MODEL")}
+    os.environ["MEDIA_URL"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    os.environ["MEDIA_KEY"] = "sk-test"
+    os.environ.pop("MEDIA_MODEL", None)
+
+    def fake_post(url, keys, payload, timeout):
+        calls.append((url, keys, payload))
+        return {"choices": [{"message": {"content": "транскрипт"}}]}
+
+    media_mod.post_json_keys = fake_post
+    try:
+        r = media_mod.provider_openai(-100600, 601, "voice",
+                                      audio=b"ogg-bytes", mime="audio/ogg")
+        url, keys, payload = calls[0]
+        audio_data = payload["messages"][0]["content"][0]["input_audio"]["data"]
+        check(r == {"text": "транскрипт", "engine": "qwen3-asr-flash"}
+              and url.endswith("/chat/completions")
+              and payload["model"] == "qwen3-asr-flash"
+              and payload["asr_options"] == {"enable_itn": False}
+              and audio_data.startswith("data:audio/ogg;base64,")
+              and keys == ["sk-test"],
+              "media: provider_openai — qwen3-asr-flash chat/completions, base64 data-URL",
+              str(payload)[:150])
+        try:
+            media_mod.provider_openai(-100600, 601, "voice", audio=None)
+            check(False, "media: openai-провайдер без байтов — ValueError")
+        except ValueError:
+            check(True, "media: openai-провайдер без байтов — ValueError")
+    finally:
+        media_mod.post_json_keys = orig
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4770,6 +4904,7 @@ def main() -> int:
     test_report_topn(db_path)
     test_key_fallback(db_path)
     test_extract_windows(db_path)
+    test_media_download(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

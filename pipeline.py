@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Автономный конвейер: sync (watch) -> extract -> fuzzy -> export -> digest -> monitor.
+"""Автономный конвейер: sync (watch) -> media -> extract -> fuzzy -> export -> digest -> monitor.
 
     python3 pipeline.py                      # полный прогон по watch-листу
     python3 pipeline.py --pack services      # один пакет извлечения
@@ -30,6 +30,7 @@ from env import load_env  # noqa: E402
 load_env()
 
 import sync as sync_mod  # noqa: E402
+import media as media_mod  # noqa: E402
 import extract as extract_mod  # noqa: E402
 import fuzzy_dedup as fuzzy_mod  # noqa: E402
 import export as export_mod  # noqa: E402
@@ -42,7 +43,7 @@ DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 async def run(db_path: str = DB_PATH, pack_id: str | None = None,
               days_ahead: int = 7, send: bool = False, skip_sync: bool = False,
               skip_fuzzy: bool = False, skip_export: bool = False,
-              client=None) -> dict:
+              skip_media: bool = False, client=None) -> dict:
     report: dict[str, dict] = {}
     if not skip_sync:
         try:
@@ -54,6 +55,12 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
             }
         except Exception as exc:
             report["sync"] = {"ok": False, "error": str(exc)}
+    if not skip_media:
+        try:
+            med = await media_mod.run_async(db_path, client=client)
+            report["media"] = {"ok": True, **med}
+        except Exception as exc:
+            report["media"] = {"ok": False, "error": str(exc)}
     try:
         made = extract_mod.run(db_path, pack_id=pack_id, until_done=True)
         report["extract"] = {
@@ -126,8 +133,8 @@ def main() -> None:
     ap.add_argument("--send", action="store_true",
                     help="отправить сводку в Saved Messages (нужен TG_ALLOW_SEND=1)")
     ap.add_argument("--skip", action="append", default=[],
-                    choices=["sync", "fuzzy", "export"],
-                    metavar="STEP", help="пропустить шаг (sync/fuzzy/export)")
+                    choices=["sync", "media", "fuzzy", "export"],
+                    metavar="STEP", help="пропустить шаг (sync/media/fuzzy/export)")
     ap.add_argument("--loop", type=int, metavar="MIN",
                     help="демон: повторять цикл каждые N минут (cron не нужен)")
     args = ap.parse_args()
@@ -137,6 +144,7 @@ def main() -> None:
         return
     report = asyncio.run(run(args.db, pack_id=args.pack, days_ahead=args.days_ahead,
                              send=args.send, skip_sync="sync" in args.skip,
+                             skip_media="media" in args.skip,
                              skip_fuzzy="fuzzy" in args.skip,
                              skip_export="export" in args.skip))
     for name, res in report.items():
