@@ -4015,6 +4015,73 @@ def test_extract_moderation(db_path: Path) -> None:
                 os.environ[k] = v
 
 
+def test_extract_fault_tolerance(db_path: Path) -> None:
+    print("=== extract: сетевые ретраи и ненулевой выход сломанной области ===")
+    ft_db = db_path.parent / "faulttol.sqlite"
+    if ft_db.exists():
+        ft_db.unlink()
+    now = int(time.time())
+    with DB(ft_db) as db:
+        db.upsert_chat(-100581, "Сетевой", None, "supergroup", False, 2)
+        db.watch_add(-100581, 1, project="сервисы")
+        for mid in (1, 2):
+            ts = now - 60 + mid
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100581, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                 f"сервис ft{mid}.com — раздача"))
+        db.conn.commit()
+
+    import extract as extract_mod
+    from packs import PACKS
+    svc = PACKS["services"]
+    attempts = {"n": 0}
+
+    def flaky(prompt, pack):
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise OSError("соединение сброшено")
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ops = [{"op": "new", "kind": "service", "title": f"Сервис {i}",
+                "entity_id": None, "body": None, "owner": None, "due_text": None,
+                "due_ts": None, "confidence": 0.9,
+                "evidence": [{"chat_id": -100581, "msg_id": i,
+                              "quote": f"ft{i}.com"}]} for i in ids]
+        return {"ops": ops, "covered_upto_msg_id": max(ids) if ids else 0}
+
+    os.environ["EXTRACT_NET_RETRY_DELAY"] = "0"
+    try:
+        extract_mod.run(str(ft_db), packs=[svc], provider=flaky, workers=1)
+    finally:
+        os.environ.pop("EXTRACT_NET_RETRY_DELAY", None)
+    with DB(ft_db) as db:
+        n = db.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE pack='services'").fetchone()["c"]
+    check(attempts["n"] == 3 and n == 2,
+          "extract: сетевой сбой ретраит батч (2 сбоя + успех), скоуп доведён",
+          f"attempts={attempts['n']} ents={n}")
+
+    def dead(prompt, pack):
+        raise ValueError("провайдер умер")
+
+    with DB(ft_db) as db:
+        db.conn.execute("DELETE FROM meta WHERE key LIKE 'extract:%'")
+        db.conn.commit()
+    try:
+        extract_mod.run(str(ft_db), packs=[svc], provider=dead, workers=1)
+        check(False, "extract: сломанная область завершает прогон ошибкой")
+    except RuntimeError as exc:
+        check("сломано областей" in str(exc),
+              "extract: сломанная область завершает прогон ошибкой", str(exc)[:120])
+    with DB(ft_db) as db:
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100581:1:services'").fetchone()
+    check(cur is None, "extract: сломанная область не двигает курсор",
+          str(cur and cur["value"]))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4073,6 +4140,7 @@ def main() -> int:
     test_extract_scoping(db_path)
     test_services_report(db_path)
     test_extract_moderation(db_path)
+    test_extract_fault_tolerance(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

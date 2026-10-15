@@ -621,17 +621,36 @@ def _drain_scope(db_path: str, pack: dict, w: dict, prov, dry_run: bool,
     """Дожёвывает один скоуп раундами (батч за батчем) до исчерпания хвоста."""
     made: list[dict] = []
     rounds = 0
+    net_retries = 0
+    delay = float(os.environ.get("EXTRACT_NET_RETRY_DELAY") or 15)
     while True:
         rounds += 1
         try:
             with DB(db_path) as db:
                 res = _run_scope(db, pack, w, prov, dry_run)
+        except OSError as exc:
+            if net_retries < 3:
+                net_retries += 1
+                rounds -= 1
+                print(f"  ~ {pack['id']} {w['chat_id']}/{w['topic_id']}: сеть — "
+                      f"повтор {net_retries}/3 через {delay:.0f}с",
+                      file=sys.stderr, flush=True)
+                time.sleep(delay)
+                continue
+            print(f"  ! {pack['id']} {w['chat_id']}/{w['topic_id']}: {exc}",
+                  file=sys.stderr, flush=True)
+            raise RuntimeError(
+                f"область {pack['id']} {w['chat_id']}/{w['topic_id']} сломана: {exc}"
+            ) from exc
         except Exception as exc:
             print(f"  ! {pack['id']} {w['chat_id']}/{w['topic_id']}: {exc}",
                   file=sys.stderr, flush=True)
-            break
+            raise RuntimeError(
+                f"область {pack['id']} {w['chat_id']}/{w['topic_id']} сломана: {exc}"
+            ) from exc
         if res is None:
             break
+        net_retries = 0
         made.append(res)
         if not dry_run:
             tail = f" overflow={res['ops_overflow']}" if res["ops_overflow"] else ""
@@ -702,18 +721,30 @@ def run(db_path: str = DB_PATH, pack_id: str | None = None,
         return []
     if workers == 1 or dry_run or len(tasks) == 1:
         made: list[dict] = []
+        errors: list[str] = []
         for pack, w in tasks:
-            made.extend(_drain_scope(db_path, pack, w, prov, dry_run,
-                                     until_done, max_rounds))
+            try:
+                made.extend(_drain_scope(db_path, pack, w, prov, dry_run,
+                                         until_done, max_rounds))
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            raise RuntimeError(f"сломано областей: {len(errors)}; первая: {errors[0]}")
         return made
     from concurrent.futures import ThreadPoolExecutor, as_completed
     made = []
+    errors = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = [pool.submit(_drain_scope, db_path, pack, w, prov, dry_run,
                             until_done, max_rounds)
                 for pack, w in tasks]
         for fut in as_completed(futs):
-            made.extend(fut.result())
+            try:
+                made.extend(fut.result())
+            except Exception as exc:
+                errors.append(str(exc))
+    if errors:
+        raise RuntimeError(f"сломано областей: {len(errors)}; первая: {errors[0]}")
     return made
 
 
