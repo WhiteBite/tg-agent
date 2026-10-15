@@ -29,6 +29,7 @@ from env import load_env  # noqa: E402
 load_env()
 
 from db import DB, clean_text  # noqa: E402
+from llm_http import post  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -74,8 +75,7 @@ def provider_openai(chat_id: int, msg_id: int, kind: str,
     key = os.environ.get("MEDIA_KEY")
     if key:
         req.add_header("Authorization", f"Bearer {key}")
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.loads(resp.read())
+    data = post(req, 120)
     return {"text": data.get("text") or "", "engine": model}
 
 

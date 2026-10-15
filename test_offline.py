@@ -3488,6 +3488,37 @@ def test_llm_extra_body(db_path: Path) -> None:
             else:
                 os.environ[k] = v
 
+    import http.server
+    import threading
+    import urllib.request as urlreq
+    from llm_http import post
+
+    class Handler400(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = b'{"error": {"message": "data_inspection_failed"}}'
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler400)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        req = urlreq.Request(f"http://127.0.0.1:{srv.server_port}/x",
+                             data=b"{}", headers={"Content-Type": "application/json"})
+        try:
+            post(req, 5)
+            check(False, "llm_http: post вскрывает тело HTTP-ошибки")
+        except RuntimeError as exc:
+            check("400" in str(exc) and "data_inspection_failed" in str(exc),
+                  "llm_http: post вскрывает тело HTTP-ошибки", str(exc))
+    finally:
+        srv.shutdown()
+
 
 def test_extract_parallel(db_path: Path) -> None:
     print("=== extract: параллельные воркеры обрабатывают темы одновременно ===")

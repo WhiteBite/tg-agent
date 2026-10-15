@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
+import urllib.error
+import urllib.request
 from typing import Any, Callable
+
+
+def post(req: urllib.request.Request, timeout: float) -> Any:
+    """POST JSON; HTTP-ошибки поднимаются с отрывком тела ответа — иначе
+    причина 400 (контент-фильтр, лимит параметра) не диагностируется."""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(500).decode("utf-8", "replace")
+        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
 
 
 def extra_body(url: str | None) -> dict:

@@ -47,7 +47,7 @@ load_env()
 from db import DB  # noqa: E402
 from packs import PACKS  # noqa: E402
 import media as media_mod  # noqa: E402
-from llm_http import call_with_deadline, extra_body  # noqa: E402
+from llm_http import call_with_deadline, extra_body, post  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -163,8 +163,7 @@ def _post(url: str, key: str | None, payload: dict) -> dict:
         headers={"Content-Type": "application/json"})
     if key:
         req.add_header("Authorization", f"Bearer {key}")
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        return json.loads(resp.read())
+    return post(req, 300)
 
 
 _PROVIDER_SYSTEM = (
