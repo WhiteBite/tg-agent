@@ -4528,6 +4528,13 @@ def test_key_fallback(db_path: Path) -> None:
         except RuntimeError:
             check(False, "llm_http: живой ключ — один запрос без ротации")
 
+        seen.clear()
+        post_json_keys(url, ["sk-dead", "sk-live2"], {"a": 1}, 10)
+        post_json_keys(url, ["sk-dead", "sk-live2"], {"a": 1}, 10)
+        check(seen == ["Bearer sk-dead", "Bearer sk-live2", "Bearer sk-live2"],
+              "llm_http: last-good-key — повторный вызов начинает с живого ключа",
+              str(seen))
+
         import extract as extract_mod
         saved = {k: os.environ.get(k) for k in ("EXTRACT_KEY", "EXTRACT_URL")}
         os.environ["EXTRACT_KEY"] = "sk-dead,sk-alive"

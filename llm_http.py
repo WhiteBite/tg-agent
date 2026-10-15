@@ -27,19 +27,29 @@ def key_list(value: str | None) -> list[str | None]:
     return keys or [None]
 
 
+_key_cache: dict[tuple, int] = {}
+
+
 def post_json_keys(url: str, keys: list[str | None], payload: dict,
                    timeout: float) -> Any:
     """POST JSON с перебором ключей по порядку: 401/403 ротирует следующий,
-    прочие ошибки поднимаются сразу."""
+    прочие ошибки поднимаются сразу. Последний живой ключ запоминается —
+    мёртвый первый ключ не оплачивает 401 на каждый вызов."""
+    keys = list(keys or [None])
+    start = _key_cache.get(tuple(keys), 0)
+    order = list(range(start, len(keys))) + list(range(0, start))
     data = json.dumps(payload).encode()
     last: Exception | None = None
-    for key in keys or [None]:
+    for i in order:
+        key = keys[i]
         req = urllib.request.Request(
             url, data=data, headers={"Content-Type": "application/json"})
         if key:
             req.add_header("Authorization", f"Bearer {key}")
         try:
-            return post(req, timeout)
+            result = post(req, timeout)
+            _key_cache[tuple(keys)] = i
+            return result
         except RuntimeError as exc:
             if "HTTP 401" not in str(exc) and "HTTP 403" not in str(exc):
                 raise
