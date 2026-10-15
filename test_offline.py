@@ -3932,6 +3932,89 @@ def test_services_report(db_path: Path) -> None:
           "services_report: --out пишет файл", str(out))
 
 
+def test_extract_moderation(db_path: Path) -> None:
+    print("=== extract: контент-фильтр — бисекция и пропуск триггера ===")
+    md_db = db_path.parent / "moderation.sqlite"
+    if md_db.exists():
+        md_db.unlink()
+    now = int(time.time())
+    with DB(md_db) as db:
+        db.upsert_chat(-100568, "Спам-чат", None, "supergroup", False, 2)
+        db.watch_add(-100568, 1, project="сервисы")
+        for mid in (1, 2, 3, 4):
+            ts = now - 60 + mid
+            text = f"сервис sc{mid}.com — раздача"
+            if mid == 2:
+                text += " неприличное"
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100568, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+
+    import extract as extract_mod
+    from packs import PACKS
+
+    def poisoned(prompt, pack):
+        if "неприличное" in prompt:
+            raise extract_mod.ModerationBlocked("data_inspection_failed")
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ops = [{"op": "new", "kind": "service", "title": f"Сервис {i}",
+                "entity_id": None, "body": None, "owner": None, "due_text": None,
+                "due_ts": None, "confidence": 0.9,
+                "evidence": [{"chat_id": -100568, "msg_id": i, "quote": f"sc{i}.com"}]}
+               for i in ids]
+        return {"ops": ops, "covered_upto_msg_id": max(ids) if ids else 0}
+
+    made = extract_mod.run(str(md_db), packs=[PACKS["services"]],
+                           provider=poisoned, until_done=True)
+    with DB(md_db) as db:
+        ents = db.conn.execute(
+            "SELECT title FROM entities WHERE pack='services' ORDER BY id").fetchall()
+        filt = db.conn.execute(
+            "SELECT from_msg, upto_msg FROM extraction_runs "
+            "WHERE status='filtered'").fetchall()
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100568:1:services'").fetchone()
+    titles = [e["title"] for e in ents]
+    check(titles == ["Сервис 1", "Сервис 3", "Сервис 4"]
+          and any(m.get("filtered") for m in made),
+          "extract: триггер контент-фильтра пропущен, остальные сообщения извлечены",
+          str(titles))
+    check(len(filt) == 1 and filt[0]["upto_msg"] == 2,
+          "extract: пропуск зафиксирован run status='filtered' на msg 2",
+          str([dict(f) for f in filt]))
+    check(cur is not None and int(cur["value"]) == 4,
+          "extract: курсор прошёл весь скоуп до msg 4", str(cur and cur["value"]))
+
+    calls: list = []
+    orig_post = extract_mod._post
+    saved = {k: os.environ.get(k) for k in ("EXTRACT_URL", "EXTRACT_KEY")}
+    os.environ["EXTRACT_URL"] = "https://api.example.com/v1"
+    os.environ.pop("EXTRACT_KEY", None)
+
+    def failing_post(url, key, payload):
+        calls.append(payload)
+        raise RuntimeError('HTTP 400: {"error":{"code":"data_inspection_failed"}}')
+
+    extract_mod._post = failing_post
+    try:
+        extract_mod.provider_openai("промпт", PACKS["services"])
+        check(False, "extract: data_inspection_failed поднимается как ModerationBlocked")
+    except extract_mod.ModerationBlocked:
+        check(len(calls) == 1,
+              "extract: контент-фильтр не ретраится (1 попытка вместо 3)",
+              f"calls={len(calls)}")
+    finally:
+        extract_mod._post = orig_post
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3989,6 +4072,7 @@ def main() -> int:
     test_extract_prefilter(db_path)
     test_extract_scoping(db_path)
     test_services_report(db_path)
+    test_extract_moderation(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

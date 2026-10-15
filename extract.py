@@ -72,6 +72,10 @@ class ResponseTruncated(Exception):
     """finish_reason=length: ответ обрезан — батч бисектируется, а не ретраится."""
 
 
+class ModerationBlocked(Exception):
+    """Контент-фильтр провайдера отклонил запрос — повтор того же ввода бессмысленен."""
+
+
 def _norm(text: str | None) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
@@ -220,6 +224,8 @@ def provider_openai(prompt: str, pack: dict) -> dict:
             raise
         except Exception as exc:
             error = str(exc)
+            if "data_inspection_failed" in error.lower():
+                raise ModerationBlocked(error) from exc
             if raw:
                 messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user",
@@ -521,6 +527,36 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
             rows = rows[:len(rows) // 2]
             print(f"  ~ {pack['id']} {chat_id}/{topic_id}: ответ обрезан — "
                   f"бисекция батча до {len(rows)}", flush=True)
+        except ModerationBlocked:
+            if len(rows) > 1:
+                rows = rows[:len(rows) // 2]
+                print(f"  ~ {pack['id']} {chat_id}/{topic_id}: контент-фильтр — "
+                      f"бисекция батча до {len(rows)}", flush=True)
+                continue
+            bad_id = rows[0]["msg_id"]
+            print(f"  ! {pack['id']} {chat_id}/{topic_id}: msg {bad_id} пропущено — "
+                  f"контент-фильтр провайдера", flush=True)
+            if dry_run:
+                return {"pack": pack["id"], "chat_id": chat_id, "topic_id": topic_id,
+                        "messages": 1, "ops_applied": 0, "ops_rejected": 0,
+                        "ops_overflow": 0, "upto_msg": bad_id,
+                        "dry_run": True, "filtered": True}
+            db.conn.execute(
+                "INSERT INTO extraction_runs(pack, chat_id, topic_id, from_msg, upto_msg, ts, "
+                "ops_applied, ops_rejected, ops_overflow, status, "
+                "duration_ms, finish_reason, usage_prompt, usage_completion) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (pack["id"], chat_id, topic_id, from_msg, bad_id, int(time.time()),
+                 0, 0, 0, "filtered", int((time.monotonic() - t0) * 1000),
+                 None, None, None))
+            db.conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(max(cursor or 0, bad_id))))
+            db.conn.commit()
+            return {"pack": pack["id"], "chat_id": chat_id, "topic_id": topic_id,
+                    "messages": 1, "ops_applied": 0, "ops_rejected": 0,
+                    "ops_overflow": 0, "upto_msg": bad_id, "filtered": True}
     upto_msg = rows[-1]["msg_id"]
     duration_ms = int((time.monotonic() - t0) * 1000)
     meta = (result.pop("_meta", None) or {}) if isinstance(result, dict) else {}
