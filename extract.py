@@ -681,11 +681,13 @@ def _drain_scope(db_path: str, pack: dict, w: dict, prov, dry_run: bool,
         try:
             with DB(db_path) as db:
                 res = _run_scope(db, pack, w, prov, dry_run)
-        except OSError as exc:
-            if net_retries < 3:
+        except (OSError, sqlite3.OperationalError) as exc:
+            transient = (isinstance(exc, OSError) or "locked" in str(exc)
+                         or "busy" in str(exc))
+            if transient and net_retries < 3:
                 net_retries += 1
                 rounds -= 1
-                print(f"  ~ {pack['id']} {w['chat_id']}/{w['topic_id']}: сеть — "
+                print(f"  ~ {pack['id']} {w['chat_id']}/{w['topic_id']}: сбой — "
                       f"повтор {net_retries}/3 через {delay:.0f}с",
                       file=sys.stderr, flush=True)
                 time.sleep(delay)
@@ -773,11 +775,13 @@ def _drain_window(db_path: str, pack: dict, w: dict, win: tuple, prov,
             with DB(db_path) as db:
                 res = _run_scope(db, pack, w, prov, dry_run, hi=hi,
                                  cursor_key=cur_key, cursor_floor=lo)
-        except OSError as exc:
-            if net_retries < 3:
+        except (OSError, sqlite3.OperationalError) as exc:
+            transient = (isinstance(exc, OSError) or "locked" in str(exc)
+                         or "busy" in str(exc))
+            if transient and net_retries < 3:
                 net_retries += 1
                 rounds -= 1
-                print(f"  ~ {pack['id']} {tag}: сеть — повтор {net_retries}/3 "
+                print(f"  ~ {pack['id']} {tag}: сбой — повтор {net_retries}/3 "
                       f"через {delay:.0f}с", file=sys.stderr, flush=True)
                 time.sleep(delay)
                 continue
@@ -791,6 +795,7 @@ def _drain_window(db_path: str, pack: dict, w: dict, win: tuple, prov,
                 _promote_windows(db, pack, w, stamp=(cur_key, hi),
                                  done_key=done_key)
             break
+        net_retries = 0
         made.append(res)
         if not dry_run:
             tail = f" overflow={res['ops_overflow']}" if res["ops_overflow"] else ""

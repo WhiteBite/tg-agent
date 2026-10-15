@@ -4879,6 +4879,62 @@ def test_proclock(db_path: Path) -> None:
         live_mod.DB_PATH = saved
 
 
+def test_window_transient(db_path: Path) -> None:
+    print("=== extract: окна переживают locked-конфликты и сеть ===")
+    wt_db = db_path.parent / "wintransient.sqlite"
+    if wt_db.exists():
+        wt_db.unlink()
+    with DB(wt_db) as db:
+        db.upsert_chat(-100588, "Транзиент", None, "supergroup", False, 2)
+        db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES"
+            "('extract:-100588:1:services:wins', '[[0, 100]]')")
+        db.conn.commit()
+
+    import sqlite3 as sqlite3_mod
+    import extract as extract_mod
+    from packs import PACKS
+    svc = PACKS["services"]
+    w = {"chat_id": -100588, "topic_id": 1, "project": None}
+    calls = {"n": 0}
+    orig = extract_mod._run_scope
+
+    def flaky_scope(db, pack, ww, prov, dry_run, **kw):
+        calls["n"] += 1
+        n = calls["n"]
+        if n in (1, 2):
+            raise sqlite3_mod.OperationalError("database is locked")
+        if n in (4, 5):
+            raise OSError("соединение сброшено")
+        if n in (3, 6):
+            return {"pack": pack["id"], "chat_id": ww["chat_id"],
+                    "topic_id": ww["topic_id"], "messages": 5, "ops_applied": 0,
+                    "ops_rejected": 0, "ops_overflow": 0,
+                    "upto_msg": 50 if n == 3 else 90}
+        return None
+
+    extract_mod._run_scope = flaky_scope
+    os.environ["EXTRACT_NET_RETRY_DELAY"] = "0"
+    try:
+        made = extract_mod._drain_window(str(wt_db), svc, w, (0, 0, 100),
+                                         None, False, True, 100)
+    finally:
+        extract_mod._run_scope = orig
+        os.environ.pop("EXTRACT_NET_RETRY_DELAY", None)
+    check(len(made) == 2 and calls["n"] == 7,
+          "extract: locked+сеть ретраятся, бюджет сбрасывается после успеха",
+          f"made={len(made)} calls={calls['n']}")
+    with DB(wt_db) as db:
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100588:1:services'").fetchone()
+        left = db.conn.execute(
+            "SELECT COUNT(*) c FROM meta WHERE key LIKE 'extract:-100588:1:services:%'"
+        ).fetchone()["c"]
+    check(cur is not None and int(cur["value"]) == 100 and left == 0,
+          "extract: транзиентное окно дошло до promotion и очистило ключи",
+          f"cur={cur and cur['value']} left={left}")
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4944,6 +5000,7 @@ def main() -> int:
     test_report_topn(db_path)
     test_key_fallback(db_path)
     test_extract_windows(db_path)
+    test_window_transient(db_path)
     test_media_download(db_path)
     test_proclock(db_path)
     print()
