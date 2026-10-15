@@ -357,6 +357,31 @@ python3 pipeline.py --loop 30 --send # демон: полный цикл каж�
 Регулярность — `--loop N` (демон, cron не нужен) или cron; `live.py` остаётся
 отдельным демоном для мгновенной подхватки новых сообщений.
 
+## Автономка (Windows)
+
+На машине настроены три компонента:
+
+| Компонент | Роль | Запуск |
+|---|---|---|
+| `pipeline.py --loop 30` | полный цикл каждые 30 минут (sync → media → extract → fuzzy → export → digest → monitor) | при входе в систему: `tg-agent.cmd` в папке Startup |
+| `live.py` | мгновенная подхватка новых сообщений в индекс | тот же `.cmd` |
+| задача `tg-agent-morning` (09:00) | утренняя сводка в Saved Messages (`pipeline.py --skip sync --skip media --send`) | Task Scheduler |
+
+Каждый демон получает собственную копию Telethon-сессии
+(`tg_agent_session_cli`, `tg_agent_session_live`, `tg_agent_session_morning`):
+два клиента на одном session-файле конфликтуют через его SQLite
+(`database is locked`). Копии делаются обычным копированием файла
+авторизованной сессии — auth-ключ один, локальные базы разные.
+
+Двойной старт блокирует `proclock` (байтовая блокировка `<db>.pipeline.lock` /
+`<db>.live.lock`; при смерти процесса ОС снимает её сама — протухших файлов не
+остаётся). Логи дописываются в `pipeline.log` / `live.log` / `morning.log`
+(в gitignore). Утренней сводке sync не нужен — loop-демон и так держит данные
+свежими, а Telegram-API не конкурирует. Остановка: снять задачи
+`Get-CimInstance Win32_Process -Filter "Name='python.exe'"` и убить PID'ы
+демонов; для отключения автозапуска — удалить `tg-agent.cmd` из Startup и
+`schtasks /delete /tn tg-agent-morning /f`.
+
 ## Мониторинг и уведомления
 
 ```bash
@@ -472,7 +497,7 @@ swagger на app.101-group.ru — ждёт кредов).
 | `sync.py` | Telethon → SQLite: инкрементальная синхронизация, бэкфилл чанками, папки, пины |
 | `search.py` | Глобальный поиск Telegram: публичные каналы/группы/юзеры по ключевому слову |
 | `folders.py` | Правка состава папок Telegram: add/remove чатов (второй пишущий модуль, контент не пишет) |
-| `pipeline.py` | Автономный конвейер: sync (watch) → extract → digest → monitor одним прогоном |
+| `pipeline.py` | Автономный конвейер: sync → media → extract → fuzzy → export → digest → monitor одним прогоном |
 | `db.py` | Индекс: схема, FTS5, watch-лист, refs, пины, дайджесты, `run_sql` с блокировками |
 | `server.py` | MCP-сервер (stdio): 13 read-only инструментов |
 | `live.py` | Новые сообщения в реальном времени (`events.NewMessage`) |
@@ -481,8 +506,11 @@ swagger на app.101-group.ru — ждёт кредов).
 | `packs/` | Декларативные пакеты извлечения: `construction` (decision/task/promise/question), `services` (service/trial/promo) |
 | `monitor.py` | Сводка просроченного и дедлайнов по проектам; `--send` через `notify.py` |
 | `notify.py` | Уведомления в Saved Messages; единственный пишущий модуль, гейт `TG_ALLOW_SEND=1` |
-| `media.py` | Очередь транскрипции голосовых и документов (stub/openai) |
+| `media.py` | Очередь транскрипции голосовых и документов: рефетч из Telegram, гейты до скачивания, qwen3-asr-flash (stub/openai) |
 | `export.py` | Выгрузка сущностей во внешние системы (file / 101 / notion) |
+| `services_report.py` | Каталог сервисов из сущностей: rollup по dedup_key, `--days/--query/--top/--hide-closed` |
+| `fuzzy_dedup.py` | Maintenance-проход: слияние дублей сущностей по нормализованному title (richer-keeper, cap, идемпотентный) |
+| `proclock.py` | Lockfile одиночного инстанса для демонов (pipeline --loop, live.py) |
 | `ui.py` + `ui.html` | Веб-визуал «как в TG Desktop» (кураторство watch-листа) |
 | `watch.py` | То же в терминале; `--project` и подкоманда `project` — тег проекта у темы |
 | `login.py` | Логин QR-кодом (или телефон+код), `--export` — строка сессии |
@@ -490,7 +518,7 @@ swagger на app.101-group.ru — ждёт кредов).
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 380 офлайн-проверки (без аккаунта Telegram), гоняются в CI |
+| `test_offline.py` | 475 офлайн-проверок (без аккаунта Telegram), гоняются в CI |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -539,7 +567,7 @@ swagger на app.101-group.ru — ждёт кредов).
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **380 проверки, все зелёные** (работают и на Linux,
+`python3 test_offline.py` — **475 проверок, все зелёные** (работают и на Linux,
 и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
