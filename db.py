@@ -1030,8 +1030,11 @@ class DB:
             sql += " AND project = ?"
             args.append(project)
         if chat_id is not None:
-            sql += " AND chat_id = ?"
-            args.append(chat_id)
+            sql += (" AND (EXISTS(SELECT 1 FROM entity_sources es "
+                    "WHERE es.entity_id = entities.id AND es.chat_id = ?) "
+                    "OR (chat_id = ? AND NOT EXISTS(SELECT 1 FROM entity_sources es2 "
+                    "WHERE es2.entity_id = entities.id)))")
+            args += [chat_id, chat_id]
         if query:
             sql += " AND (title LIKE ? OR body LIKE ?)"
             args += [f"%{query}%", f"%{query}%"]
@@ -1133,6 +1136,26 @@ class DB:
             self.conn.execute(
                 "DELETE FROM entity_sources WHERE entity_id=?", (d["id"],))
             self.conn.execute("DELETE FROM entities WHERE id=?", (d["id"],))
+
+    def entity_in_chats(self, entity_id: int, chat_ids: Iterable[int]) -> bool:
+        """Видимость сущности из любого чата: сначала bridge, при отсутствии
+        sources-строк — фолбэк на первичный chat_id."""
+        ids = list(set(chat_ids))
+        if not ids:
+            return False
+        marks = ",".join("?" * len(ids))
+        if self.conn.execute(
+                f"SELECT 1 FROM entity_sources WHERE entity_id=? AND chat_id IN ({marks}) "
+                "LIMIT 1", [entity_id, *ids]).fetchone() is not None:
+            return True
+        row = self.conn.execute(
+            "SELECT chat_id FROM entities WHERE id=?", (entity_id,)).fetchone()
+        if row is None:
+            return False
+        has_src = self.conn.execute(
+            "SELECT 1 FROM entity_sources WHERE entity_id=? LIMIT 1",
+            (entity_id,)).fetchone()
+        return has_src is None and row["chat_id"] in ids
 
     def entity_overdue(self, project: Optional[str] = None, days_ahead: int = 0,
                        limit: int = 100) -> list[dict]:

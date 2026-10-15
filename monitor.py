@@ -53,9 +53,12 @@ def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
         window = d.entity_overdue(project=project, days_ahead=days_ahead, limit=500)
         open_rows = [dict(r) for r in d.conn.execute(
             "SELECT * FROM entities WHERE closed_ts IS NULL ORDER BY due_ts")]
+        since = now - news_hours * 3600
         news = [dict(r) for r in d.conn.execute(
-            "SELECT * FROM entities WHERE created_ts >= ? ORDER BY created_ts DESC LIMIT 200",
-            (now - news_hours * 3600,))]
+            "SELECT e.* FROM entities e WHERE e.created_ts >= ? OR EXISTS("
+            "SELECT 1 FROM entity_events ev WHERE ev.entity_id = e.id AND ev.ts >= ? "
+            "AND (ev.op IN ('new', 'merge') OR ev.field = 'dedup')) "
+            "ORDER BY e.created_ts DESC LIMIT 200", (since, since))]
         updated = d.conn.execute(
             "SELECT COUNT(*) c FROM entities WHERE updated_ts >= ? AND created_ts < ?",
             (now - news_hours * 3600, now - news_hours * 3600)).fetchone()["c"]

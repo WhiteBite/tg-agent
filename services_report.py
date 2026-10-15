@@ -68,13 +68,26 @@ def collect(db_path: str | Path = DB_PATH, pack: str = "services",
                 "GROUP BY ee.entity_id")}
             rows = [r for r in rows
                     if (first_ts.get(r["id"]) or r.get("created_ts") or 0) >= since]
+        src_map: dict[int, list[str]] = {}
+        for s in db.conn.execute(
+                "SELECT es.entity_id, COALESCE(w.alias, t.title, c.title, "
+                "CAST(es.chat_id AS TEXT)) src "
+                "FROM entity_sources es "
+                "LEFT JOIN chats c ON c.id = es.chat_id "
+                "LEFT JOIN topics t ON t.chat_id = es.chat_id AND t.topic_id = es.topic_id "
+                "LEFT JOIN watch w ON w.chat_id = es.chat_id AND w.topic_id = es.topic_id "
+                "ORDER BY es.rowid"):
+            lst = src_map.setdefault(s["entity_id"], [])
+            if s["src"] not in lst:
+                lst.append(s["src"])
     groups: dict[str, dict] = {}
     merged: list[dict] = []
     for r in rows:
-        src = r["alias"] or r["topic_title"] or r["chat_title"] or str(r["chat_id"])
+        srcs = src_map.get(r["id"]) or [
+            r["alias"] or r["topic_title"] or r["chat_title"] or str(r["chat_id"])]
         g = {"kind": r["kind"], "title": r["title"], "body": r.get("body"),
              "status": r["status"], "dedup_key": r.get("dedup_key"),
-             "sources": [src], "created_ts": r.get("created_ts"),
+             "sources": list(srcs), "created_ts": r.get("created_ts"),
              "updated_ts": r.get("updated_ts"), "evidence": ev.get(r["id"]),
              "count": 1}
         key = r.get("dedup_key")
@@ -86,8 +99,9 @@ def collect(db_path: str | Path = DB_PATH, pack: str = "services",
             groups[key] = g
         else:
             prev["count"] += 1
-            if src not in prev["sources"]:
-                prev["sources"].append(src)
+            for s in srcs:
+                if s not in prev["sources"]:
+                    prev["sources"].append(s)
             for f, agg in (("created_ts", min), ("updated_ts", max)):
                 vals = [v for v in (prev.get(f), g.get(f)) if v]
                 if vals:

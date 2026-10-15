@@ -4308,6 +4308,69 @@ def test_global_dedup(db_path: Path) -> None:
               f"n={n} src={srcn}")
 
 
+def test_readers_global_dedup(db_path: Path) -> None:
+    print("=== readers: any-source фильтры, bridge-sources, re-sighting news ===")
+    rd_db = db_path.parent / "readers.sqlite"
+    if rd_db.exists():
+        rd_db.unlink()
+    now = int(time.time())
+    with DB(rd_db) as db:
+        db.upsert_chat(-100941, "Дальний чат", None, "supergroup", False, 2)
+        db.upsert_chat(-100942, "Ближний чат", None, "supergroup", False, 2)
+        db.watch_add(-100942, 1, alias="Ближний")
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
+            "dedup_key, created_ts, updated_ts) VALUES"
+            "(7001, 'services', -100941, 1, 'service', 'Мост', 'open', 'most', ?, ?)",
+            (now - 200000, now - 100000))
+        db.conn.execute(
+            "INSERT INTO entity_sources(entity_id, chat_id, topic_id, first_seen_ts, "
+            "last_seen_ts) VALUES(7001, -100941, 1, ?, ?), (7001, -100942, 1, ?, ?)",
+            (now - 200000, now - 100000, now - 50000, now - 50000))
+        db.conn.commit()
+
+        found = db.entities_list(pack="services", chat_id=-100942)
+        check([r["id"] for r in found] == [7001],
+              "db: entities_list(chat_id) находит сущность любого источника",
+              str([r["id"] for r in found]))
+        check(db.entity_in_chats(7001, {-100942})
+              and not db.entity_in_chats(7001, {-100999}),
+              "db: entity_in_chats — источник виден, чужой чат нет")
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
+            "created_ts, updated_ts) VALUES(7002, 'services', -100942, 1, 'promo', "
+            "'Без sources', 'open', ?, ?)", (now - 100, now - 100))
+        db.conn.commit()
+        check(db.entity_in_chats(7002, {-100942}),
+              "db: entity_in_chats без bridge-строк — фолбэк на первичный чат")
+
+    import monitor as monitor_mod
+    with DB(rd_db) as db:
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, ts, op, field) "
+            "VALUES(7001, ?, 'update', 'dedup')", (now - 3600,))
+        db.conn.commit()
+    s = monitor_mod.collect(str(rd_db), news_hours=24)
+    check(any(e["id"] == 7001 for e in s["news"]),
+          "monitor: кросс-скоупный re-sighting виден в news (event-driven)",
+          str([e["id"] for e in s["news"]]))
+
+    import services_report as sr
+    rep = sr.collect(str(rd_db))
+    by_title = {g["title"]: g for gs in rep["by_kind"].values() for g in gs}
+    check(by_title["Мост"]["sources"] == ["Дальний чат", "Ближний"],
+          "report: sources из entity_sources — оба чата",
+          str(by_title["Мост"]["sources"]))
+
+    with DB(rd_db) as db:
+        db.merge_entities(7001, [7002], "fuzzy-title", now)
+        db.conn.commit()
+        al = db.conn.execute(
+            "SELECT entity_id FROM entity_aliases WHERE old_entity_id=7002").fetchone()
+    check(al is not None and al["entity_id"] == 7001,
+          "db: merge_entities пишет alias для редиректа", str(al and tuple(al)))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4368,6 +4431,7 @@ def main() -> int:
     test_extract_moderation(db_path)
     test_extract_fault_tolerance(db_path)
     test_global_dedup(db_path)
+    test_readers_global_dedup(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
