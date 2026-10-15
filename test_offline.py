@@ -4555,6 +4555,42 @@ def test_key_fallback(db_path: Path) -> None:
         srv.shutdown()
 
 
+def test_report_topn(db_path: Path) -> None:
+    print("=== services_report: --top и --hide-closed ===")
+    tn_db = db_path.parent / "topn.sqlite"
+    if tn_db.exists():
+        tn_db.unlink()
+    now = int(time.time())
+    with DB(tn_db) as db:
+        db.upsert_chat(-100571, "Каталог", None, "channel", False, 1)
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
+            "dedup_key, created_ts, updated_ts, closed_ts) VALUES"
+            "(911, 'services', -100571, 1, 'service', 'Alpha', 'open', 'ka', ?, ?, NULL),"
+            "(912, 'services', -100571, 1, 'service', 'Beta', 'open', 'kb', ?, ?, NULL),"
+            "(913, 'services', -100571, 1, 'service', 'Gamma', 'closed', 'kc', ?, ?, ?)",
+            (now - 100, now - 100, now - 200, now - 200, now - 300, now - 300, now - 50))
+        db.conn.commit()
+
+    import services_report as sr
+    full = sr.run(str(tn_db), out=str(db_path.parent / "topn_full.md"))
+    check([g["title"] for g in full["by_kind"]["service"]]
+          == ["Alpha", "Beta", "Gamma"],
+          "report: без флагов все группы по убыванию свежести",
+          str([g["title"] for g in full["by_kind"]["service"]]))
+    top_out = db_path.parent / "topn_top.md"
+    top = sr.run(str(tn_db), top=2, out=str(top_out))
+    check([g["title"] for g in top["by_kind"]["service"]] == ["Alpha", "Beta"]
+          and top["groups"] == 2,
+          "report: --top 2 режет до двух первых групп", str(top["groups"]))
+    nc = sr.run(str(tn_db), hide_closed=True, out=str(db_path.parent / "topn_nc.md"))
+    check([g["title"] for g in nc["by_kind"]["service"]] == ["Alpha", "Beta"],
+          "report: --hide-closed убирает закрытые группы")
+    check("top-2" in top_out.read_text(encoding="utf-8"),
+          "report: markdown отмечает усечение",
+          top_out.read_text(encoding="utf-8").splitlines()[2][:120])
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4617,6 +4653,7 @@ def main() -> int:
     test_global_dedup(db_path)
     test_readers_global_dedup(db_path)
     test_fuzzy_dedup(db_path)
+    test_report_topn(db_path)
     test_key_fallback(db_path)
     print()
     if FAILURES:

@@ -128,8 +128,13 @@ def format_markdown(summary: dict) -> list[str]:
     lines = [f"# Каталог: {summary['pack']}", ""]
     window = f" за {summary['days']}д" if summary.get("days") else ""
     q = f" по запросу «{summary['query']}»" if summary.get("query") else ""
+    limit = ""
+    if summary.get("top"):
+        limit += f", top-{summary['top']} в секции"
+    if summary.get("hide_closed"):
+        limit += ", без закрытых"
     lines.append(f"Сущностей: {summary['total']}, групп после склейки: "
-                 f"{summary['groups']}{window}{q} "
+                 f"{summary['groups']}{window}{q}{limit} "
                  f"(сгенерировано {_date(summary['generated_ts'])})")
     kinds = KIND_ORDER + [k for k in summary["by_kind"] if k not in KIND_ORDER]
     for kind in kinds:
@@ -158,8 +163,17 @@ def format_markdown(summary: dict) -> list[str]:
 
 def run(db_path: str | Path = DB_PATH, pack: str = "services",
         days: int | None = None, query: str | None = None,
-        out: str | None = None) -> dict:
+        out: str | None = None, top: int | None = None,
+        hide_closed: bool = False) -> dict:
     summary = collect(db_path, pack=pack, days=days, query=query)
+    if hide_closed:
+        summary["by_kind"] = {k: [g for g in v if g["status"] != "closed"]
+                              for k, v in summary["by_kind"].items()}
+    if top:
+        summary["by_kind"] = {k: v[:top] for k, v in summary["by_kind"].items()}
+    summary["groups"] = sum(len(v) for v in summary["by_kind"].values())
+    summary["top"] = top
+    summary["hide_closed"] = hide_closed
     text = "\n".join(format_markdown(summary)) + "\n"
     if out:
         Path(out).write_text(text, encoding="utf-8")
@@ -175,11 +189,14 @@ def _arg_value(args: list[str], name: str) -> str | None:
 def main() -> None:
     args = sys.argv[1:]
     days = _arg_value(args, "--days")
+    top = _arg_value(args, "--top")
     run(_arg_value(args, "--db") or DB_PATH,
         pack=_arg_value(args, "--pack") or "services",
         days=int(days) if days else None,
         query=_arg_value(args, "--query"),
-        out=_arg_value(args, "--out"))
+        out=_arg_value(args, "--out"),
+        top=int(top) if top else None,
+        hide_closed="--hide-closed" in args)
 
 
 if __name__ == "__main__":
