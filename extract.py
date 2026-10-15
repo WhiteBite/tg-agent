@@ -104,9 +104,10 @@ def build_prompt(db: DB, pack: dict, w: dict, rows: list[dict]) -> str:
     scope_header = f"Тема «{alias}», чат {w['chat_id']}, новых сообщений: {len(rows)}"
     lines = _message_lines(db, w["chat_id"], rows)
     open_rows = db.conn.execute(
-        "SELECT id, kind, title, owner, due_ts FROM entities "
-        "WHERE pack=? AND chat_id=? AND topic_id=? AND closed_ts IS NULL "
-        "ORDER BY id LIMIT ?",
+        "SELECT e.id, e.kind, e.title, e.owner, e.due_ts FROM entities e "
+        "JOIN entity_sources s ON s.entity_id = e.id "
+        "WHERE e.pack=? AND s.chat_id=? AND s.topic_id=? AND e.closed_ts IS NULL "
+        "ORDER BY COALESCE(e.updated_ts, e.created_ts) DESC LIMIT ?",
         (pack["id"], w["chat_id"], w["topic_id"], OPEN_ENTITIES_CAP)).fetchall()
     open_lines = [f"{r['id']} | {r['kind']} | {r['title']} | {r['owner'] or ''} | {r['due_ts'] or ''}"
                   for r in open_rows]
@@ -285,17 +286,20 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
     if not isinstance(entity_id, int):
         return False, f"{name} без entity_id"
     row = db.conn.execute(
-        "SELECT closed_ts, dedup_key FROM entities WHERE id=? AND pack=? AND chat_id=? AND topic_id=?",
-        (entity_id, pack["id"], w["chat_id"], w["topic_id"])).fetchone()
-    if row is None:
+        "SELECT closed_ts, dedup_key FROM entities WHERE id=? AND pack=?",
+        (entity_id, pack["id"])).fetchone()
+    member = row is not None and db.conn.execute(
+        "SELECT 1 FROM entity_sources WHERE entity_id=? AND chat_id=? AND topic_id=?",
+        (entity_id, w["chat_id"], w["topic_id"])).fetchone() is not None
+    if not member:
         return False, f"сущность {entity_id} вне скоупа"
     if name == "reopen":
         if row["closed_ts"] is None:
             return False, "reopen: сущность не закрыта"
         twin = db.conn.execute(
-            "SELECT 1 FROM entities WHERE pack=? AND chat_id=? AND topic_id=? "
-            "AND dedup_key=? AND closed_ts IS NULL AND id != ?",
-            (pack["id"], w["chat_id"], w["topic_id"], row["dedup_key"], entity_id)).fetchone()
+            "SELECT 1 FROM entities WHERE pack=? AND dedup_key=? "
+            "AND closed_ts IS NULL AND id != ?",
+            (pack["id"], row["dedup_key"], entity_id)).fetchone()
         if twin is not None:
             return False, "reopen: есть живой дубль"
         return True, ""
@@ -336,6 +340,16 @@ def _split_ops(valid: list[dict]) -> tuple[list[dict], int, int]:
     return valid[:MAX_OPS_PER_BATCH], overflow, dropped_min
 
 
+def _touch_source(db: DB, entity_id: int, w: dict, now: int) -> None:
+    db.conn.execute(
+        "INSERT INTO entity_sources(entity_id, chat_id, topic_id, first_seen_ts, "
+        "last_seen_ts) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(entity_id, chat_id, topic_id) DO UPDATE SET "
+        "first_seen_ts=MIN(entity_sources.first_seen_ts, excluded.first_seen_ts), "
+        "last_seen_ts=MAX(entity_sources.last_seen_ts, excluded.last_seen_ts)",
+        (entity_id, w["chat_id"], w["topic_id"], now, now))
+
+
 def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> None:
     kind = op["kind"]
     title = op.get("title") or ""
@@ -353,29 +367,70 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
              op.get("owner"), op.get("due_ts"), w.get("project"), op.get("confidence"),
              json.dumps(attrs, ensure_ascii=False) if attrs is not None else None,
              dedup_key, now, now))
-        entity_id, ev_op, field = cur.lastrowid, "new", None
+        entity_id = cur.lastrowid
+        _touch_source(db, entity_id, w, now)
+        for ev in op.get("evidence") or []:
+            db.conn.execute(
+                "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
+                "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
+                (entity_id, run_id, now, "new", None,
+                 ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+        return
     except sqlite3.IntegrityError:
         row = db.conn.execute(
-            "SELECT id FROM entities WHERE pack=? AND chat_id=? AND topic_id=? "
-            "AND dedup_key=? AND closed_ts IS NULL",
-            (pack["id"], w["chat_id"], w["topic_id"], dedup_key)).fetchone()
+            "SELECT * FROM entities WHERE pack=? AND dedup_key=? AND closed_ts IS NULL",
+            (pack["id"], dedup_key)).fetchone()
         if row is None:
             raise
-        entity_id, ev_op, field = row["id"], "update", "dedup"
-        db.conn.execute("UPDATE entities SET updated_ts=? WHERE id=?", (now, entity_id))
-    for ev in op.get("evidence") or []:
+    entity_id = row["id"]
+    changes = []
+    body = row["body"]
+    if (body is None or body == "") and op.get("body"):
+        body = op["body"]
+        changes.append(("body", row["body"], body))
+    owner = row["owner"]
+    if (owner is None or owner == "") and op.get("owner"):
+        owner = op["owner"]
+        changes.append(("owner", row["owner"], owner))
+    due_ts = row["due_ts"]
+    if due_ts is None and op.get("due_ts") is not None:
+        due_ts = op["due_ts"]
+        changes.append(("due_ts", row["due_ts"], due_ts))
+    project = row["project"]
+    if (project is None or project == "") and w.get("project"):
+        project = w["project"]
+        changes.append(("project", row["project"], project))
+    confidence = row["confidence"]
+    op_conf = op.get("confidence")
+    if op_conf is not None and (confidence is None or op_conf > confidence):
+        confidence = op_conf
+        changes.append(("confidence", row["confidence"], confidence))
+    db.conn.execute(
+        "UPDATE entities SET body=?, owner=?, due_ts=?, project=?, confidence=?, "
+        "updated_ts=? WHERE id=?",
+        (body, owner, due_ts, project, confidence, now, entity_id))
+    ev0 = (op.get("evidence") or [{}])[0]
+    db.conn.execute(
+        "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
+        "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
+        (entity_id, run_id, now, "update", "dedup",
+         ev0.get("chat_id"), ev0.get("msg_id"), ev0.get("quote")))
+    for field, old, new in changes:
         db.conn.execute(
-            "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
-            "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
-            (entity_id, run_id, now, ev_op, field,
-             ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+            "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, "
+            "to_val, chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (entity_id, run_id, now, "update", field,
+             None if old is None else str(old), None if new is None else str(new),
+             ev0.get("chat_id"), ev0.get("msg_id"), ev0.get("quote")))
+    _touch_source(db, entity_id, w, now)
 
 
-def _apply_update(db: DB, pack: dict, op: dict, run_id: int, now: int) -> None:
+def _apply_update(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> None:
     entity_id = op["entity_id"]
     row = db.conn.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
     if row is None:
         return
+    _touch_source(db, entity_id, w, now)
     title = op.get("title") or row["title"]
     owner = op.get("owner") if op.get("owner") is not None else row["owner"]
     due_ts = op.get("due_ts") if op.get("due_ts") is not None else row["due_ts"]
@@ -414,23 +469,22 @@ def _apply_update(db: DB, pack: dict, op: dict, run_id: int, now: int) -> None:
              ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
 
 
-def _apply_flip(db: DB, op: dict, run_id: int, now: int,
+def _apply_flip(db: DB, w: dict, op: dict, run_id: int, now: int,
                 name: str, closed_ts: int | None) -> None:
     entity_id = op["entity_id"]
     if name == "reopen":
         row = db.conn.execute(
-            "SELECT pack, chat_id, topic_id, dedup_key FROM entities WHERE id=?",
-            (entity_id,)).fetchone()
+            "SELECT pack, dedup_key FROM entities WHERE id=?", (entity_id,)).fetchone()
         twin = db.conn.execute(
-            "SELECT 1 FROM entities WHERE pack=? AND chat_id=? AND topic_id=? "
-            "AND dedup_key=? AND closed_ts IS NULL AND id != ?",
-            (row["pack"], row["chat_id"], row["topic_id"], row["dedup_key"],
-             entity_id)).fetchone()
+            "SELECT 1 FROM entities WHERE pack=? AND dedup_key=? "
+            "AND closed_ts IS NULL AND id != ?",
+            (row["pack"], row["dedup_key"], entity_id)).fetchone()
         if twin is not None:
             return
     db.conn.execute(
         "UPDATE entities SET closed_ts=?, status=?, updated_ts=? WHERE id=?",
         (closed_ts, "closed" if name == "close" else "open", now, entity_id))
+    _touch_source(db, entity_id, w, now)
     ev = (op.get("evidence") or [{}])[0]
     db.conn.execute(
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
@@ -444,11 +498,11 @@ def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int) -> N
     for op in valid:
         name = op.get("op")
         if name == "update":
-            _apply_update(db, pack, op, run_id, now)
+            _apply_update(db, pack, w, op, run_id, now)
         elif name == "close":
-            _apply_flip(db, op, run_id, now, "close", now)
+            _apply_flip(db, w, op, run_id, now, "close", now)
         elif name == "reopen":
-            _apply_flip(db, op, run_id, now, "reopen", None)
+            _apply_flip(db, w, op, run_id, now, "reopen", None)
         else:
             _apply_new(db, pack, w, op, run_id, now)
 

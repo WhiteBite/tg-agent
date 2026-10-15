@@ -168,7 +168,6 @@ CREATE TABLE IF NOT EXISTS extraction_runs (
 CREATE INDEX IF NOT EXISTS ix_ent_scope   ON entities (pack, chat_id, topic_id, status);
 CREATE INDEX IF NOT EXISTS ix_ent_overdue ON entities (due_ts) WHERE closed_ts IS NULL AND due_ts IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_ent_project ON entities (pack, project, status);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_ent_dedup ON entities (pack, chat_id, topic_id, dedup_key) WHERE closed_ts IS NULL;
 CREATE INDEX IF NOT EXISTS ix_ev_entity   ON entity_events (entity_id, ts);
 CREATE INDEX IF NOT EXISTS ix_ev_msg      ON entity_events (chat_id, msg_id);
 
@@ -213,6 +212,24 @@ CREATE TABLE IF NOT EXISTS integrations (
     synced_ts   INTEGER,
     PRIMARY KEY (entity_id, system)
 );
+
+-- сущность может происходить из нескольких (chat, topic): дедуп глобальный по (pack, dedup_key)
+CREATE TABLE IF NOT EXISTS entity_sources (
+    entity_id     INTEGER NOT NULL,
+    chat_id       INTEGER NOT NULL,
+    topic_id      INTEGER NOT NULL DEFAULT 1,
+    first_seen_ts INTEGER,
+    last_seen_ts  INTEGER,
+    PRIMARY KEY (entity_id, chat_id, topic_id)
+);
+CREATE INDEX IF NOT EXISTS ix_entsrc_scope ON entity_sources (chat_id, topic_id);
+
+CREATE TABLE IF NOT EXISTS entity_aliases (
+    old_entity_id INTEGER PRIMARY KEY,
+    entity_id     INTEGER NOT NULL,
+    merged_ts     INTEGER,
+    reason        TEXT
+);
 """
 
 # Полнотекстовый поиск по истории (года переписки через LIKE искать долго).
@@ -250,6 +267,7 @@ class DB:
         except sqlite3.OperationalError:
             self.fts = False  # поиск уедет на LIKE
         self._migrate_marked_ids()
+        self._migrate_global_dedup()
         self._migrate_watch_project()
         self._migrate_entity_status()
         self._migrate_topic_ids()
@@ -331,6 +349,40 @@ class DB:
                     self.conn.execute("UPDATE meta SET key=? WHERE key=?", (new_key, r["key"]))
         self.conn.commit()
         self.conn.execute("DROP TABLE id_map")
+
+    def _migrate_global_dedup(self) -> None:
+        # признак непроведённой миграции — старый scope-local индекс; открывается БД часто, гейт обязан быть дешёвым
+        old = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='ux_ent_dedup'"
+        ).fetchone()
+        if old is not None:
+            if self.conn.in_transaction:
+                self.conn.commit()
+            self.conn.execute("PRAGMA busy_timeout=60000")
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.conn.execute(
+                "INSERT OR IGNORE INTO entity_sources(entity_id, chat_id, topic_id, "
+                "first_seen_ts, last_seen_ts) "
+                "SELECT id, chat_id, topic_id, created_ts, COALESCE(updated_ts, created_ts) "
+                "FROM entities")
+            clusters = self.conn.execute(
+                "SELECT pack, dedup_key FROM entities WHERE closed_ts IS NULL "
+                "AND dedup_key IS NOT NULL GROUP BY pack, dedup_key HAVING COUNT(*) > 1"
+            ).fetchall()
+            now = int(time.time())
+            for c in clusters:
+                rows = self.conn.execute(
+                    "SELECT id FROM entities WHERE pack=? AND dedup_key=? "
+                    "AND closed_ts IS NULL ORDER BY created_ts, id",
+                    (c["pack"], c["dedup_key"])).fetchall()
+                self.merge_entities(rows[0]["id"], [r["id"] for r in rows[1:]],
+                                    "exact", now)
+            self.conn.execute("DROP INDEX ux_ent_dedup")
+            self.conn.commit()
+            self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_ent_dedup_global "
+            "ON entities(pack, dedup_key) WHERE closed_ts IS NULL")
 
     def _migrate_watch_project(self) -> None:
         try:
@@ -995,6 +1047,92 @@ class DB:
         d["events"] = [dict(r) for r in self.conn.execute(
             "SELECT * FROM entity_events WHERE entity_id = ? ORDER BY ts, id", (entity_id,))]
         return d
+
+    _SRC_UPSERT = (
+        "INSERT INTO entity_sources(entity_id, chat_id, topic_id, first_seen_ts, "
+        "last_seen_ts) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(entity_id, chat_id, topic_id) DO UPDATE SET "
+        "first_seen_ts=MIN(entity_sources.first_seen_ts, excluded.first_seen_ts), "
+        "last_seen_ts=MAX(entity_sources.last_seen_ts, excluded.last_seen_ts)")
+
+    def merge_entities(self, keeper_id: int, loser_ids: list[int], reason: str,
+                       now: int) -> None:
+        """Сливает дубли в keeper (hard-merge): поля fill-if-empty, события и
+        интеграции репарентятся, источники объединяются, loser получает alias."""
+        keeper = self.conn.execute(
+            "SELECT * FROM entities WHERE id=?", (keeper_id,)).fetchone()
+        if keeper is None:
+            return
+        donors = [r for r in (self.conn.execute(
+            "SELECT * FROM entities WHERE id=?", (lid,)).fetchone()
+            for lid in loser_ids) if r is not None]
+        donors.sort(key=lambda r: r["updated_ts"] or 0, reverse=True)
+        fills = {}
+        for col in ("body", "owner", "due_ts", "project", "attrs_json"):
+            val = keeper[col]
+            if val is None or val == "":
+                for d in donors:
+                    if d[col] is not None and d[col] != "":
+                        val = d[col]
+                        break
+            fills[col] = val
+        confidence = keeper["confidence"]
+        for d in donors:
+            if d["confidence"] is not None and (
+                    confidence is None or d["confidence"] > confidence):
+                confidence = d["confidence"]
+        updated = keeper["updated_ts"] or keeper["created_ts"] or now
+        for d in donors:
+            ts = d["updated_ts"] or d["created_ts"] or now
+            if ts > updated:
+                updated = ts
+        self.conn.execute(
+            "UPDATE entities SET body=?, owner=?, due_ts=?, project=?, attrs_json=?, "
+            "confidence=?, updated_ts=? WHERE id=?",
+            (fills["body"], fills["owner"], fills["due_ts"], fills["project"],
+             fills["attrs_json"], confidence, updated, keeper_id))
+        self.conn.execute(self._SRC_UPSERT, (
+            keeper_id, keeper["chat_id"], keeper["topic_id"],
+            keeper["created_ts"], keeper["updated_ts"] or keeper["created_ts"]))
+        for d in donors:
+            self.conn.execute(
+                "UPDATE entity_events SET entity_id=? WHERE entity_id=?",
+                (keeper_id, d["id"]))
+            self.conn.execute(
+                "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, "
+                "to_val, chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (keeper_id, None, now, "merge", "dedup", str(d["id"]), str(keeper_id),
+                 None, None, None))
+            for s in self.conn.execute(
+                    "SELECT chat_id, topic_id, first_seen_ts, last_seen_ts "
+                    "FROM entity_sources WHERE entity_id=?", (d["id"],)).fetchall():
+                self.conn.execute(self._SRC_UPSERT, (
+                    keeper_id, s["chat_id"], s["topic_id"],
+                    s["first_seen_ts"], s["last_seen_ts"]))
+            self.conn.execute(self._SRC_UPSERT, (
+                keeper_id, d["chat_id"], d["topic_id"],
+                d["created_ts"], d["updated_ts"] or d["created_ts"]))
+            for sysrow in self.conn.execute(
+                    "SELECT system FROM integrations WHERE entity_id=?",
+                    (d["id"],)).fetchall():
+                clash = self.conn.execute(
+                    "SELECT 1 FROM integrations WHERE entity_id=? AND system=?",
+                    (keeper_id, sysrow["system"])).fetchone()
+                if clash is not None:
+                    self.conn.execute(
+                        "DELETE FROM integrations WHERE entity_id=? AND system=?",
+                        (d["id"], sysrow["system"]))
+                else:
+                    self.conn.execute(
+                        "UPDATE integrations SET entity_id=? "
+                        "WHERE entity_id=? AND system=?",
+                        (keeper_id, d["id"], sysrow["system"]))
+            self.conn.execute(
+                "INSERT INTO entity_aliases(old_entity_id, entity_id, merged_ts, reason) "
+                "VALUES(?,?,?,?)", (d["id"], keeper_id, now, reason))
+            self.conn.execute(
+                "DELETE FROM entity_sources WHERE entity_id=?", (d["id"],))
+            self.conn.execute("DELETE FROM entities WHERE id=?", (d["id"],))
 
     def entity_overdue(self, project: Optional[str] = None, days_ahead: int = 0,
                        limit: int = 100) -> list[dict]:

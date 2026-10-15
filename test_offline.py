@@ -3883,10 +3883,10 @@ def test_services_report(db_path: Path) -> None:
             "'30 дней триал', 'open', 'acme.cloud', ?, ?)", (now - 86400, now - 3600))
         db.conn.execute(
             "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, body, "
-            "status, dedup_key, created_ts, updated_ts) "
+            "status, dedup_key, created_ts, updated_ts, closed_ts) "
             "VALUES(903, 'services', -100567, 1, 'trial', 'Acme trial 30д', "
-            "'триал через второй чат', 'open', 'acme.cloud', ?, ?)",
-            (now - 90000, now - 7200))
+            "'триал через второй чат', 'closed', 'acme.cloud', ?, ?, ?)",
+            (now - 90000, now - 7200, now - 50000))
         db.conn.execute(
             "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
             "created_ts, updated_ts, closed_ts) "
@@ -4082,6 +4082,232 @@ def test_extract_fault_tolerance(db_path: Path) -> None:
           str(cur and cur["value"]))
 
 
+def test_global_dedup(db_path: Path) -> None:
+    print("=== глобальный дедуп: миграция, кросс-скоуп, membership, reopen, race ===")
+    import sqlite3
+    import threading
+
+    gd_db = db_path.parent / "globaldedup.sqlite"
+    if gd_db.exists():
+        gd_db.unlink()
+    with DB(gd_db):
+        pass
+    con = sqlite3.connect(gd_db)
+    con.execute("DROP INDEX IF EXISTS ux_ent_dedup_global")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_ent_dedup "
+                "ON entities(pack, chat_id, topic_id, dedup_key) WHERE closed_ts IS NULL")
+    con.execute("DELETE FROM entity_sources")
+    con.execute(
+        "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, body, status, "
+        "dedup_key, created_ts, updated_ts, closed_ts) VALUES"
+        "(9001, 'services', -100901, 1, 'service', 'Acme из А', NULL, 'open', 'k1', 1000, 1500, NULL),"
+        "(9002, 'services', -100902, 1, 'service', 'Acme из Б', 'тело Б', 'open', 'k1', 2000, 2500, NULL),"
+        "(9003, 'services', -100901, 1, 'service', 'Acme закрытая', NULL, 'closed', 'k1', 3000, 3500, 4000)")
+    con.execute("INSERT INTO entity_events(id, entity_id, ts, op) VALUES"
+                "(9101, 9001, 1000, 'new'), (9102, 9002, 2000, 'new')")
+    con.execute("INSERT INTO integrations(entity_id, system, synced_ts) VALUES"
+                "(9001, 'file', 100), (9002, 'file', 200), (9002, 'notion', 50)")
+    con.commit()
+    con.close()
+
+    with DB(gd_db) as db:
+        rows = {r["id"]: dict(r) for r in db.conn.execute("SELECT * FROM entities")}
+        check(9001 in rows and 9002 not in rows and 9003 in rows,
+              "миграция: open-дубль слит в первосозданного, closed не тронут",
+              str(sorted(rows)))
+        k = rows.get(9001, {})
+        check(k.get("body") == "тело Б" and k.get("updated_ts") == 2500,
+              "миграция: keeper получил body донора и max updated_ts",
+              f"body={k.get('body')} updated={k.get('updated_ts')}")
+        ev = [dict(r) for r in db.conn.execute(
+            "SELECT entity_id, op, from_val, to_val FROM entity_events ORDER BY id")]
+        check(all(e["entity_id"] == 9001 for e in ev)
+              and any(e["op"] == "merge" and e["from_val"] == "9002"
+                      and e["to_val"] == "9001" for e in ev),
+              "миграция: события losers репарентены + merge-маркер", str(ev))
+        ints = sorted((r["entity_id"], r["system"]) for r in db.conn.execute(
+            "SELECT entity_id, system FROM integrations"))
+        synced = db.conn.execute(
+            "SELECT synced_ts FROM integrations WHERE entity_id=9001 AND system='file'"
+        ).fetchone()["synced_ts"]
+        check(ints == [(9001, "file"), (9001, "notion")] and synced == 100,
+              "миграция: integrations перенесены, коллизия — строка keeper побеждает",
+              f"{ints} synced={synced}")
+        al = [tuple(r) for r in db.conn.execute(
+            "SELECT old_entity_id, entity_id, reason FROM entity_aliases")]
+        check(al == [(9002, 9001, "exact")], "миграция: alias 9002→9001 reason=exact", str(al))
+        src = sorted((r["chat_id"], r["topic_id"]) for r in db.conn.execute(
+            "SELECT chat_id, topic_id FROM entity_sources WHERE entity_id=9001"))
+        orphan = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_sources WHERE entity_id=9002").fetchone()["c"]
+        check(src == [(-100902, 1), (-100901, 1)] and orphan == 0,
+              "миграция: у keeper оба скоупа в sources, сирот нет", f"{src} orphan={orphan}")
+        idx = {r["name"] for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        check("ux_ent_dedup" not in idx and "ux_ent_dedup_global" in idx,
+              "миграция: старый индекс снят, глобальный создан", str(sorted(idx)))
+
+    with DB(gd_db) as db:
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        srcn = db.conn.execute("SELECT COUNT(*) c FROM entity_sources").fetchone()["c"]
+        check(n == 2 and srcn == 3, "миграция: повторное открытие идемпотентно",
+              f"n={n} src={srcn}")
+        try:
+            db.conn.execute(
+                "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+                "dedup_key, created_ts, updated_ts) VALUES('services', -100905, 1, "
+                "'service', 'Acme дубль', 'open', 'k1', 5000, 5000)")
+            check(False, "миграция: глобальный индекс не пускает второй open с тем же ключом")
+        except sqlite3.IntegrityError:
+            check(True, "миграция: глобальный индекс не пускает второй open с тем же ключом")
+
+    import extract as extract_mod
+    from packs import PACKS
+    svc = PACKS["services"]
+
+    xs_db = db_path.parent / "xscope.sqlite"
+    if xs_db.exists():
+        xs_db.unlink()
+    now = int(time.time())
+    with DB(xs_db) as db:
+        db.upsert_chat(-100901, "А-чат", None, "supergroup", False, 2)
+        db.upsert_chat(-100902, "Б-чат", None, "supergroup", False, 2)
+        db.upsert_chat(-100903, "В-чат", None, "supergroup", False, 2)
+        db.watch_add(-100901, 1, project="сервисы")
+        db.watch_add(-100902, 1, project="сервисы")
+        for cid, mid, text in ((-100901, 10, "сервис crossscope.com — раздача"),
+                               (-100903, 30, "чужой сервис обсуждение")):
+            ts = now - 60
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, sender_id, "
+                "sender_name, is_service, text) VALUES(?, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                (cid, mid, ts,
+                 datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
+        db.conn.commit()
+
+    def xprov(prompt, pack):
+        chat_id = int(re.search(r"чат (-?\d+)", prompt).group(1))
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        return {"ops": [{
+            "op": "new", "kind": "service", "title": f"Сервис {chat_id}",
+            "entity_id": None, "body": "тело из Б" if chat_id == -100902 else None,
+            "owner": None, "due_text": None, "due_ts": None, "confidence": 0.9,
+            "dedup_hint": "crossscope.com",
+            "evidence": [{"chat_id": chat_id, "msg_id": ids[0],
+                          "quote": "crossscope.com"}]}],
+            "covered_upto_msg_id": max(ids) if ids else 0}
+
+    extract_mod.run(str(xs_db), packs=[svc], provider=xprov, any_scope=True,
+                    all_indexed=True)
+    with DB(xs_db) as db:
+        ts2 = now - 30
+        db.conn.execute(
+            "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, sender_id, "
+            "sender_name, is_service, text) VALUES(-100902, 20, 1, ?, ?, 1, 'Б', 0, "
+            "'сервис crossscope.com — ещё раздача')",
+            (ts2, datetime.fromtimestamp(ts2, timezone.utc).isoformat()))
+        db.conn.commit()
+    extract_mod.run(str(xs_db), packs=[svc], provider=xprov, any_scope=True,
+                    all_indexed=True)
+    with DB(xs_db) as db:
+        ents = [dict(r) for r in db.conn.execute(
+            "SELECT * FROM entities WHERE pack='services'")]
+        check(len(ents) == 1 and ents[0]["title"] == "Сервис -100901"
+              and ents[0]["body"] == "тело из Б",
+              "extract: кросс-скоупный дубль слит в первую сущность, пустое body заполнено",
+              str([(e["title"], e["body"]) for e in ents]))
+        eid = ents[0]["id"] if ents else 0
+        src = sorted((r["chat_id"], r["topic_id"]) for r in db.conn.execute(
+            "SELECT chat_id, topic_id FROM entity_sources WHERE entity_id=?", (eid,)))
+        check(src == [(-100902, 1), (-100901, 1)],
+              "extract: у сущности оба скоупа в entity_sources", str(src))
+        evs = [(r["op"], r["field"]) for r in db.conn.execute(
+            "SELECT op, field FROM entity_events WHERE entity_id=? ORDER BY id", (eid,))]
+        check(evs and evs[0] == ("new", None) and ("update", "dedup") in evs
+              and ("update", "body") in evs,
+              "extract: маркер (update,dedup) + полевое событие только для body", str(evs))
+
+        gate_op_ok = {"op": "update", "kind": "service", "title": "X", "entity_id": eid,
+                      "body": None, "owner": None, "due_text": None, "due_ts": None,
+                      "confidence": None,
+                      "evidence": [{"chat_id": -100902, "msg_id": 20,
+                                    "quote": "crossscope.com"}]}
+        gate_op_bad = dict(gate_op_ok, evidence=[
+            {"chat_id": -100903, "msg_id": 30, "quote": "чужой"}])
+        ok_member, _ = extract_mod._op_valid(
+            db, svc, {"chat_id": -100902, "topic_id": 1}, gate_op_ok, 0, 100)
+        ok_stranger, reason = extract_mod._op_valid(
+            db, svc, {"chat_id": -100903, "topic_id": 1}, gate_op_bad, 0, 100)
+        check(ok_member and not ok_stranger and "вне скоупа" in reason,
+              "extract: update из скоупа-источника разрешён, из чужого — нет",
+              f"member={ok_member} stranger={reason}")
+
+    rt_db = db_path.parent / "reopentwin.sqlite"
+    if rt_db.exists():
+        rt_db.unlink()
+    with DB(rt_db) as db:
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
+            "dedup_key, created_ts, updated_ts, closed_ts) VALUES"
+            "(1, 'services', -100921, 1, 'service', 'Twin A', 'closed', 'tw', 100, 200, 300),"
+            "(2, 'services', -100922, 1, 'service', 'Twin B', 'open', 'tw', 150, 250, NULL)")
+        db.conn.execute("INSERT INTO entity_sources(entity_id, chat_id, topic_id) VALUES"
+                        "(1, -100921, 1), (2, -100922, 1)")
+        ts = now - 60
+        db.conn.execute(
+            "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, sender_id, "
+            "sender_name, is_service, text) VALUES(-100921, 5, 1, ?, ?, 1, 'А', 0, "
+            "'сервис twin возобновлён')",
+            (ts, datetime.fromtimestamp(ts, timezone.utc).isoformat()))
+        db.conn.commit()
+        ok, reason = extract_mod._op_valid(
+            db, svc, {"chat_id": -100921, "topic_id": 1},
+            {"op": "reopen", "kind": "service", "title": "Twin A", "entity_id": 1,
+             "body": None, "owner": None, "due_text": None, "due_ts": None,
+             "confidence": None,
+             "evidence": [{"chat_id": -100921, "msg_id": 5, "quote": "twin"}]}, 0, 100)
+        check(not ok and "живой дубль" in reason,
+              "extract: reopen блокирован живым дублем из ДРУГОГО скоупа", reason)
+
+    race_db = db_path.parent / "deduprace.sqlite"
+    if race_db.exists():
+        race_db.unlink()
+    with DB(race_db):
+        pass
+    results: dict = {}
+    barrier = threading.Barrier(2, timeout=15)
+
+    def racer(cid: int) -> None:
+        w = {"chat_id": cid, "topic_id": 1, "project": None}
+        op = {"op": "new", "kind": "service", "title": f"Сервис {cid}",
+              "entity_id": None, "body": None, "owner": None, "due_text": None,
+              "due_ts": None, "confidence": 0.9, "dedup_hint": "race.scope",
+              "evidence": [{"chat_id": cid, "msg_id": 1, "quote": "q"}]}
+        dbx = DB(race_db)
+        try:
+            barrier.wait()
+            extract_mod._apply_new(dbx, svc, w, op, None, int(time.time()))
+            dbx.conn.commit()
+            results[cid] = "ok"
+        except Exception as exc:
+            results[cid] = f"err {exc}"
+        finally:
+            dbx.close()
+
+    threads = [threading.Thread(target=racer, args=(c,)) for c in (-100931, -100932)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    check(all(v == "ok" for v in results.values()),
+          "extract: гонка двух скоупов с одним ключом — обе нити живы", str(results))
+    with DB(race_db) as db:
+        n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        srcn = db.conn.execute("SELECT COUNT(*) c FROM entity_sources").fetchone()["c"]
+        check(n == 1 and srcn == 2, "extract: гонка дала одну сущность и два sources",
+              f"n={n} src={srcn}")
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4141,6 +4367,7 @@ def main() -> int:
     test_services_report(db_path)
     test_extract_moderation(db_path)
     test_extract_fault_tolerance(db_path)
+    test_global_dedup(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
