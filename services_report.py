@@ -49,9 +49,6 @@ def collect(db_path: str | Path = DB_PATH, pack: str = "services",
         "LEFT JOIN watch w ON w.chat_id = e.chat_id AND w.topic_id = e.topic_id "
         "WHERE e.pack = ?")
     args: list = [pack]
-    if since:
-        sql += " AND COALESCE(e.updated_ts, e.created_ts, 0) >= ?"
-        args.append(since)
     if query:
         sql += " AND (e.title LIKE ? OR e.body LIKE ? OR e.dedup_key LIKE ?)"
         like = f"%{query}%"
@@ -64,15 +61,52 @@ def collect(db_path: str | Path = DB_PATH, pack: str = "services",
                   "SELECT entity_id, chat_id, msg_id, quote FROM entity_events "
                   "WHERE op='new' AND quote IS NOT NULL AND quote != '' "
                   "ORDER BY id")}
+        if since:
+            first_ts = {r["entity_id"]: r["m"] for r in db.conn.execute(
+                "SELECT ee.entity_id, MIN(m.ts) m FROM entity_events ee "
+                "JOIN messages m ON m.chat_id = ee.chat_id AND m.msg_id = ee.msg_id "
+                "GROUP BY ee.entity_id")}
+            rows = [r for r in rows
+                    if (first_ts.get(r["id"]) or r.get("created_ts") or 0) >= since]
+    groups: dict[str, dict] = {}
+    merged: list[dict] = []
     for r in rows:
-        r["source"] = (r["alias"] or r["topic_title"] or r["chat_title"]
-                       or str(r["chat_id"]))
-        r["evidence"] = ev.get(r["id"])
+        src = r["alias"] or r["topic_title"] or r["chat_title"] or str(r["chat_id"])
+        g = {"kind": r["kind"], "title": r["title"], "body": r.get("body"),
+             "status": r["status"], "dedup_key": r.get("dedup_key"),
+             "sources": [src], "created_ts": r.get("created_ts"),
+             "updated_ts": r.get("updated_ts"), "evidence": ev.get(r["id"]),
+             "count": 1}
+        key = r.get("dedup_key")
+        if not key:
+            merged.append(g)
+            continue
+        prev = groups.get(key)
+        if prev is None:
+            groups[key] = g
+        else:
+            prev["count"] += 1
+            if src not in prev["sources"]:
+                prev["sources"].append(src)
+            for f, agg in (("created_ts", min), ("updated_ts", max)):
+                vals = [v for v in (prev.get(f), g.get(f)) if v]
+                if vals:
+                    prev[f] = agg(vals)
+            if g["status"] == "open":
+                prev["status"] = "open"
+            if not prev.get("body") and g.get("body"):
+                prev["body"] = g["body"]
+            if not prev.get("evidence") and g.get("evidence"):
+                prev["evidence"] = g["evidence"]
+    all_groups = list(groups.values()) + merged
     by_kind: dict[str, list[dict]] = {}
-    for r in rows:
-        by_kind.setdefault(r["kind"], []).append(r)
+    for g in all_groups:
+        by_kind.setdefault(g["kind"], []).append(g)
+    for kind in by_kind:
+        by_kind[kind].sort(key=lambda g: (-g["count"],
+                                          -(g.get("updated_ts") or 0)))
     return {"pack": pack, "days": days, "query": query,
-            "total": len(rows), "by_kind": by_kind,
+            "total": len(rows), "groups": len(all_groups), "by_kind": by_kind,
             "generated_ts": int(time.time())}
 
 
@@ -80,7 +114,8 @@ def format_markdown(summary: dict) -> list[str]:
     lines = [f"# Каталог: {summary['pack']}", ""]
     window = f" за {summary['days']}д" if summary.get("days") else ""
     q = f" по запросу «{summary['query']}»" if summary.get("query") else ""
-    lines.append(f"Сущностей: {summary['total']}{window}{q} "
+    lines.append(f"Сущностей: {summary['total']}, групп после склейки: "
+                 f"{summary['groups']}{window}{q} "
                  f"(сгенерировано {_date(summary['generated_ts'])})")
     kinds = KIND_ORDER + [k for k in summary["by_kind"] if k not in KIND_ORDER]
     for kind in kinds:
@@ -88,16 +123,21 @@ def format_markdown(summary: dict) -> list[str]:
         if not rows:
             continue
         lines += ["", f"## {KIND_TITLES.get(kind, kind)} ({len(rows)})", ""]
-        for r in rows:
-            status = "" if r["status"] == "open" else f" [{r['status']}]"
-            body = f" — {r['body']}" if r.get("body") else ""
-            lines.append(f"- **{r['title']}**{status}{body}")
-            meta = f"  источник: {r['source']}, {_date(r.get('updated_ts') or r.get('created_ts'))}"
-            if r.get("dedup_key"):
-                meta += f", ключ: {r['dedup_key']}"
+        for g in rows:
+            status = "" if g["status"] == "open" else f" [{g['status']}]"
+            body = f" — {g['body']}" if g.get("body") else ""
+            mult = f" ×{g['count']}" if g["count"] > 1 else ""
+            lines.append(f"- **{g['title']}**{status}{mult}{body}")
+            src = ", ".join(g["sources"][:5])
+            if len(g["sources"]) > 5:
+                src += f" …(+{len(g['sources']) - 5})"
+            meta = (f"  источники: {src}, "
+                    f"{_date(g.get('updated_ts') or g.get('created_ts'))}")
+            if g.get("dedup_key"):
+                meta += f", ключ: {g['dedup_key'][:12]}"
             lines.append(meta)
-            if r.get("evidence"):
-                chat_id, msg_id, quote = r["evidence"]
+            if g.get("evidence"):
+                _, msg_id, quote = g["evidence"]
                 lines.append(f"  цитата (msg {msg_id}): «{quote}»")
     return lines
 

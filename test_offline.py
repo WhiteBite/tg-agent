@@ -3866,13 +3866,27 @@ def test_services_report(db_path: Path) -> None:
     now = int(time.time())
     with DB(sr_db) as db:
         db.upsert_chat(-100566, "ИИ-канал", None, "channel", False, 1)
+        db.upsert_chat(-100567, "Второй чат", None, "supergroup", False, 2)
         db.upsert_topic(-100566, 1, "General")
         db.watch_add(-100566, 1, alias="ИИ-триалы", project="сервисы")
+        for cid, mid, ts in ((-100566, 777, now - 86400), (-100567, 888, now - 90000)):
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(?, ?, 1, ?, ?, 1, 'А', 0, 'acme.cloud триал раздают')",
+                (cid, mid, ts,
+                 datetime.fromtimestamp(ts, timezone.utc).isoformat()))
         db.conn.execute(
             "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, body, "
             "status, dedup_key, created_ts, updated_ts) "
             "VALUES(901, 'services', -100566, 1, 'trial', 'Acme Cloud', "
             "'30 дней триал', 'open', 'acme.cloud', ?, ?)", (now - 86400, now - 3600))
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, body, "
+            "status, dedup_key, created_ts, updated_ts) "
+            "VALUES(903, 'services', -100567, 1, 'trial', 'Acme trial 30д', "
+            "'триал через второй чат', 'open', 'acme.cloud', ?, ?)",
+            (now - 90000, now - 7200))
         db.conn.execute(
             "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
             "created_ts, updated_ts, closed_ts) "
@@ -3881,27 +3895,36 @@ def test_services_report(db_path: Path) -> None:
         db.conn.execute(
             "INSERT INTO entity_events(entity_id, ts, op, chat_id, msg_id, quote) "
             "VALUES(901, ?, 'new', -100566, 777, 'раздают 30 дней')", (now - 86400,))
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, ts, op, chat_id, msg_id, quote) "
+            "VALUES(903, ?, 'new', -100567, 888, 'acme.cloud триал')", (now - 90000,))
         db.conn.commit()
 
     import services_report as sr
     s = sr.collect(str(sr_db))
-    check(s["total"] == 2 and len(s["by_kind"]["trial"]) == 1
-          and s["by_kind"]["trial"][0]["source"] == "ИИ-триалы"
-          and s["by_kind"]["trial"][0]["evidence"] == (-100566, 777, "раздают 30 дней"),
-          "services_report: collect — группы по kind, алиас watch, evidence из events",
-          str({k: len(v) for k, v in s["by_kind"].items()}))
+    trial = s["by_kind"]["trial"]
+    check(s["total"] == 3 and s["groups"] == 2 and len(trial) == 1
+          and trial[0]["count"] == 2
+          and trial[0]["sources"] == ["ИИ-триалы", "Второй чат"]
+          and trial[0]["evidence"] == (-100566, 777, "раздают 30 дней"),
+          "services_report: rollup по dedup_key — один сервис из двух чатов = одна группа",
+          str(trial)[:200])
 
     s90 = sr.collect(str(sr_db), days=90)
-    check(s90["total"] == 1 and s90["by_kind"].get("service") is None,
-          "services_report: --days отсекает старые по updated_ts", str(s90["total"]))
+    check(s90["total"] == 2 and s90["groups"] == 1
+          and s90["by_kind"].get("service") is None,
+          "services_report: --days отсекает по ts первого evidence (OldSvc без событий — по created)",
+          str(s90["total"]))
     sq = sr.collect(str(sr_db), query="acme")
-    check(sq["total"] == 1 and sq["by_kind"]["trial"][0]["title"] == "Acme Cloud",
+    check(sq["total"] == 2 and sq["groups"] == 1
+          and sq["by_kind"]["trial"][0]["title"] == "Acme Cloud",
           "services_report: --query ищет по title/body/dedup_key", str(sq["total"]))
 
     md = "\n".join(sr.format_markdown(s))
-    check("**Acme Cloud**" in md and "**OldSvc** [closed]" in md
+    check("**Acme Cloud** ×2" in md and "источники: ИИ-триалы, Второй чат" in md
+          and "**OldSvc** [closed]" in md
           and "цитата (msg 777)" in md and "## Триалы (1)" in md,
-          "services_report: markdown — секции по kind, статус, цитата", md[:200])
+          "services_report: markdown — группы, множитель, статус, цитата", md[:300])
 
     out = db_path.parent / "catalog_test.md"
     sr.run(str(sr_db), out=str(out))
