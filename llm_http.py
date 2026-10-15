@@ -21,6 +21,34 @@ def post(req: urllib.request.Request, timeout: float) -> Any:
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
 
 
+def key_list(value: str | None) -> list[str | None]:
+    """*_KEY env: один ключ или список через запятую; пусто → [None] (без авторизации)."""
+    keys = [k.strip() for k in (value or "").split(",") if k.strip()]
+    return keys or [None]
+
+
+def post_json_keys(url: str, keys: list[str | None], payload: dict,
+                   timeout: float) -> Any:
+    """POST JSON с перебором ключей по порядку: 401/403 ротирует следующий,
+    прочие ошибки поднимаются сразу."""
+    data = json.dumps(payload).encode()
+    last: Exception | None = None
+    for key in keys or [None]:
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"})
+        if key:
+            req.add_header("Authorization", f"Bearer {key}")
+        try:
+            return post(req, timeout)
+        except RuntimeError as exc:
+            if "HTTP 401" not in str(exc) and "HTTP 403" not in str(exc):
+                raise
+            last = exc
+    if last is not None:
+        raise last
+    raise RuntimeError("нет ключей")
+
+
 def extra_body(url: str | None) -> dict:
     """DashScope-qwen по умолчанию «думает»: на больших промптах reasoning
     съедает минуты и упирается в таймаут — для structured-извлечения выключаем."""

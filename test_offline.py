@@ -4433,6 +4433,86 @@ def test_fuzzy_dedup(db_path: Path) -> None:
         check(capped["clusters"] == 0, "fuzzy: фильтр pack отсекает чужие", str(capped))
 
 
+def test_key_fallback(db_path: Path) -> None:
+    print("=== llm_http: ротация ключей при 401/403 ===")
+    import http.server
+    import threading
+    from llm_http import key_list, post_json_keys
+
+    check(key_list("sk-a, sk-b") == ["sk-a", "sk-b"],
+          "llm_http: key_list — запятая со стрипом пробелов",
+          str(key_list("sk-a, sk-b")))
+    check(key_list(None) == [None] and key_list("") == [None],
+          "llm_http: key_list пустого значения — [None] (без авторизации)",
+          str(key_list("")))
+
+    seen: list[str] = []
+
+    class KeyHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            auth = self.headers.get("Authorization", "")
+            seen.append(auth)
+            if auth == "Bearer sk-dead":
+                body = b'{"error":{"code":"invalid_api_key"}}'
+                self.send_response(401)
+            elif auth == "Bearer sk-gone":
+                body = b'{"error":{"code":"forbidden"}}'
+                self.send_response(403)
+            else:
+                body = b'{"ok": true}'
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), KeyHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}/v1/chat"
+    try:
+        got = post_json_keys(url, ["sk-dead", "sk-gone", "sk-alive"], {"a": 1}, 10)
+        check(got == {"ok": True}
+              and seen == ["Bearer sk-dead", "Bearer sk-gone", "Bearer sk-alive"],
+              "llm_http: post_json_keys ротирует ключи на 401 и 403", str(seen))
+        seen.clear()
+        try:
+            post_json_keys(url, ["sk-dead", "sk-dead"], {"a": 1}, 10)
+            check(False, "llm_http: все ключи мертвы — RuntimeError с телом")
+        except RuntimeError as exc:
+            check("401" in str(exc),
+                  "llm_http: все ключи мертвы — RuntimeError с телом", str(exc)[:80])
+        seen.clear()
+        try:
+            post_json_keys(url, ["sk-alive"], {"a": 1}, 10)
+            check(seen == ["Bearer sk-alive"],
+                  "llm_http: живой ключ — один запрос без ротации", str(seen))
+        except RuntimeError:
+            check(False, "llm_http: живой ключ — один запрос без ротации")
+
+        import extract as extract_mod
+        saved = {k: os.environ.get(k) for k in ("EXTRACT_KEY", "EXTRACT_URL")}
+        os.environ["EXTRACT_KEY"] = "sk-dead,sk-alive"
+        os.environ["EXTRACT_URL"] = url
+        seen.clear()
+        try:
+            data = extract_mod._post(url, os.environ["EXTRACT_KEY"], {"a": 1})
+            check(data == {"ok": True} and len(seen) == 2
+                  and seen[-1] == "Bearer sk-alive",
+                  "extract: _post ротирует список EXTRACT_KEY через запятую", str(seen))
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    finally:
+        srv.shutdown()
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4495,6 +4575,7 @@ def main() -> int:
     test_global_dedup(db_path)
     test_readers_global_dedup(db_path)
     test_fuzzy_dedup(db_path)
+    test_key_fallback(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

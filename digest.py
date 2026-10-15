@@ -12,11 +12,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
-import urllib.request
 from collections import Counter
 from pathlib import Path
 
@@ -30,7 +28,7 @@ from env import load_env  # noqa: E402
 load_env()
 
 from db import DB  # noqa: E402
-from llm_http import call_with_deadline, extra_body, post  # noqa: E402
+from llm_http import call_with_deadline, extra_body, key_list, post_json_keys  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -81,16 +79,10 @@ def summarize_openai(context: str) -> str:
         ],
     }
     body.update(extra_body(url))
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    key = os.environ.get("DIGEST_KEY")
-    if key:
-        req.add_header("Authorization", f"Bearer {key}")
+    keys = key_list(os.environ.get("DIGEST_KEY"))
 
     def _fetch() -> str:
-        return post(req, 120)["choices"][0]["message"]["content"]
+        return post_json_keys(url, keys, body, 120)["choices"][0]["message"]["content"]
 
     deadline = float(os.environ.get("DIGEST_TIMEOUT") or 240)
     return call_with_deadline(_fetch, deadline)

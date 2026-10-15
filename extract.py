@@ -33,7 +33,6 @@ import sqlite3
 import sys
 import time
 import unicodedata
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,7 +46,7 @@ load_env()
 from db import DB  # noqa: E402
 from packs import PACKS  # noqa: E402
 import media as media_mod  # noqa: E402
-from llm_http import call_with_deadline, extra_body, post  # noqa: E402
+from llm_http import call_with_deadline, extra_body, key_list, post_json_keys  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -163,12 +162,7 @@ def provider_stub(prompt: str, pack: dict) -> dict:
 
 
 def _post(url: str, key: str | None, payload: dict) -> dict:
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"})
-    if key:
-        req.add_header("Authorization", f"Bearer {key}")
-    return post(req, 300)
+    return post_json_keys(url, key_list(key), payload, 300)
 
 
 _PROVIDER_SYSTEM = (
