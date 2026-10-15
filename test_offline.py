@@ -3495,6 +3495,7 @@ def test_llm_extra_body(db_path: Path) -> None:
 
     class Handler400(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
             body = b'{"error": {"message": "data_inspection_failed"}}'
             self.send_response(400)
             self.send_header("Content-Type", "application/json")
@@ -4241,6 +4242,20 @@ def test_global_dedup(db_path: Path) -> None:
         check(ok_member and not ok_stranger and "вне скоупа" in reason,
               "extract: update из скоупа-источника разрешён, из чужого — нет",
               f"member={ok_member} stranger={reason}")
+
+    with DB(xs_db) as db:
+        for t in ("entities", "entity_events", "entity_sources", "entity_aliases"):
+            db.conn.execute(f"DELETE FROM {t}")
+        db.conn.execute("DELETE FROM meta WHERE key LIKE 'extract:%'")
+        db.conn.commit()
+    extract_mod.run(str(xs_db), packs=[svc], provider=xprov, any_scope=True,
+                    all_indexed=True)
+    with DB(xs_db) as db:
+        ents = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+        srcn = db.conn.execute("SELECT COUNT(*) c FROM entity_sources").fetchone()["c"]
+        check(ents == 1 and srcn == 2,
+              "extract: конвергенция пересчёта — wipe+ре-extract даёт то же merged-состояние",
+              f"ents={ents} src={srcn}")
 
     rt_db = db_path.parent / "reopentwin.sqlite"
     if rt_db.exists():
