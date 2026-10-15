@@ -27,6 +27,7 @@ from env import load_env  # noqa: E402
 load_env()
 
 from db import DB, extract_refs  # noqa: E402
+import proclock  # noqa: E402
 import sync as sync_mod  # noqa: E402
 import media as media_mod  # noqa: E402
 
@@ -64,6 +65,9 @@ def handle_message(db: DB, msg, chat_id: int, forum: bool) -> bool:
 
 
 async def main() -> None:
+    lock = proclock.acquire_instance_lock(str(DB_PATH) + ".live.lock")
+    if lock is None:
+        raise SystemExit("live.py уже запущен (lockfile занят)")
     from telethon import TelegramClient, events
     from telethon.sessions import StringSession
 

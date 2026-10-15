@@ -6,6 +6,7 @@
 *.sqlite-wal
 *.sqlite-shm
 *.jsonl
+*.lock
 
 # python
 __pycache__/

@@ -4839,6 +4839,46 @@ def test_media_download(db_path: Path) -> None:
                 os.environ[k] = v
 
 
+def test_proclock(db_path: Path) -> None:
+    print("=== proclock: lockfile одиночного инстанса ===")
+    import proclock
+    lp = db_path.parent / "test.lock"
+    fh = proclock.acquire_instance_lock(lp)
+    check(fh is not None, "proclock: первый захват lockfile успешен")
+    fh2 = proclock.acquire_instance_lock(lp)
+    check(fh2 is None, "proclock: второй инстанс получает отказ")
+    fh.close()
+    fh3 = proclock.acquire_instance_lock(lp)
+    check(fh3 is not None, "proclock: после освобождения захватывается снова")
+    fh3.close()
+
+    import pipeline as pipeline_mod
+    pl = db_path.parent / "pllock.sqlite"
+    fh4 = proclock.acquire_instance_lock(str(pl) + ".pipeline.lock")
+    try:
+        asyncio.run(pipeline_mod.run_loop(str(pl), None, 7, False, 30))
+        check(False, "pipeline: run_loop не стартует при занятом lockfile")
+    except SystemExit as exc:
+        check("lockfile" in str(exc),
+              "pipeline: run_loop не стартует при занятом lockfile", str(exc))
+    finally:
+        fh4.close()
+
+    import live as live_mod
+    saved = live_mod.DB_PATH
+    live_mod.DB_PATH = str(db_path.parent / "livelock.sqlite")
+    fh5 = proclock.acquire_instance_lock(live_mod.DB_PATH + ".live.lock")
+    try:
+        asyncio.run(live_mod.main())
+        check(False, "live: main не стартует при занятом lockfile")
+    except SystemExit as exc:
+        check("lockfile" in str(exc),
+              "live: main не стартует при занятом lockfile", str(exc))
+    finally:
+        fh5.close()
+        live_mod.DB_PATH = saved
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4905,6 +4945,7 @@ def main() -> int:
     test_key_fallback(db_path)
     test_extract_windows(db_path)
     test_media_download(db_path)
+    test_proclock(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

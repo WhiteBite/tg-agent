@@ -29,6 +29,7 @@ from env import load_env  # noqa: E402
 
 load_env()
 
+import proclock  # noqa: E402
 import sync as sync_mod  # noqa: E402
 import media as media_mod  # noqa: E402
 import extract as extract_mod  # noqa: E402
@@ -111,6 +112,9 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
 
 async def run_loop(db_path: str, pack_id: str | None, days_ahead: int,
                    send: bool, minutes: int) -> None:
+    lock = proclock.acquire_instance_lock(str(db_path) + ".pipeline.lock")
+    if lock is None:
+        raise SystemExit("pipeline --loop уже запущен (lockfile занят)")
     while True:
         stamp = time.strftime("%H:%M:%S")
         report = await run(db_path, pack_id=pack_id, days_ahead=days_ahead, send=send)
