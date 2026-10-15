@@ -4371,6 +4371,53 @@ def test_readers_global_dedup(db_path: Path) -> None:
           "db: merge_entities пишет alias для редиректа", str(al and tuple(al)))
 
 
+def test_fuzzy_dedup(db_path: Path) -> None:
+    print("=== fuzzy_dedup: слияние по нормализованному title ===")
+    fz_db = db_path.parent / "fuzzy.sqlite"
+    if fz_db.exists():
+        fz_db.unlink()
+    with DB(fz_db) as db:
+        db.upsert_chat(-100951, "Чат1", None, "supergroup", False, 2)
+        db.upsert_chat(-100952, "Чат2", None, "supergroup", False, 2)
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, body, status, "
+            "dedup_key, created_ts, updated_ts, closed_ts) VALUES"
+            "(8001, 'services', -100951, 1, 'promo', 'OpenAI Ключи', NULL, 'open', 'kA', 1000, 1500, NULL),"
+            "(8002, 'services', -100952, 1, 'promo', 'openai  ключи!', 'раздают ключи', 'open', 'kB', 2000, 2500, NULL),"
+            "(8003, 'services', -100952, 1, 'service', 'openai ключи', NULL, 'open', 'kC', 1500, 1500, NULL),"
+            "(8004, 'services', -100951, 1, 'promo', 'OpenAI Ключи', NULL, 'closed', 'kA2', 900, 900, 950)")
+        db.conn.commit()
+
+    import fuzzy_dedup
+    rep = fuzzy_dedup.run(str(fz_db), dry_run=True)
+    check(rep["clusters"] == 1 and rep["merged"] == 0,
+          "fuzzy: dry-run находит кластер и не трогает БД", str(rep))
+
+    rep = fuzzy_dedup.run(str(fz_db))
+    with DB(fz_db) as db:
+        rows = {r["id"]: dict(r) for r in db.conn.execute("SELECT * FROM entities")}
+        check(8002 in rows and 8001 not in rows and 8003 in rows and 8004 in rows,
+              "fuzzy: keeper — наполненный 8002; другой kind и closed не тронуты",
+              str(sorted(rows)))
+        check(rep["merged"] == 1 and rows[8002]["title"] == "openai  ключи!",
+              "fuzzy: merged=1, title keeper'а сохранён", str(rows[8002]["title"]))
+        al = db.conn.execute(
+            "SELECT entity_id, reason FROM entity_aliases WHERE old_entity_id=8001").fetchone()
+        check(al is not None and al["entity_id"] == 8002 and al["reason"] == "fuzzy-title",
+              "fuzzy: alias 8001→8002 reason=fuzzy-title", str(al and tuple(al)))
+        src = {r["chat_id"] for r in db.conn.execute(
+            "SELECT chat_id FROM entity_sources WHERE entity_id=8002")}
+        check(src == {-100951, -100952}, "fuzzy: sources keeper'а — оба чата", str(src))
+
+    rep2 = fuzzy_dedup.run(str(fz_db))
+    check(rep2["clusters"] == 0 and rep2["merged"] == 0,
+          "fuzzy: повторный прогон идемпотентен", str(rep2))
+
+    with DB(fz_db) as db:
+        capped = fuzzy_dedup.run(str(fz_db), pack="nonexistent")
+        check(capped["clusters"] == 0, "fuzzy: фильтр pack отсекает чужие", str(capped))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4432,6 +4479,7 @@ def main() -> int:
     test_extract_fault_tolerance(db_path)
     test_global_dedup(db_path)
     test_readers_global_dedup(db_path)
+    test_fuzzy_dedup(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
