@@ -3758,6 +3758,75 @@ def test_extract_prefilter(db_path: Path) -> None:
           "extract: EXTRACT_PREFILTER=0 отключает префильтр", f"calls={len(calls)}")
 
 
+def test_extract_scoping(db_path: Path) -> None:
+    print("=== extract: any-scope, seed-days, override окна ===")
+    sc_db = db_path.parent / "scoping.sqlite"
+    if sc_db.exists():
+        sc_db.unlink()
+    now = int(time.time())
+    with DB(sc_db) as db:
+        db.upsert_chat(-100565, "Без проекта", None, "supergroup", False, 2)
+        for mid, age in ((61, 120 * 86400), (62, 45 * 86400), (63, 60)):
+            ts = now - age
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100565, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                 f"сервис sc{mid}.com — раздача"))
+        db.conn.commit()
+    import extract as extract_mod
+    from packs import PACKS
+    svc = PACKS["services"]
+
+    def count_prov(prompt, pack):
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ops = [{"op": "new", "kind": "service", "title": f"Сервис {i}",
+                "entity_id": None, "body": None, "owner": None, "due_text": None,
+                "due_ts": None, "confidence": 0.9,
+                "evidence": [{"chat_id": -100565, "msg_id": i, "quote": f"sc{i}.com"}]}
+               for i in ids]
+        return {"ops": ops, "covered_upto_msg_id": max(ids) if ids else 0}
+
+    made = extract_mod.run(str(sc_db), packs=[svc], provider=count_prov,
+                           all_indexed=True)
+    check(made == [],
+          "extract: без any-scope пакет со scope-фильтром не трогает чужие области",
+          str(made))
+
+    seeded = extract_mod.seed_cursors(str(sc_db), 90, packs=[svc],
+                                      all_indexed=True, any_scope=True)
+    with DB(sc_db) as db:
+        cur = db.conn.execute(
+            "SELECT value FROM meta WHERE key='extract:-100565:1:services'").fetchone()
+    check(len(seeded) == 1 and cur is not None and int(cur["value"]) == 61,
+          "extract: seed-days ставит курсор на границу окна (MIN(msg_id)-1)",
+          f"seeded={seeded} cur={cur and cur['value']}")
+
+    made2 = extract_mod.run(str(sc_db), packs=[svc], provider=count_prov,
+                            all_indexed=True, any_scope=True)
+    with DB(sc_db) as db:
+        n = db.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE pack='services'").fetchone()["c"]
+    check(len(made2) == 1 and made2[0]["messages"] == 2 and n == 2,
+          "extract: any-scope обрабатывает области вне scope-фильтра (62,63 после посева)",
+          f"made={made2} ents={n}")
+
+    with DB(sc_db) as db:
+        db.conn.execute("DELETE FROM meta WHERE key LIKE 'extract:%'")
+        db.conn.execute("DELETE FROM entities")
+        db.conn.commit()
+    os.environ["EXTRACT_BACKFILL_DAYS"] = "30"
+    try:
+        made3 = extract_mod.run(str(sc_db), packs=[svc], provider=count_prov,
+                                all_indexed=True, any_scope=True)
+    finally:
+        os.environ.pop("EXTRACT_BACKFILL_DAYS", None)
+    check(len(made3) == 1 and made3[0]["messages"] == 1,
+          "extract: EXTRACT_BACKFILL_DAYS переопределяет окно первого прогона (только msg 63)",
+          str(made3))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3813,6 +3882,7 @@ def main() -> int:
     test_evidence_norm(db_path)
     test_extract_bisection(db_path)
     test_extract_prefilter(db_path)
+    test_extract_scoping(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

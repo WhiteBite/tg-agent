@@ -457,7 +457,8 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
     args: list = [chat_id, topic_id, cursor if cursor is not None else 0]
     if cursor is None:
         sql += " AND ts>=?"
-        args.append(int(time.time()) - pack["backfill_days"] * 86400)
+        window_days = int(os.environ.get("EXTRACT_BACKFILL_DAYS") or 0) or pack["backfill_days"]
+        args.append(int(time.time()) - window_days * 86400)
     rows = [dict(r) for r in db.conn.execute(
         sql + " ORDER BY msg_id LIMIT ?", args + [MAX_MESSAGES_PER_RUN])]
     if not rows:
@@ -607,24 +608,61 @@ def _drain_scope(db_path: str, pack: dict, w: dict, prov, dry_run: bool,
     return made
 
 
+def _resolve_packs(pack_id: str | None, packs: list | None) -> list:
+    if packs is not None:
+        return packs
+    if pack_id is not None:
+        if pack_id not in PACKS:
+            raise SystemExit(f"неизвестный пакет: {pack_id}")
+        return [PACKS[pack_id]]
+    return list(PACKS.values())
+
+
+def seed_cursors(db_path: str, days: int, pack_id: str | None = None,
+                 all_indexed: bool = False, any_scope: bool = False,
+                 packs: list | None = None) -> list[dict]:
+    """Сеет курсоры extract на границу окна N дней: MIN(msg_id в окне) − 1.
+
+    Скоупы без сообщений в окне получают удалённый курсор — их первый прогон
+    заново откроет окно pack.backfill_days. Уже оплаченный недавний хвост не
+    репроцессится: курсор стоит прямо перед началом окна."""
+    packs = _resolve_packs(pack_id, packs)
+    boundary = int(time.time()) - days * 86400
+    out: list[dict] = []
+    with DB(db_path) as db:
+        for pack in packs:
+            for w in _scopes(db, all_indexed):
+                if not any_scope and not scope_matches(pack["scope_filter"], w):
+                    continue
+                key = f"extract:{w['chat_id']}:{w['topic_id']}:{pack['id']}"
+                row = db.conn.execute(
+                    "SELECT MIN(msg_id) m FROM messages WHERE chat_id=? AND topic_id=? "
+                    "AND ts >= ?", (w["chat_id"], w["topic_id"], boundary)).fetchone()
+                if row and row["m"] is not None:
+                    db.conn.execute(
+                        "INSERT INTO meta(key, value) VALUES(?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (key, str(row["m"] - 1)))
+                    out.append({"scope": key, "cursor": row["m"] - 1})
+                else:
+                    db.conn.execute("DELETE FROM meta WHERE key=?", (key,))
+        db.conn.commit()
+    return out
+
+
 def run(db_path: str = DB_PATH, pack_id: str | None = None,
         dry_run: bool = False, provider=None, packs: list | None = None,
         all_indexed: bool = False, until_done: bool = False,
-        max_rounds: int = 100, workers: int | None = None) -> list[dict]:
+        max_rounds: int = 100, workers: int | None = None,
+        any_scope: bool = False) -> list[dict]:
     prov = get_provider(provider)
-    if packs is None:
-        if pack_id is not None:
-            if pack_id not in PACKS:
-                raise SystemExit(f"неизвестный пакет: {pack_id}")
-            packs = [PACKS[pack_id]]
-        else:
-            packs = list(PACKS.values())
+    packs = _resolve_packs(pack_id, packs)
     workers = max(1, workers if workers is not None
                   else int(os.environ.get("EXTRACT_WORKERS") or 1))
     with DB(db_path) as db:
         tasks = [(pack, w) for pack in packs
                  for w in _scopes(db, all_indexed)
-                 if scope_matches(pack["scope_filter"], w)]
+                 if any_scope or scope_matches(pack["scope_filter"], w)]
     if not tasks:
         return []
     if workers == 1 or dry_run or len(tasks) == 1:
@@ -658,9 +696,21 @@ def main() -> None:
     pack_id = _arg_value(args, "--pack")
     db_path = _arg_value(args, "--db") or DB_PATH
     workers = _arg_value(args, "--workers")
+    max_rounds = int(_arg_value(args, "--max-rounds") or 100)
+    seed_days = _arg_value(args, "--seed-days")
+    if seed_days:
+        seeded = seed_cursors(db_path, int(seed_days), pack_id=pack_id,
+                              all_indexed="--all-indexed" in args,
+                              any_scope="--any-scope" in args)
+        print(f"посеяно курсоров на границу {seed_days}д: {len(seeded)}")
+        for s in seeded[:30]:
+            print(f"  {s['scope']} -> {s['cursor']}")
+        return
     made = run(db_path, pack_id=pack_id, dry_run=dry_run,
                all_indexed="--all-indexed" in args,
+               any_scope="--any-scope" in args,
                until_done="--until-done" in args,
+               max_rounds=max_rounds,
                workers=int(workers) if workers else None)
     total = sum(m["ops_applied"] for m in made)
     overflow = sum(m["ops_overflow"] for m in made)
