@@ -4591,6 +4591,120 @@ def test_report_topn(db_path: Path) -> None:
           top_out.read_text(encoding="utf-8").splitlines()[2][:120])
 
 
+def test_extract_windows(db_path: Path) -> None:
+    print("=== extract: оконный параллелизм внутри скоупа ===")
+    import io
+    from contextlib import redirect_stdout
+    wn_db = db_path.parent / "windows.sqlite"
+    if wn_db.exists():
+        wn_db.unlink()
+    now = int(time.time())
+    with DB(wn_db) as db:
+        db.upsert_chat(-100586, "Оконный", None, "supergroup", False, 2)
+        db.watch_add(-100586, 1, project="сервисы")
+        for mid in range(1, 31):
+            ts = now - 600 + mid
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text) "
+                "VALUES(-100586, ?, 1, ?, ?, 1, 'А', 0, ?)",
+                (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                 f"сервис win{mid}.com — раздача"))
+        db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES('extract:-100586:1:services', '0')")
+        db.conn.commit()
+
+    import extract as extract_mod
+    from packs import PACKS
+    svc = PACKS["services"]
+    base = "extract:-100586:1:services"
+
+    def wprov(prompt, pack):
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ops = [{"op": "new", "kind": "service", "title": f"Сервис win{i}",
+                "entity_id": None, "body": None, "owner": None, "due_text": None,
+                "due_ts": None, "confidence": 0.9, "dedup_hint": f"win{i}.com",
+                "evidence": [{"chat_id": -100586, "msg_id": i,
+                              "quote": f"win{i}.com"}]} for i in ids]
+        return {"ops": ops, "covered_upto_msg_id": max(ids) if ids else 0}
+
+    buf = io.StringIO()
+    os.environ["EXTRACT_WINDOW_MIN"] = "10"
+    try:
+        with redirect_stdout(buf):
+            extract_mod.run(str(wn_db), packs=[svc], provider=wprov,
+                            until_done=True, workers=3)
+        with DB(wn_db) as db:
+            n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+            cur = db.conn.execute(
+                "SELECT value FROM meta WHERE key=?", (base,)).fetchone()
+            plan = db.conn.execute(
+                "SELECT value FROM meta WHERE key=?", (base + ":wins",)).fetchone()
+            subs = db.conn.execute(
+                "SELECT COUNT(*) c FROM meta WHERE key LIKE ?",
+                (base + ":w_",)).fetchone()["c"]
+        out = buf.getvalue()
+        check("[w" in out, "extract: окна работали параллельно (маркеры [wN] в логе)",
+              out[-200:])
+        check(n == 30, "extract: окна покрыли все 30 сообщений без потерь и дублей",
+              str(n))
+        check(cur is not None and int(cur["value"]) == 30,
+              "extract: promotion — главный курсор на конце плана",
+              str(cur and cur["value"]))
+        check(plan is None and subs == 0,
+              "extract: план и sub-курсоры убраны после завершения",
+              f"plan={plan and plan['value']} subs={subs}")
+
+        with DB(wn_db) as db:
+            db.conn.execute("DELETE FROM entities")
+            db.conn.execute("DELETE FROM entity_events")
+            db.conn.execute("DELETE FROM entity_sources")
+            db.conn.execute("UPDATE meta SET value='15' WHERE key=?", (base,))
+            db.conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (base + ":wins", "[[0, 15], [15, 30]]"))
+            db.conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (base + ":w0", "15"))
+            db.conn.commit()
+        extract_mod.run(str(wn_db), packs=[svc], provider=wprov,
+                        until_done=True, workers=3)
+        with DB(wn_db) as db:
+            n2 = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+            cur2 = db.conn.execute(
+                "SELECT value FROM meta WHERE key=?", (base,)).fetchone()
+            leftovers = db.conn.execute(
+                "SELECT COUNT(*) c FROM meta WHERE key LIKE ? OR key LIKE ?",
+                (base + ":w%", base + ":d%")).fetchone()["c"]
+        check(n2 == 15 and cur2 is not None and int(cur2["value"]) == 30
+              and leftovers == 0,
+              "extract: resume плана — дожато только второе окно, promotion и очистка",
+              f"n={n2} cur={cur2 and cur2['value']} left={leftovers}")
+
+        with DB(wn_db) as db:
+            db.conn.execute("UPDATE meta SET value='25' WHERE key=?", (base,))
+            db.conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (base + ":wins", "[[25, 100]]"))
+            db.conn.commit()
+        extract_mod.run(str(wn_db), packs=[svc], provider=wprov,
+                        until_done=True, workers=3)
+        with DB(wn_db) as db:
+            cur3 = db.conn.execute(
+                "SELECT value FROM meta WHERE key=?", (base,)).fetchone()
+            leftovers3 = db.conn.execute(
+                "SELECT COUNT(*) c FROM meta WHERE key LIKE ? OR key LIKE ?",
+                (base + ":w%", base + ":d%")).fetchone()["c"]
+        check(cur3 is not None and int(cur3["value"]) == 100 and leftovers3 == 0,
+              "extract: разреженное окно — курсор штампуется до hi (100), не до msg 30",
+              f"cur={cur3 and cur3['value']} left={leftovers3}")
+    finally:
+        os.environ.pop("EXTRACT_WINDOW_MIN", None)
+
+
 def main() -> int:
     import tempfile
     try:
@@ -4655,6 +4769,7 @@ def main() -> int:
     test_fuzzy_dedup(db_path)
     test_report_topn(db_path)
     test_key_fallback(db_path)
+    test_extract_windows(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

@@ -501,13 +501,18 @@ def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int) -> N
             _apply_new(db, pack, w, op, run_id, now)
 
 
-def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool) -> dict | None:
+def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
+               hi: int | None = None, cursor_key: str | None = None,
+               cursor_floor: int | None = None) -> dict | None:
     chat_id, topic_id = w["chat_id"], w["topic_id"]
-    key = f"extract:{chat_id}:{topic_id}:{pack['id']}"
+    key = cursor_key or f"extract:{chat_id}:{topic_id}:{pack['id']}"
     row = db.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-    cursor = int(row["value"]) if row else None
+    cursor = int(row["value"]) if row else cursor_floor
     sql = "SELECT * FROM messages WHERE chat_id=? AND topic_id=? AND msg_id>? AND is_service=0"
     args: list = [chat_id, topic_id, cursor if cursor is not None else 0]
+    if hi is not None:
+        sql += " AND msg_id<=?"
+        args.append(hi)
     if cursor is None:
         sql += " AND ts>=?"
         window_days = int(os.environ.get("EXTRACT_BACKFILL_DAYS") or 0) or pack["backfill_days"]
@@ -710,6 +715,153 @@ def _drain_scope(db_path: str, pack: dict, w: dict, prov, dry_run: bool,
     return made
 
 
+def _promote_windows(db: DB, pack: dict, w: dict, stamp: tuple[str, int] | None = None,
+                     done_key: str | None = None) -> None:
+    """Штамп исчерпанного окна и продвижение главного курсора: promotion возможен
+    только когда КАЖДОЕ окно выставило done-маркер (пишется лишь при выходе из
+    цикла) — иначе sibling дописал бы sub-курсор после очистки. Всё одной
+    транзакцией BEGIN IMMEDIATE; при снятом плане штампы не пишутся."""
+    base = f"extract:{w['chat_id']}:{w['topic_id']}:{pack['id']}"
+    if db.conn.in_transaction:
+        db.conn.commit()
+    db.conn.execute("BEGIN IMMEDIATE")
+    row = db.conn.execute(
+        "SELECT value FROM meta WHERE key=?", (base + ":wins",)).fetchone()
+    if row is None:
+        db.conn.commit()
+        return
+    if stamp is not None:
+        db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (stamp[0], str(stamp[1])))
+    if done_key is not None:
+        db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?,'1') "
+            "ON CONFLICT(key) DO UPDATE SET value='1'", (done_key,))
+    wins = json.loads(row["value"])
+    for j in range(len(wins)):
+        d = db.conn.execute(
+            "SELECT 1 FROM meta WHERE key=?", (f"{base}:d{j}",)).fetchone()
+        if d is None:
+            db.conn.commit()
+            return
+    db.conn.execute(
+        "INSERT INTO meta(key, value) VALUES(?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (base, str(wins[-1][1])))
+    db.conn.execute("DELETE FROM meta WHERE key=?", (base + ":wins",))
+    for j in range(len(wins)):
+        db.conn.execute("DELETE FROM meta WHERE key IN (?,?)",
+                        (f"{base}:w{j}", f"{base}:d{j}"))
+    db.conn.commit()
+
+
+def _drain_window(db_path: str, pack: dict, w: dict, win: tuple, prov,
+                  dry_run: bool, until_done: bool, max_rounds: int) -> list[dict]:
+    i, lo, hi = win
+    cur_key = f"extract:{w['chat_id']}:{w['topic_id']}:{pack['id']}:w{i}"
+    done_key = f"extract:{w['chat_id']}:{w['topic_id']}:{pack['id']}:d{i}"
+    tag = f"{w['chat_id']}/{w['topic_id']}[w{i}]"
+    made: list[dict] = []
+    rounds = 0
+    net_retries = 0
+    delay = float(os.environ.get("EXTRACT_NET_RETRY_DELAY") or 15)
+    while True:
+        rounds += 1
+        try:
+            with DB(db_path) as db:
+                res = _run_scope(db, pack, w, prov, dry_run, hi=hi,
+                                 cursor_key=cur_key, cursor_floor=lo)
+        except OSError as exc:
+            if net_retries < 3:
+                net_retries += 1
+                rounds -= 1
+                print(f"  ~ {pack['id']} {tag}: сеть — повтор {net_retries}/3 "
+                      f"через {delay:.0f}с", file=sys.stderr, flush=True)
+                time.sleep(delay)
+                continue
+            print(f"  ! {pack['id']} {tag}: {exc}", file=sys.stderr, flush=True)
+            raise RuntimeError(f"область {pack['id']} {tag} сломана: {exc}") from exc
+        except Exception as exc:
+            print(f"  ! {pack['id']} {tag}: {exc}", file=sys.stderr, flush=True)
+            raise RuntimeError(f"область {pack['id']} {tag} сломана: {exc}") from exc
+        if res is None:
+            with DB(db_path) as db:
+                _promote_windows(db, pack, w, stamp=(cur_key, hi),
+                                 done_key=done_key)
+            break
+        made.append(res)
+        if not dry_run:
+            tail = f" overflow={res['ops_overflow']}" if res["ops_overflow"] else ""
+            print(f"  {res['pack']} {tag}: msgs={res['messages']} "
+                  f"ops={res['ops_applied']} rejected={res['ops_rejected']}{tail}",
+                  flush=True)
+        if not until_done or dry_run or rounds >= max_rounds:
+            break
+    return made
+
+
+def _drain_task(db_path: str, pack: dict, w: dict, win, prov, dry_run: bool,
+                until_done: bool, max_rounds: int) -> list[dict]:
+    if win is None:
+        return _drain_scope(db_path, pack, w, prov, dry_run, until_done, max_rounds)
+    return _drain_window(db_path, pack, w, win, prov, dry_run, until_done, max_rounds)
+
+
+def _expand_windows(db: DB, tasks: list, workers: int, windows: int | None,
+                    dry_run: bool) -> list[tuple]:
+    """Крупные скоупы делятся на окна msg_id ДО ветки «последовательно/пул»,
+    иначе единственный большой скоуп никогда не распараллелится."""
+    if dry_run or workers == 1:
+        return [(pack, w, None) for pack, w in tasks]
+    window_min = int(os.environ.get("EXTRACT_WINDOW_MIN") or 2000)
+    out: list[tuple] = []
+    for pack, w in tasks:
+        base = f"extract:{w['chat_id']}:{w['topic_id']}:{pack['id']}"
+        plan_row = db.conn.execute(
+            "SELECT value FROM meta WHERE key=?", (base + ":wins",)).fetchone()
+        if plan_row is not None:
+            out.extend((pack, w, (i, lo, hi))
+                       for i, (lo, hi) in enumerate(json.loads(plan_row["value"])))
+            continue
+        cur_row = db.conn.execute(
+            "SELECT value FROM meta WHERE key=?", (base,)).fetchone()
+        if cur_row is None:
+            out.append((pack, w, None))
+            continue
+        cursor = int(cur_row["value"])
+        agg = db.conn.execute(
+            "SELECT MAX(msg_id) m, COUNT(*) c FROM messages "
+            "WHERE chat_id=? AND topic_id=? AND is_service=0 AND msg_id>?",
+            (w["chat_id"], w["topic_id"], cursor)).fetchone()
+        mx, tail = agg["m"], agg["c"]
+        if mx is None or tail < window_min:
+            out.append((pack, w, None))
+            continue
+        n_win = max(2, min(windows or workers, tail // 500))
+        step = max(1, (mx - cursor) // n_win)
+        wins: list[list[int]] = []
+        lo = cursor
+        for i in range(n_win):
+            w_hi = mx if i == n_win - 1 else min(lo + step, mx)
+            if w_hi <= lo:
+                break
+            wins.append([lo, w_hi])
+            lo = w_hi
+        if len(wins) < 2:
+            out.append((pack, w, None))
+            continue
+        db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (base + ":wins", json.dumps(wins)))
+        db.conn.commit()
+        out.extend((pack, w, (i, w_lo, w_hi))
+                   for i, (w_lo, w_hi) in enumerate(wins))
+    return out
+
+
 def _resolve_packs(pack_id: str | None, packs: list | None) -> list:
     if packs is not None:
         return packs
@@ -756,7 +908,7 @@ def run(db_path: str = DB_PATH, pack_id: str | None = None,
         dry_run: bool = False, provider=None, packs: list | None = None,
         all_indexed: bool = False, until_done: bool = False,
         max_rounds: int = 100, workers: int | None = None,
-        any_scope: bool = False) -> list[dict]:
+        any_scope: bool = False, windows: int | None = None) -> list[dict]:
     prov = get_provider(provider)
     packs = _resolve_packs(pack_id, packs)
     workers = max(1, workers if workers is not None
@@ -765,15 +917,16 @@ def run(db_path: str = DB_PATH, pack_id: str | None = None,
         tasks = [(pack, w) for pack in packs
                  for w in _scopes(db, all_indexed)
                  if any_scope or scope_matches(pack["scope_filter"], w)]
-    if not tasks:
+        expanded = _expand_windows(db, tasks, workers, windows, dry_run)
+    if not expanded:
         return []
-    if workers == 1 or dry_run or len(tasks) == 1:
+    if workers == 1 or dry_run or len(expanded) == 1:
         made: list[dict] = []
         errors: list[str] = []
-        for pack, w in tasks:
+        for pack, w, win in expanded:
             try:
-                made.extend(_drain_scope(db_path, pack, w, prov, dry_run,
-                                         until_done, max_rounds))
+                made.extend(_drain_task(db_path, pack, w, win, prov, dry_run,
+                                        until_done, max_rounds))
             except Exception as exc:
                 errors.append(str(exc))
         if errors:
@@ -783,9 +936,9 @@ def run(db_path: str = DB_PATH, pack_id: str | None = None,
     made = []
     errors = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [pool.submit(_drain_scope, db_path, pack, w, prov, dry_run,
+        futs = [pool.submit(_drain_task, db_path, pack, w, win, prov, dry_run,
                             until_done, max_rounds)
-                for pack, w in tasks]
+                for pack, w, win in expanded]
         for fut in as_completed(futs):
             try:
                 made.extend(fut.result())
@@ -810,6 +963,7 @@ def main() -> None:
     pack_id = _arg_value(args, "--pack")
     db_path = _arg_value(args, "--db") or DB_PATH
     workers = _arg_value(args, "--workers")
+    windows = _arg_value(args, "--windows")
     max_rounds = int(_arg_value(args, "--max-rounds") or 100)
     seed_days = _arg_value(args, "--seed-days")
     if seed_days:
@@ -825,6 +979,7 @@ def main() -> None:
                any_scope="--any-scope" in args,
                until_done="--until-done" in args,
                max_rounds=max_rounds,
+               windows=int(windows) if windows else None,
                workers=int(workers) if workers else None)
     total = sum(m["ops_applied"] for m in made)
     overflow = sum(m["ops_overflow"] for m in made)
