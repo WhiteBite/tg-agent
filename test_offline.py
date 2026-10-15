@@ -3827,6 +3827,57 @@ def test_extract_scoping(db_path: Path) -> None:
           str(made3))
 
 
+def test_services_report(db_path: Path) -> None:
+    print("=== services_report: каталог из сущностей ===")
+    sr_db = db_path.parent / "svcreport.sqlite"
+    if sr_db.exists():
+        sr_db.unlink()
+    now = int(time.time())
+    with DB(sr_db) as db:
+        db.upsert_chat(-100566, "ИИ-канал", None, "channel", False, 1)
+        db.upsert_topic(-100566, 1, "General")
+        db.watch_add(-100566, 1, alias="ИИ-триалы", project="сервисы")
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, body, "
+            "status, dedup_key, created_ts, updated_ts) "
+            "VALUES(901, 'services', -100566, 1, 'trial', 'Acme Cloud', "
+            "'30 дней триал', 'open', 'acme.cloud', ?, ?)", (now - 86400, now - 3600))
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
+            "created_ts, updated_ts, closed_ts) "
+            "VALUES(902, 'services', -100566, 1, 'service', 'OldSvc', 'closed', "
+            "?, ?, ?)", (now - 200 * 86400, now - 150 * 86400, now - 100 * 86400))
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, ts, op, chat_id, msg_id, quote) "
+            "VALUES(901, ?, 'new', -100566, 777, 'раздают 30 дней')", (now - 86400,))
+        db.conn.commit()
+
+    import services_report as sr
+    s = sr.collect(str(sr_db))
+    check(s["total"] == 2 and len(s["by_kind"]["trial"]) == 1
+          and s["by_kind"]["trial"][0]["source"] == "ИИ-триалы"
+          and s["by_kind"]["trial"][0]["evidence"] == (-100566, 777, "раздают 30 дней"),
+          "services_report: collect — группы по kind, алиас watch, evidence из events",
+          str({k: len(v) for k, v in s["by_kind"].items()}))
+
+    s90 = sr.collect(str(sr_db), days=90)
+    check(s90["total"] == 1 and s90["by_kind"].get("service") is None,
+          "services_report: --days отсекает старые по updated_ts", str(s90["total"]))
+    sq = sr.collect(str(sr_db), query="acme")
+    check(sq["total"] == 1 and sq["by_kind"]["trial"][0]["title"] == "Acme Cloud",
+          "services_report: --query ищет по title/body/dedup_key", str(sq["total"]))
+
+    md = "\n".join(sr.format_markdown(s))
+    check("**Acme Cloud**" in md and "**OldSvc** [closed]" in md
+          and "цитата (msg 777)" in md and "## Триалы (1)" in md,
+          "services_report: markdown — секции по kind, статус, цитата", md[:200])
+
+    out = db_path.parent / "catalog_test.md"
+    sr.run(str(sr_db), out=str(out))
+    check(out.exists() and "Acme Cloud" in out.read_text(encoding="utf-8"),
+          "services_report: --out пишет файл", str(out))
+
+
 def main() -> int:
     import tempfile
     try:
@@ -3883,6 +3934,7 @@ def main() -> int:
     test_extract_bisection(db_path)
     test_extract_prefilter(db_path)
     test_extract_scoping(db_path)
+    test_services_report(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")
