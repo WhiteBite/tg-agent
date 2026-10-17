@@ -4935,6 +4935,53 @@ def test_window_transient(db_path: Path) -> None:
           f"cur={cur and cur['value']} left={left}")
 
 
+def test_live_reconnect_hardening(db_path: Path) -> None:
+    print("=== live: реконнекты без предела (connection_retries=None) ===")
+    import telethon
+    import live as live_mod
+    captured: dict = {}
+
+    class FakeTgClient:
+        def __init__(self, *a, **kw):
+            captured["args"] = a
+            captured.update(kw)
+
+        async def start(self):
+            return None
+
+        async def run_until_disconnected(self):
+            return None
+
+        def on(self, *a, **kw):
+            return lambda f: f
+
+    saved_client = telethon.TelegramClient
+    saved_db = live_mod.DB_PATH
+    saved_ids = live_mod.collect_ids
+    saved_env = {k: os.environ.get(k)
+                 for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH")}
+    live_mod.DB_PATH = str(db_path.parent / "livereconnect.sqlite")
+    live_mod.collect_ids = lambda *a, **kw: (set(), set())
+    os.environ["TELEGRAM_API_ID"] = "1"
+    os.environ["TELEGRAM_API_HASH"] = "x"
+    telethon.TelegramClient = FakeTgClient
+    try:
+        asyncio.run(live_mod.main())
+        check("connection_retries" in captured
+              and captured["connection_retries"] is None,
+              "live: connection_retries=None — Telethon не сдаётся после 5 обрывов",
+              str(captured.get("connection_retries")))
+    finally:
+        telethon.TelegramClient = saved_client
+        live_mod.DB_PATH = saved_db
+        live_mod.collect_ids = saved_ids
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> int:
     import tempfile
     try:
@@ -5003,6 +5050,7 @@ def main() -> int:
     test_window_transient(db_path)
     test_media_download(db_path)
     test_proclock(db_path)
+    test_live_reconnect_hardening(db_path)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

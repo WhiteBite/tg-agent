@@ -79,6 +79,7 @@ async def main() -> None:
     client = TelegramClient(
         StringSession(sess) if sess else os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session"),
         int(api_id), api_hash,
+        connection_retries=None,  # None у Telethon = реконнекты без предела: обрыв связи не должен убивать демона
     )
     await client.start()
 
