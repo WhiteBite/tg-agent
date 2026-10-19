@@ -415,6 +415,52 @@ def test_doctor_quality() -> None:
           out[-300:])
 
 
+def test_doctor_cost() -> None:
+    print("=== doctor --cost: расход токенов по пакетам и прогоны без данных ===")
+    import doctor
+
+    db = TMP / "cost.sqlite"
+    _seed_watch_db(db)
+    now = int(time.time())
+    with DB(db) as d:
+        d.conn.executemany(
+            "INSERT INTO extraction_runs(pack, chat_id, topic_id, ts, ops_applied, "
+            "status, usage_prompt, usage_completion) "
+            "VALUES('construction', -100900, 1, ?, 1, 'ok', ?, ?)",
+            [(now, 100, 50), (now + 1, None, None)])
+        d.conn.commit()
+
+    checks = doctor.cost_checks(str(db))
+    by = {c["name"]: c for c in checks}
+    det = by.get("стоимость [construction]", {}).get("detail", "")
+    check("prompt=100" in det and "completion=50" in det and "прогонов без данных: 1" in det,
+          "doctor --cost: суммы usage и счётчик NULL-прогонов по пакету", det)
+    total = by.get("стоимость: итого", {})
+    check("runs=2" in total.get("detail", "")
+          and "prompt=100" in total.get("detail", "")
+          and "completion=50" in total.get("detail", ""),
+          "doctor --cost: итоговая строка по всем прогонам", total.get("detail"))
+
+    empty = TMP / "cost_empty.sqlite"
+    with DB(empty):
+        pass
+    ec = doctor.cost_checks(str(empty))
+    check(len(ec) == 1 and ec[0]["ok"] is True and "нет данных" in ec[0]["detail"],
+          "doctor --cost: пустая БД — одна проверка «нет данных» без исключения",
+          str(ec))
+
+    env = dict(os.environ, TG_DB=str(db), TG_ENV_FILE="",
+               TELEGRAM_API_ID="1", TELEGRAM_API_HASH="h")
+    proc = subprocess.run(
+        [sys.executable, "-X", "utf8",
+         str(Path(__file__).parent / "doctor.py"), "--cost"],
+        capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
+    out = proc.stdout + proc.stderr
+    check(proc.returncode == 0 and "prompt=100" in out and "completion=50" in out
+          and "прогонов без данных: 1" in out,
+          "doctor --cost (CLI): exit 0 и рендер сумм", f"rc={proc.returncode} {out[-300:]}")
+
+
 def test_digest_bound() -> None:
     print("=== digest: лимит строк не теряет хвост (курсор подбирает) ===")
     import digest as digest_mod
@@ -492,6 +538,7 @@ def main() -> int:
         test_aging_questions()
         test_extract_report_rejected()
         test_doctor_quality()
+        test_doctor_cost()
         test_digest_bound()
         test_loop_until_done_false()
     finally:

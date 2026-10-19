@@ -7,6 +7,8 @@
 (сеть, только по явному запросу; мёртвый ключ виден как HTTP 401).
 --quality: заполненность полей сущностей по пакетам и гистограмма причин
 отказов из extraction_runs.rejects_json.
+--cost: расход токенов (usage_prompt/usage_completion) по пакетам и число
+прогонов без данных об использовании.
 Код возврата: 0 — можно работать (предупреждения допустимы), 1 — есть ошибки.
 """
 
@@ -110,6 +112,40 @@ def quality_checks(db_path: str | Path | None = None) -> list[dict]:
         detail = (", ".join(f"{k}: {v}" for k, v in hist.most_common(10))
                   if hist else "отказов не зафиксировано")
         out.append({"name": "причины отказов", "ok": None, "detail": detail})
+    finally:
+        conn.close()
+    return out
+
+
+def cost_checks(db_path: str | Path | None = None) -> list[dict]:
+    out: list[dict] = []
+    path = Path(db_path or os.environ.get("TG_DB", str(HERE / "tg_index.sqlite")))
+    if not path.exists():
+        return [{"name": "стоимость", "ok": None, "detail": f"нет БД {path}"}]
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+                "SELECT pack, COUNT(*) n, "
+                "SUM(COALESCE(usage_prompt, 0)) prompt, "
+                "SUM(COALESCE(usage_completion, 0)) completion, "
+                "SUM(usage_prompt IS NULL AND usage_completion IS NULL) no_usage "
+                "FROM extraction_runs GROUP BY pack ORDER BY pack").fetchall()
+        if not rows:
+            return [{"name": "стоимость", "ok": True, "detail": "нет данных"}]
+        tot_n = tot_p = tot_c = tot_null = 0
+        for r in rows:
+            tot_n += r["n"]
+            tot_p += r["prompt"]
+            tot_c += r["completion"]
+            tot_null += r["no_usage"]
+            out.append({"name": f"стоимость [{r['pack']}]", "ok": None,
+                        "detail": f"прогонов={r['n']}, prompt={r['prompt']}, "
+                                  f"completion={r['completion']}, "
+                                  f"прогонов без данных: {r['no_usage']}"})
+        out.append({"name": "стоимость: итого", "ok": None,
+                    "detail": f"runs={tot_n}, prompt={tot_p}, completion={tot_c}, "
+                              f"прогонов без данных: {tot_null}"})
     finally:
         conn.close()
     return out
@@ -227,9 +263,12 @@ def main() -> int:
     live = "--live" in sys.argv
     providers = "--providers" in sys.argv
     quality = "--quality" in sys.argv
+    cost = "--cost" in sys.argv
     checks = run_checks(live=live, providers=providers)
     if quality:
         checks.extend(quality_checks())
+    if cost:
+        checks.extend(cost_checks())
     failed = False
     for c in checks:
         mark = "✅" if c["ok"] is True else ("⚠️ " if c["ok"] is None else "❌")
