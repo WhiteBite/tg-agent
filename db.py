@@ -1153,8 +1153,8 @@ class DB:
 
     def entities_list(self, pack: Optional[str] = None, kind: Optional[str] = None,
                       status: Optional[str] = None, project: Optional[str] = None,
-                      chat_id: Optional[int] = None, query: Optional[str] = None,
-                      limit: int = 100) -> list[dict]:
+                      owner: Optional[str] = None, chat_id: Optional[int] = None,
+                      query: Optional[str] = None, limit: int = 100) -> list[dict]:
         sql = "SELECT * FROM entities WHERE 1=1"
         args: list[Any] = []
         if pack is not None:
@@ -1169,6 +1169,9 @@ class DB:
         if project is not None:
             sql += " AND project = ?"
             args.append(project)
+        if owner is not None:
+            sql += " AND owner = ?"
+            args.append(owner)
         if chat_id is not None:
             sql += (" AND (EXISTS(SELECT 1 FROM entity_sources es "
                     "WHERE es.entity_id = entities.id AND es.chat_id = ?) "
@@ -1307,6 +1310,107 @@ class DB:
         sql += " ORDER BY due_ts LIMIT ?"
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args)]
+
+    def entity_changes(self, since_ts: int, pack: Optional[str] = None,
+                       project: Optional[str] = None, limit: int = 500) -> dict:
+        filt = ""
+        args: list[Any] = []
+        if pack is not None:
+            filt += " AND e.pack = ?"
+            args.append(pack)
+        if project is not None:
+            filt += " AND e.project = ?"
+            args.append(project)
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM entities e WHERE e.id IN "
+            "(SELECT entity_id FROM entity_events WHERE ts > ?)" + filt,
+            [since_ts, *args]).fetchone()[0]
+        sql = ("SELECT e.* FROM entities e JOIN "
+               "(SELECT entity_id, MAX(ts) AS max_ts FROM entity_events WHERE ts > ? "
+               "GROUP BY entity_id) ch ON ch.entity_id = e.id WHERE 1=1" + filt +
+               " ORDER BY max_ts DESC, e.id LIMIT ?")
+        items = []
+        for r in self.conn.execute(sql, [since_ts, *args, limit]):
+            d = dict(r)
+            d["events"] = [dict(ev) for ev in self.conn.execute(
+                "SELECT ts, op, field, from_val, to_val, chat_id, msg_id, quote "
+                "FROM entity_events WHERE entity_id = ? AND ts > ? ORDER BY ts, id",
+                (d["id"], since_ts))]
+            items.append(d)
+        return {"since_ts": since_ts, "count": count, "items": items}
+
+    def project_brief(self, project: str, pack: Optional[str] = None) -> dict:
+        where = " WHERE e.project = ?"
+        args: list[Any] = [project]
+        if pack is not None:
+            where += " AND e.pack = ?"
+            args.append(pack)
+        now = int(time.time())
+        counts = {r["status"]: r["n"] for r in self.conn.execute(
+            "SELECT e.status, COUNT(*) n FROM entities e" + where + " GROUP BY e.status",
+            args)}
+        open_n = self.conn.execute(
+            "SELECT COUNT(*) FROM entities e" + where + " AND e.closed_ts IS NULL",
+            args).fetchone()[0]
+        overdue = self.conn.execute(
+            "SELECT COUNT(*) FROM entities e" + where +
+            " AND e.closed_ts IS NULL AND e.due_ts <= ?", args + [now]).fetchone()[0]
+        next_due = self.conn.execute(
+            "SELECT MIN(e.due_ts) FROM entities e" + where +
+            " AND e.closed_ts IS NULL AND e.due_ts IS NOT NULL", args).fetchone()[0]
+        open_questions = self.conn.execute(
+            "SELECT COUNT(*) FROM entities e" + where +
+            " AND e.kind = 'question' AND e.closed_ts IS NULL", args).fetchone()[0]
+        promises_no_due = self.conn.execute(
+            "SELECT COUNT(*) FROM entities e" + where +
+            " AND e.kind = 'promise' AND e.closed_ts IS NULL AND e.due_ts IS NULL",
+            args).fetchone()[0]
+        promises_no_owner = self.conn.execute(
+            "SELECT COUNT(*) FROM entities e" + where +
+            " AND e.kind = 'promise' AND e.closed_ts IS NULL"
+            " AND (e.owner IS NULL OR e.owner = '')", args).fetchone()[0]
+        top_owners = [[r["owner"], r["n"]] for r in self.conn.execute(
+            "SELECT e.owner, COUNT(*) n FROM entities e" + where +
+            " AND e.closed_ts IS NULL AND e.owner IS NOT NULL AND e.owner != ''"
+            " GROUP BY e.owner ORDER BY n DESC, e.owner LIMIT 5", args)]
+        last_event_ts = self.conn.execute(
+            "SELECT MAX(ev.ts) FROM entity_events ev JOIN entities e "
+            "ON e.id = ev.entity_id" + where, args).fetchone()[0]
+        return {
+            "project": project,
+            "pack": pack,
+            "counts": counts,
+            "open": open_n,
+            "overdue": overdue,
+            "next_due": next_due,
+            "open_questions": open_questions,
+            "promises_no_due": promises_no_due,
+            "promises_no_owner": promises_no_owner,
+            "top_owners": top_owners,
+            "last_event_ts": last_event_ts,
+        }
+
+    def project_gaps(self, pack: Optional[str] = None, project: Optional[str] = None,
+                     limit: int = 100) -> dict:
+        where = (" WHERE closed_ts IS NULL AND (kind = 'question'"
+                 " OR (kind = 'promise' AND due_ts IS NULL)"
+                 " OR (kind = 'promise' AND (owner IS NULL OR owner = '')))")
+        args: list[Any] = []
+        if pack is not None:
+            where += " AND pack = ?"
+            args.append(pack)
+        if project is not None:
+            where += " AND project = ?"
+            args.append(project)
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM entities" + where, args).fetchone()[0]
+        sql = ("SELECT id, pack, kind, title, owner, due_ts, project, created_ts, "
+               "CASE WHEN kind = 'question' THEN 'вопрос без ответа' "
+               "WHEN due_ts IS NULL THEN 'обещание без срока' "
+               "ELSE 'обещание без ответственного' END AS reason "
+               "FROM entities" + where + " ORDER BY created_ts, id LIMIT ?")
+        items = [dict(r) for r in self.conn.execute(sql, args + [limit])]
+        return {"count": count, "items": items}
 
     # ---------------- полнотекстовый поиск по истории ----------------
 
