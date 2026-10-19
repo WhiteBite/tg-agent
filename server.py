@@ -293,7 +293,16 @@ def tg_stats(chat_id: int, topic_id: Optional[int] = None, days: Optional[int] =
     ),
 )
 def tg_mark_read(chat_id: int, topic_id: int, mark_read_id: int) -> str:
+    # 0/1 = General: messages хранит General как topic_id=1, иначе MAX уйдёт мимо строк
+    tid = 1 if topic_id in (0, 1) else topic_id
     with _db() as db:
+        max_id = db.conn.execute(
+            "SELECT MAX(msg_id) FROM messages WHERE chat_id=? AND topic_id=?",
+            (chat_id, tid)).fetchone()[0] or 0
+        if mark_read_id > max_id:
+            return _j({"ok": False, "error": "mark_read_id beyond index",
+                       "chat_id": chat_id, "topic_id": topic_id,
+                       "mark_read_id": mark_read_id, "max_msg_id": max_id})
         ok = db.watch_mark_read(chat_id, topic_id, mark_read_id)
     return _j({"ok": ok, "chat_id": chat_id, "topic_id": topic_id, "last_read": mark_read_id})
 

@@ -55,9 +55,7 @@ PACK: dict = {
         "Пиши компактно: body не длиннее 200 символов, только суть; owner, "
         "due_text, due_ts и dedup_hint — null, если данных нет; не дублируй "
         "название сервиса в body.\n\n"
-        "Отвечай строго по предоставленной JSON-схеме. "
-        "covered_upto_msg_id установи равным id последнего фактически "
-        "обработанного сообщения."
+        "Отвечай строго по предоставленной JSON-схеме."
     ),
     "field_policies": {"body": "append"},
     "backfill_days": 30,
@@ -86,7 +84,7 @@ PACK: dict = {
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["ops", "covered_upto_msg_id"],
+        "required": ["ops"],
         "properties": {
             "ops": {
                 "type": "array",
@@ -102,7 +100,6 @@ PACK: dict = {
                         "owner",
                         "due_text",
                         "due_ts",
-                        "confidence",
                         "dedup_hint",
                         "evidence",
                     ],
@@ -115,10 +112,10 @@ PACK: dict = {
                         "owner": {"type": ["string", "null"]},
                         "due_text": {"type": ["string", "null"]},
                         "due_ts": {"type": ["number", "null"]},
-                        "confidence": {"type": "number"},
                         "dedup_hint": {"type": ["string", "null"]},
                         "evidence": {
                             "type": "array",
+                            "minItems": 1,
                             "items": {
                                 "type": "object",
                                 "additionalProperties": False,
@@ -133,7 +130,6 @@ PACK: dict = {
                     },
                 },
             },
-            "covered_upto_msg_id": {"type": "integer"},
         },
     },
 }

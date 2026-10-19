@@ -3,6 +3,7 @@
 
     MEDIA_PROVIDER=stub python3 media.py                # заглушка без сети
     MEDIA_PROVIDER=openai python3 media.py --limit 50   # скачивание + транскрипция
+    python3 media.py --sweep-pending                    # разовый дренаж легаси-pending -> skipped
 
 sync.py и live.py ставят в очередь (таблица media_assets, status=pending) только
 аудио — голосовые и аудио-документы (не-аудио документы не попадают); воркер
@@ -226,6 +227,13 @@ def run(db_path: str = DB_PATH, provider=None, client=None,
                                  limit=limit, kinds=kinds))
 
 
+def sweep_pending(db_path: str = DB_PATH) -> int:
+    with DB(db_path) as db:
+        cur = db.conn.execute(
+            "UPDATE media_assets SET status='skipped' WHERE status='pending'")
+        return cur.rowcount
+
+
 def transcript_map(db: DB, chat_id: int, msg_ids: list[int]) -> dict[int, str]:
     if not msg_ids:
         return {}
@@ -239,6 +247,9 @@ def transcript_map(db: DB, chat_id: int, msg_ids: list[int]) -> dict[int, str]:
 
 def main() -> None:
     args = sys.argv[1:]
+    if "--sweep-pending" in args:
+        print(f"медиа: sweep-pending skipped={sweep_pending()}")
+        return
     limit = int(args[args.index("--limit") + 1]) if "--limit" in args else None
     kinds = (args[args.index("--kinds") + 1].split(",")
              if "--kinds" in args else None)

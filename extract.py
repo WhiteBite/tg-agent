@@ -25,6 +25,7 @@ status=partial), а курсор остаётся до первой отброш
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
@@ -33,7 +34,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -81,19 +82,69 @@ def _norm(text: str | None) -> str:
 
 def _norm_cmp(text: str | None) -> str:
     """Детерминированная нормализация для сравнения цитат: NFKC + casefold +
-    схлопывание пробелов. Цитата обязана остаться подстрокой — provenance цел."""
-    return " ".join(unicodedata.normalize("NFKC", text or "").casefold().split())
+    схлопывание пробелов + ё→е (LLM пишут е). Цитата обязана остаться
+    подстрокой — provenance цел."""
+    return " ".join(unicodedata.normalize("NFKC", text or "")
+                    .casefold().split()).replace("ё", "е")
 
 
 _DUE_FULL_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
 _DUE_SHORT_RE = re.compile(r"\b(\d{1,2})\.(\d{2})\b")
+_DUE_ISO_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+_DUE_MONTH_RE = re.compile(r"\b(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?\b")
+_DUE_DAYOF_RE = re.compile(r"\b(\d{1,2})\s+числ[ау]\b")
+_DUE_DUR_RE = re.compile(
+    r"(?:через\s+)?(\d+)\s*(дней|дня|день|недель|недели|неделю|нед|"
+    r"месяцев|месяца|месяц|мес)\b")
+_DUR_UNITS = {"дней": "d", "дня": "d", "день": "d",
+              "недель": "w", "недели": "w", "неделю": "w", "нед": "w",
+              "месяцев": "m", "месяца": "m", "месяц": "m", "мес": "m"}
+_DUE_BARE_RE = re.compile(r"(?:через\s+)?(недел[ьяиюе]|месяц[ау]?)\b")
+_DUE_CHEREZ_DAY_RE = re.compile(r"\bчерез\s+день\b")
+_MONTHS = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+    "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11,
+    "декабря": 12,
+    "январь": 1, "февраль": 2, "март": 3, "апрель": 4, "май": 5, "июнь": 6,
+    "июль": 7, "август": 8, "сентябрь": 9, "октябрь": 10, "ноябрь": 11,
+    "декабрь": 12,
+    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "июн": 6, "июл": 7,
+    "авг": 8, "сен": 9, "сент": 9, "окт": 10, "ноя": 11, "дек": 12,
+}
+_REL_WORDS = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
+
+
+def _eod(year: int, month: int, day: int) -> int | None:
+    try:
+        return int(datetime(year, month, day, 23, 59, 59,
+                            tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return None
+
+
+def _eod_ts(d: datetime) -> int:
+    return _eod(d.year, d.month, d.day) or 0
+
+
+def _add_months(anchor: datetime, n: int) -> datetime:
+    total = anchor.month - 1 + n
+    year = anchor.year + total // 12
+    month = total % 12 + 1
+    day = min(anchor.day, calendar.monthrange(year, month)[1])
+    return datetime(year, month, day, tzinfo=timezone.utc)
 
 
 def _parse_due_text(due_text: str | None, msg_ts: int | None) -> int | None:
-    """Абсолютная дата из due_text -> unix-ts (полночь UTC). Год без цифр года
-    разрешается по дате сообщения; без неё и без явного года срок неопределим."""
+    """Дата из due_text -> unix-ts конца дня (23:59:59 UTC), чтобы «к 20.10»
+    не считался просроченным в 09:00. Год/месяц без явного указания и
+    относительные формулировки разрешаются по дате сообщения."""
     if not due_text:
         return None
+    m = _DUE_ISO_RE.search(due_text)
+    if m is not None:
+        ts = _eod(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if ts is not None:
+            return ts
     m = _DUE_FULL_RE.search(due_text)
     if m is not None:
         year_s = m.group(3)
@@ -103,24 +154,67 @@ def _parse_due_text(due_text: str | None, msg_ts: int | None) -> int | None:
             year = int(year_s)
         else:
             return None
-        try:
-            return int(datetime(year, int(m.group(2)), int(m.group(1)),
-                                tzinfo=timezone.utc).timestamp())
-        except ValueError:
-            return None
-    m = _DUE_SHORT_RE.search(due_text)
-    if m is None or msg_ts is None:
+        ts = _eod(year, int(m.group(2)), int(m.group(1)))
+        if ts is not None:
+            return ts
+    m = _DUE_MONTH_RE.search(due_text)
+    if m is not None and m.group(2) in _MONTHS:
+        month, day = _MONTHS[m.group(2)], int(m.group(1))
+        if m.group(3) is not None:
+            ts = _eod(int(m.group(3)), month, day)
+            if ts is not None:
+                return ts
+        elif msg_ts is not None:
+            for year in _anchor_years(msg_ts):
+                ts = _eod(year, month, day)
+                if ts is not None and ts >= msg_ts:
+                    return ts
+    if msg_ts is None:
         return None
-    day, month = int(m.group(1)), int(m.group(2))
-    anchor = datetime.fromtimestamp(msg_ts, timezone.utc)
-    for year in (anchor.year, anchor.year + 1):
-        try:
-            d = datetime(year, month, day, tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if d.date() >= anchor.date():
-            return int(d.timestamp())
+    m = _DUE_SHORT_RE.search(due_text)
+    if m is not None:
+        day, month = int(m.group(1)), int(m.group(2))
+        for year in _anchor_years(msg_ts):
+            ts = _eod(year, month, day)
+            if ts is not None and ts >= msg_ts:
+                return ts
+    m = _DUE_DAYOF_RE.search(due_text)
+    if m is not None:
+        day = int(m.group(1))
+        anchor = datetime.fromtimestamp(msg_ts, timezone.utc)
+        for offset in (0, 1):
+            base = _add_months(anchor, offset)
+            ts = _eod(base.year, base.month, day)
+            if ts is not None and ts >= msg_ts:
+                return ts
+    m = _DUE_DUR_RE.search(due_text)
+    if m is not None:
+        n, unit = int(m.group(1)), _DUR_UNITS[m.group(2)]
+        anchor = datetime.fromtimestamp(msg_ts, timezone.utc)
+        if unit == "d":
+            return _eod_ts(anchor + timedelta(days=n))
+        if unit == "w":
+            return _eod_ts(anchor + timedelta(days=7 * n))
+        return _eod_ts(_add_months(anchor, n))
+    m = _DUE_BARE_RE.search(due_text)
+    if m is not None:
+        anchor = datetime.fromtimestamp(msg_ts, timezone.utc)
+        if m.group(1).startswith("недел"):
+            return _eod_ts(anchor + timedelta(days=7))
+        return _eod_ts(_add_months(anchor, 1))
+    if _DUE_CHEREZ_DAY_RE.search(due_text):
+        return _eod_ts(datetime.fromtimestamp(msg_ts, timezone.utc)
+                       + timedelta(days=1))
+    for word, offset in _REL_WORDS.items():
+        if re.search(rf"\b{word}\b", due_text):
+            return _eod_ts(datetime.fromtimestamp(msg_ts, timezone.utc)
+                           + timedelta(days=offset))
     return None
+
+
+def _anchor_years(msg_ts: int) -> tuple[int, int]:
+    year = datetime.fromtimestamp(msg_ts, timezone.utc).year
+    return (year, year + 1)
 
 
 def _evidence_ts(db: DB, op: dict) -> int | None:
@@ -140,16 +234,23 @@ def _op_due_ts(db: DB, op: dict) -> int | float | None:
 
 def scope_matches(scope_filter: dict, w: dict) -> bool:
     sf = scope_filter or {}
+    include_set = False
     for field, key in (("topic_title", "topic_title_regex"),
                        ("alias", "alias_regex"), ("project", "project_regex")):
         rx = sf.get(key)
-        if rx is not None and not re.search(rx, w.get(field) or ""):
-            return False
+        if rx is not None:
+            include_set = True
+            if not re.search(rx, w.get(field) or ""):
+                return False
     ex = sf.get("exclude_project_regex")
     if ex is not None and re.search(ex, w.get("project") or ""):
         return False
     chat_ids = sf.get("chat_ids")
-    if chat_ids is not None and w["chat_id"] not in chat_ids:
+    if chat_ids is not None:
+        include_set = True
+        if w["chat_id"] not in chat_ids:
+            return False
+    if sf.get("require_match") and not include_set:
         return False
     return True
 
@@ -187,13 +288,11 @@ def provider_stub(prompt: str, pack: dict) -> dict:
     chat_m = _CHAT_RE.search(prompt)
     chat_id = int(chat_m.group(1)) if chat_m else 0
     ops: list[dict] = []
-    covered = 0
     for line in prompt.splitlines():
         m = _LINE_RE.match(line)
         if not m:
             continue
         msg_id, text = int(m.group(1)), m.group(4)
-        covered = max(covered, msg_id)
         for kind, trigger in _STUB_TRIGGERS:
             if kind not in pack["kinds"] or trigger not in text:
                 continue
@@ -210,11 +309,10 @@ def provider_stub(prompt: str, pack: dict) -> dict:
                 "owner": owner_m.group(1) if owner_m else None,
                 "due_text": due_m.group(1) if due_m else None,
                 "due_ts": due_ts,
-                "confidence": 0.6,
                 "evidence": [{"chat_id": chat_id, "msg_id": msg_id, "quote": text[:200]}],
             })
             break
-    return {"ops": ops, "covered_upto_msg_id": covered}
+    return {"ops": ops}
 
 
 def _post(url: str, key: str | None, payload: dict) -> dict:
@@ -373,19 +471,51 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
 
 
 def _validate_ops(db: DB, pack: dict, w: dict, ops: list[dict],
-                  lower: int, upto_msg: int) -> tuple[list[dict], int]:
+                  lower: int, upto_msg: int) -> tuple[list[dict], list[dict]]:
     valid: list[dict] = []
-    rejected = 0
+    rejects: list[dict] = []
     for op in ops:
         ok, reason = _op_valid(db, pack, w, op, lower, upto_msg)
         if ok:
             valid.append(op)
         else:
-            rejected += 1
+            rejects.append({
+                "op": op.get("op"),
+                "kind": op.get("kind"),
+                "title": op.get("title"),
+                "reason": reason,
+                "msg_id": (op.get("evidence") or [{}])[0].get("msg_id"),
+            })
             print(f"  - rejected {w['chat_id']}/{w['topic_id']} "
                   f"{op.get('op')}/{op.get('kind')} {(op.get('title') or '')[:40]!r}: {reason}",
                   file=sys.stderr)
-    return valid, rejected
+    return valid, rejects
+
+
+def _rejects_json_col(db: DB) -> bool:
+    return any(r["name"] == "rejects_json" for r in
+               db.conn.execute("PRAGMA table_info(extraction_runs)"))
+
+
+def _insert_run(db: DB, pack: dict, w: dict, from_msg: int, upto: int, now: int,
+                applied: int, rejected: int, overflow: int, status: str,
+                duration_ms: int, meta: dict, rejects: list[dict]) -> int:
+    args: list = [pack["id"], w["chat_id"], w["topic_id"], from_msg, upto, now,
+                  applied, rejected, overflow, status, duration_ms,
+                  meta.get("finish_reason"), meta.get("usage_prompt"),
+                  meta.get("usage_completion")]
+    if _rejects_json_col(db):
+        cur = db.conn.execute(
+            "INSERT INTO extraction_runs(pack, chat_id, topic_id, from_msg, upto_msg, ts, "
+            "ops_applied, ops_rejected, ops_overflow, status, duration_ms, finish_reason, "
+            "usage_prompt, usage_completion, rejects_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            args + [json.dumps(rejects[:50], ensure_ascii=False)])
+    else:
+        cur = db.conn.execute(
+            "INSERT INTO extraction_runs(pack, chat_id, topic_id, from_msg, upto_msg, ts, "
+            "ops_applied, ops_rejected, ops_overflow, status, duration_ms, finish_reason, "
+            "usage_prompt, usage_completion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", args)
+    return cur.lastrowid
 
 
 def _op_pos(op: dict) -> int:
@@ -438,8 +568,10 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
     title = op.get("title") or ""
     hint = op.get("dedup_hint")
     hint = _norm(hint).lower() if isinstance(hint, str) else ""
-    dedup_key = hashlib.sha1(
-        f"{kind}|{hint or _norm(title).lower()}".encode("utf-8")).hexdigest()
+    ident = f"{kind}|{hint or _norm(title).lower()}"
+    if pack.get("dedup_scope") == "project":
+        ident = f"{w.get('project') or ''}|{ident}"
+    dedup_key = hashlib.sha1(ident.encode("utf-8")).hexdigest()
     attrs = {"due_text": op.get("due_text")} if op.get("due_text") else None
     op_due = _op_due_ts(db, op)
     try:
@@ -448,7 +580,7 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
             "due_ts, project, confidence, attrs_json, dedup_key, created_ts, updated_ts) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pack["id"], w["chat_id"], w["topic_id"], kind, title, op.get("body"),
-             op.get("owner"), op_due, w.get("project"), op.get("confidence"),
+             op.get("owner"), op_due, w.get("project"), None,
              json.dumps(attrs, ensure_ascii=False) if attrs is not None else None,
              dedup_key, now, now))
         entity_id = cur.lastrowid
@@ -485,15 +617,10 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
     if (project is None or project == "") and w.get("project"):
         project = w["project"]
         changes.append(("project", row["project"], project))
-    confidence = row["confidence"]
-    op_conf = op.get("confidence")
-    if op_conf is not None and (confidence is None or op_conf > confidence):
-        confidence = op_conf
-        changes.append(("confidence", row["confidence"], confidence))
     db.conn.execute(
-        "UPDATE entities SET body=?, owner=?, due_ts=?, project=?, confidence=?, "
+        "UPDATE entities SET body=?, owner=?, due_ts=?, project=?, "
         "updated_ts=? WHERE id=?",
-        (body, owner, due_ts, project, confidence, now, entity_id))
+        (body, owner, due_ts, project, now, entity_id))
     ev0 = (op.get("evidence") or [{}])[0]
     db.conn.execute(
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
@@ -520,10 +647,13 @@ def _apply_update(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) 
     _apply_supersede(db, pack, op, entity_id, run_id, now)
     title = op.get("title") or row["title"]
     owner = op.get("owner") if op.get("owner") is not None else row["owner"]
-    due_ts = _op_due_ts(db, op)
-    if due_ts is None:
+    op_due = op.get("due_ts")
+    if op_due is not None:
+        due_ts = op_due
+    elif row["due_ts"] is None:
+        due_ts = _parse_due_text(op.get("due_text"), _evidence_ts(db, op))
+    else:
         due_ts = row["due_ts"]
-    confidence = op.get("confidence") if op.get("confidence") is not None else row["confidence"]
     attrs = {"due_text": op.get("due_text")} if op.get("due_text") else None
     attrs_json = json.dumps(attrs, ensure_ascii=False) if attrs is not None else row["attrs_json"]
     old_body = row["body"] or ""
@@ -539,15 +669,14 @@ def _apply_update(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) 
         ("body", row["body"], body),
         ("owner", row["owner"], owner),
         ("due_ts", row["due_ts"], due_ts),
-        ("confidence", row["confidence"], confidence),
         ("attrs_json", row["attrs_json"], attrs_json),
     ) if item[1] != item[2]]
     if not changes:
         return
     db.conn.execute(
-        "UPDATE entities SET title=?, body=?, owner=?, due_ts=?, confidence=?, "
+        "UPDATE entities SET title=?, body=?, owner=?, due_ts=?, "
         "attrs_json=?, updated_ts=? WHERE id=?",
-        (title, body, owner, due_ts, confidence, attrs_json, now, entity_id))
+        (title, body, owner, due_ts, attrs_json, now, entity_id))
     ev = (op.get("evidence") or [{}])[0]
     for field, old, new in changes:
         db.conn.execute(
@@ -598,22 +727,32 @@ def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int) -> N
 
 def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
                hi: int | None = None, cursor_key: str | None = None,
-               cursor_floor: int | None = None) -> dict | None:
+               cursor_floor: int | None = None,
+               only_msg_ids: list[int] | None = None) -> dict | None:
     chat_id, topic_id = w["chat_id"], w["topic_id"]
     key = cursor_key or f"extract:{chat_id}:{topic_id}:{pack['id']}"
-    row = db.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-    cursor = int(row["value"]) if row else cursor_floor
-    sql = "SELECT * FROM messages WHERE chat_id=? AND topic_id=? AND msg_id>? AND is_service=0"
-    args: list = [chat_id, topic_id, cursor if cursor is not None else 0]
-    if hi is not None:
-        sql += " AND msg_id<=?"
-        args.append(hi)
-    if cursor is None:
-        sql += " AND ts>=?"
-        window_days = int(os.environ.get("EXTRACT_BACKFILL_DAYS") or 0) or pack["backfill_days"]
-        args.append(int(time.time()) - window_days * 86400)
-    rows = [dict(r) for r in db.conn.execute(
-        sql + " ORDER BY msg_id LIMIT ?", args + [MAX_MESSAGES_PER_RUN])]
+    if only_msg_ids is not None:
+        ids = sorted(set(only_msg_ids))
+        marks = ",".join("?" * len(ids))
+        rows = [dict(r) for r in db.conn.execute(
+            f"SELECT * FROM messages WHERE chat_id=? AND topic_id=? AND is_service=0 "
+            f"AND msg_id IN ({marks}) ORDER BY msg_id",
+            [chat_id, topic_id] + ids)]
+        cursor = ids[0] - 1
+    else:
+        row = db.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        cursor = int(row["value"]) if row else cursor_floor
+        sql = "SELECT * FROM messages WHERE chat_id=? AND topic_id=? AND msg_id>? AND is_service=0"
+        args: list = [chat_id, topic_id, cursor if cursor is not None else 0]
+        if hi is not None:
+            sql += " AND msg_id<=?"
+            args.append(hi)
+        if cursor is None:
+            sql += " AND ts>=?"
+            window_days = int(os.environ.get("EXTRACT_BACKFILL_DAYS") or 0) or pack["backfill_days"]
+            args.append(int(time.time()) - window_days * 86400)
+        rows = [dict(r) for r in db.conn.execute(
+            sql + " ORDER BY msg_id LIMIT ?", args + [MAX_MESSAGES_PER_RUN])]
     if not rows:
         return None
     lines = _message_lines(db, chat_id, rows)
@@ -648,17 +787,13 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
                         "messages": len(rows), "ops_applied": 0, "ops_rejected": 0,
                         "ops_overflow": 0, "upto_msg": upto_all, "dry_run": True,
                         "skipped": True}
-            db.conn.execute(
-                "INSERT INTO extraction_runs(pack, chat_id, topic_id, from_msg, upto_msg, ts, "
-                "ops_applied, ops_rejected, ops_overflow, status, "
-                "duration_ms, finish_reason, usage_prompt, usage_completion) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (pack["id"], chat_id, topic_id, from_msg, upto_all, int(time.time()),
-                 0, 0, 0, "skipped", 0, None, None, None))
-            db.conn.execute(
-                "INSERT INTO meta(key, value) VALUES(?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, str(max(cursor or 0, upto_all))))
+            _insert_run(db, pack, w, from_msg, upto_all, int(time.time()),
+                        0, 0, 0, "skipped", 0, {}, [])
+            if only_msg_ids is None:
+                db.conn.execute(
+                    "INSERT INTO meta(key, value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, str(max(cursor or 0, upto_all))))
             db.conn.commit()
             return {"pack": pack["id"], "chat_id": chat_id, "topic_id": topic_id,
                     "messages": len(rows), "ops_applied": 0, "ops_rejected": 0,
@@ -689,18 +824,14 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
                         "messages": 1, "ops_applied": 0, "ops_rejected": 0,
                         "ops_overflow": 0, "upto_msg": bad_id,
                         "dry_run": True, "filtered": True}
-            db.conn.execute(
-                "INSERT INTO extraction_runs(pack, chat_id, topic_id, from_msg, upto_msg, ts, "
-                "ops_applied, ops_rejected, ops_overflow, status, "
-                "duration_ms, finish_reason, usage_prompt, usage_completion) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (pack["id"], chat_id, topic_id, from_msg, bad_id, int(time.time()),
-                 0, 0, 0, "filtered", int((time.monotonic() - t0) * 1000),
-                 None, None, None))
-            db.conn.execute(
-                "INSERT INTO meta(key, value) VALUES(?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, str(max(cursor or 0, bad_id))))
+            _insert_run(db, pack, w, from_msg, bad_id, int(time.time()),
+                        0, 0, 0, "filtered", int((time.monotonic() - t0) * 1000),
+                        {}, [])
+            if only_msg_ids is None:
+                db.conn.execute(
+                    "INSERT INTO meta(key, value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, str(max(cursor or 0, bad_id))))
             db.conn.commit()
             return {"pack": pack["id"], "chat_id": chat_id, "topic_id": topic_id,
                     "messages": 1, "ops_applied": 0, "ops_rejected": 0,
@@ -708,8 +839,9 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
     upto_msg = rows[-1]["msg_id"]
     duration_ms = int((time.monotonic() - t0) * 1000)
     meta = (result.pop("_meta", None) or {}) if isinstance(result, dict) else {}
-    valid, rejected = _validate_ops(
+    valid, rejects = _validate_ops(
         db, pack, w, result.get("ops") or [], cursor if cursor is not None else 0, upto_msg)
+    rejected = len(rejects)
     valid, overflow, dropped_min = _split_ops(valid)
     if dry_run:
         print(f"[dry-run] {pack['id']} {chat_id}/{topic_id}: "
@@ -721,28 +853,21 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
                 "ops_overflow": overflow, "upto_msg": upto_msg, "dry_run": True}
     now = int(time.time())
     status = "ok" if rejected == 0 and overflow == 0 else "partial"
-    cur = db.conn.execute(
-        "INSERT INTO extraction_runs(pack, chat_id, topic_id, from_msg, upto_msg, ts, "
-        "ops_applied, ops_rejected, ops_overflow, status, "
-        "duration_ms, finish_reason, usage_prompt, usage_completion) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (pack["id"], chat_id, topic_id, from_msg, upto_msg, now,
-         len(valid), rejected, overflow, status,
-         duration_ms, meta.get("finish_reason"), meta.get("usage_prompt"),
-         meta.get("usage_completion")))
-    run_id = cur.lastrowid
+    run_id = _insert_run(db, pack, w, from_msg, upto_msg, now,
+                         len(valid), rejected, overflow, status,
+                         duration_ms, meta, rejects)
     _apply_ops(db, pack, w, valid, run_id)
-    covered = result.get("covered_upto_msg_id")
-    new_cursor = max(cursor or 0, min(covered or upto_msg, upto_msg))
+    new_cursor = max(cursor or 0, upto_msg)
     if overflow:
         clamp = dropped_min - 1
         # clamp <= cursor (весь overflow на одном раннем сообщении) — двигаем курсор как обычно, иначе прогон заклинит
         if clamp > (cursor or 0):
             new_cursor = min(new_cursor, clamp)
-    db.conn.execute(
-        "INSERT INTO meta(key, value) VALUES(?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, str(new_cursor)))
+    if only_msg_ids is None:
+        db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(new_cursor)))
     db.conn.commit()
     return {"pack": pack["id"], "chat_id": chat_id, "topic_id": topic_id,
             "messages": len(rows), "ops_applied": len(valid), "ops_rejected": rejected,
@@ -764,10 +889,59 @@ def _scopes(db: DB, all_indexed: bool) -> list[dict]:
     return out
 
 
+def _drop_dirty(db: DB, key: str, gone: list[int]) -> None:
+    row = db.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    if row is None:
+        return
+    ids = {int(i) for i in json.loads(row["value"])} - set(gone)
+    if ids:
+        db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, json.dumps(sorted(ids))))
+    else:
+        db.conn.execute("DELETE FROM meta WHERE key=?", (key,))
+    db.conn.commit()
+
+
+def _drain_dirty(db_path: str, pack: dict, w: dict, prov, dry_run: bool) -> list[dict]:
+    """Перепрогон отредактированных/удалённых сообщений (meta dirty:{chat}:{topic}):
+    ровно указанные msg_id, без движения основного курсора; покрытые прогоном
+    id снимаются с ключа, непрогнанные остаются на следующий раз."""
+    key = f"dirty:{w['chat_id']}:{w['topic_id']}"
+    with DB(db_path) as db:
+        row = db.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    if row is None or not row["value"]:
+        return []
+    ids = sorted({int(i) for i in json.loads(row["value"])})
+    if not ids:
+        return []
+    made: list[dict] = []
+    while ids:
+        batch = ids[:MAX_MESSAGES_PER_RUN]
+        with DB(db_path) as db:
+            res = _run_scope(db, pack, w, prov, dry_run, only_msg_ids=batch)
+        if res is None:
+            with DB(db_path) as db:
+                _drop_dirty(db, key, batch)
+            break
+        made.append(res)
+        if not dry_run:
+            with DB(db_path) as db:
+                _drop_dirty(db, key, [i for i in batch if i <= res["upto_msg"]])
+            print(f"  {pack['id']} {w['chat_id']}/{w['topic_id']}: dirty "
+                  f"msgs={res['messages']} ops={res['ops_applied']} "
+                  f"rejected={res['ops_rejected']}", flush=True)
+        ids = [i for i in ids if i > res["upto_msg"]]
+        if dry_run:
+            break
+    return made
+
+
 def _drain_scope(db_path: str, pack: dict, w: dict, prov, dry_run: bool,
                  until_done: bool, max_rounds: int) -> list[dict]:
     """Дожёвывает один скоуп раундами (батч за батчем) до исчерпания хвоста."""
-    made: list[dict] = []
+    made: list[dict] = _drain_dirty(db_path, pack, w, prov, dry_run)
     rounds = 0
     net_retries = 0
     delay = float(os.environ.get("EXTRACT_NET_RETRY_DELAY") or 15)
@@ -860,7 +1034,7 @@ def _drain_window(db_path: str, pack: dict, w: dict, win: tuple, prov,
     cur_key = f"extract:{w['chat_id']}:{w['topic_id']}:{pack['id']}:w{i}"
     done_key = f"extract:{w['chat_id']}:{w['topic_id']}:{pack['id']}:d{i}"
     tag = f"{w['chat_id']}/{w['topic_id']}[w{i}]"
-    made: list[dict] = []
+    made: list[dict] = _drain_dirty(db_path, pack, w, prov, dry_run)
     rounds = 0
     net_retries = 0
     delay = float(os.environ.get("EXTRACT_NET_RETRY_DELAY") or 15)

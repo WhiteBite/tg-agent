@@ -283,8 +283,8 @@ def test_db_edits(tmp: Path) -> None:
     check(res["count"] == 1 and res_old["count"] == 0,
           "db: после правки поиск находит новый текст, старый — нет",
           f"{res['count']}/{res_old['count']}")
-    check(db.fts and fts_new == 1 and fts_old == 0 and fts_after == 1,
-          "db: FTS-триггер UPDATE синхронизирует индекс, mark_deleted его не ломает",
+    check(db.fts and fts_new == 1 and fts_old == 0 and fts_after == 0,
+          "db: FTS-триггер UPDATE синхронизирует индекс, mark_deleted вычищает строку",
           f"{fts_new}/{fts_old}/{fts_after}")
 
 

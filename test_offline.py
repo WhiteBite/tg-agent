@@ -911,6 +911,7 @@ def test_entities_schema(db_path: Path) -> None:
             "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
             "closed_ts, created_ts, updated_ts) "
             "VALUES('demo', -100555, 1, 'task', 'Старая закрытая', 'open', 1, 1, 1)")
+        db.conn.execute("PRAGMA user_version=0")
         db.conn.commit()
     with DB(ent_db) as db:
         st = db.conn.execute(
@@ -1108,6 +1109,12 @@ def test_extract_validation(db_path: Path) -> None:
             "SELECT * FROM extraction_runs WHERE pack='construction' "
             "ORDER BY id DESC LIMIT 1").fetchone()
 
+    def reset_cur():
+        with DB(ex_db) as db:
+            db.conn.execute("DELETE FROM meta WHERE key=?",
+                            ("extract:-100888:7:construction",))
+            db.conn.commit()
+
     extract_mod.run(str(ex_db), provider=provider([
         op_new("Залить фундамент", 11, "фундамент", owner="Иван", body="Заливка запланирована"),
         op_new("Галлюцинация", 999, "нет такого сообщения"),
@@ -1123,6 +1130,7 @@ def test_extract_validation(db_path: Path) -> None:
         check(n == 1, "extract: (a) создана ровно одна сущность", str(n))
 
     upd = op_update(1, 12, "прораба", owner="Мария", body="Прораб назначен")
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([upd]))
     with DB(ex_db) as db:
         e = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
@@ -1142,6 +1150,7 @@ def test_extract_validation(db_path: Path) -> None:
         upd_ts = e["updated_ts"]
 
     time.sleep(1.1)
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([upd]))
     with DB(ex_db) as db:
         evs = db.conn.execute(
@@ -1155,6 +1164,7 @@ def test_extract_validation(db_path: Path) -> None:
               "extract: (b) no-op update всё равно считается применённым",
               f"applied={run['ops_applied']} rejected={run['ops_rejected']}")
 
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([
         op_update(999, 14, "арматуры", owner="Пётр"),
         op_update(1, 999, "вне окна"),
@@ -1169,6 +1179,7 @@ def test_extract_validation(db_path: Path) -> None:
         check(e["owner"] == "Пётр",
               "extract: (c) quote с лишними пробелами принят, owner обновлён", str(e["owner"]))
 
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([
         {"op": "update", "kind": "task", "title": "", "entity_id": 1,
          "body": "", "owner": None, "due_text": None, "due_ts": None,
@@ -1176,11 +1187,10 @@ def test_extract_validation(db_path: Path) -> None:
     ]))
     with DB(ex_db) as db:
         e = db.conn.execute(
-            "SELECT owner, title, confidence FROM entities WHERE id=1").fetchone()
-        check(e["owner"] == "Пётр" and e["title"] == "Залить фундамент"
-              and e["confidence"] == 0.9,
+            "SELECT owner, title FROM entities WHERE id=1").fetchone()
+        check(e["owner"] == "Пётр" and e["title"] == "Залить фундамент",
               "extract: (c) update с null/пустыми полями не затирает существующие",
-              f"owner={e['owner']} title={e['title']} confidence={e['confidence']}")
+              f"owner={e['owner']} title={e['title']}")
 
     with DB(ex_db) as db:
         db.conn.execute(
@@ -1189,6 +1199,7 @@ def test_extract_validation(db_path: Path) -> None:
             "VALUES(-100700, 14, 7, ?, ?, 1, 'Иван', 0, 'секретная фраза чужого чата')",
             (now - 586, datetime.fromtimestamp(now - 586, timezone.utc).isoformat()))
         db.conn.commit()
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([
         {"op": "update", "kind": "task", "title": "Залить фундамент",
          "entity_id": 1, "body": "", "owner": "Олег", "due_text": None,
@@ -1203,6 +1214,7 @@ def test_extract_validation(db_path: Path) -> None:
         check(e["owner"] == "Пётр",
               "extract: (c) чужой чат в evidence не меняет сущность", str(e["owner"]))
 
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([op_flip("close", 1, 13, "сдан")]))
     with DB(ex_db) as db:
         e = db.conn.execute("SELECT closed_ts FROM entities WHERE id=1").fetchone()
@@ -1219,6 +1231,7 @@ def test_extract_validation(db_path: Path) -> None:
               "extract: (d) close перевёл status в closed",
               f"open={open_ids} closed={closed_ids}")
 
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([op_update(1, 12, "прораба", owner="Мария")]))
     with DB(ex_db) as db:
         run = last_run(db)
@@ -1228,6 +1241,7 @@ def test_extract_validation(db_path: Path) -> None:
         e = db.conn.execute("SELECT owner FROM entities WHERE id=1").fetchone()
         check(e["owner"] == "Пётр", "extract: (d) закрытая сущность не изменена", str(e["owner"]))
 
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([op_flip("reopen", 1, 13, "сдан")]))
     with DB(ex_db) as db:
         e = db.conn.execute("SELECT closed_ts FROM entities WHERE id=1").fetchone()
@@ -1240,7 +1254,8 @@ def test_extract_validation(db_path: Path) -> None:
 
     ops55 = ([op_new(f"Задача {i}", 14, "арматуры") for i in range(30)]
              + [op_new(f"Задача {i}", 15, "качества") for i in range(30, 55)])
-    extract_mod.run(str(ex_db), provider=provider(ops55, covered=15))
+    reset_cur()
+    extract_mod.run(str(ex_db), provider=provider(ops55))
     with DB(ex_db) as db:
         run = last_run(db)
         check(run["ops_applied"] == 50 and run["ops_rejected"] == 0
@@ -1257,7 +1272,8 @@ def test_extract_validation(db_path: Path) -> None:
               "extract: (e) курсор остановлен до первой overflow-операции (msg 15)",
               str(cur and cur["value"]))
 
-    extract_mod.run(str(ex_db), provider=provider(ops55, covered=15))
+    reset_cur()
+    extract_mod.run(str(ex_db), provider=provider(ops55[50:]))
     with DB(ex_db) as db:
         n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
         run = last_run(db)
@@ -1382,20 +1398,15 @@ def test_extract_validation(db_path: Path) -> None:
                 (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
         db.conn.commit()
 
-    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([], 1))
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([]))
     with DB(ex_db) as db:
         cur = db.conn.execute(
             "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
-        check(cur is not None and int(cur["value"]) == 15,
-              "extract: (i) covered меньше курсора не двигает курсор назад",
+        check(cur is not None and int(cur["value"]) == 23,
+              "extract: (i) курсор доходит до последнего сообщения батча",
               str(cur and cur["value"]))
-    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([], 17))
-    with DB(ex_db) as db:
-        cur = db.conn.execute(
-            "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
-        check(cur is not None and int(cur["value"]) == 17,
-              "extract: (i) после клампа курсор двигается вперёд", str(cur and cur["value"]))
 
+    reset_cur()
     extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_new("Задача C", 18, "принята")], 18))
     with DB(ex_db) as db:
         row = db.conn.execute(
@@ -1403,12 +1414,15 @@ def test_extract_validation(db_path: Path) -> None:
     check(row is not None, "extract: (j) создана сущность для сценария reopen",
           str(row and row["id"]))
     ent_c = row["id"]
+    reset_cur()
     extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_flip("close", ent_c, 19, "закрыта")], 19))
+    reset_cur()
     extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_new("Задача C", 20, "снова")], 20))
     with DB(ex_db) as db:
         n = db.conn.execute(
             "SELECT COUNT(*) c FROM entities WHERE title='Задача C'").fetchone()["c"]
         check(n == 2, "extract: (j) тот же kind+title после close создаёт вторую сущность", str(n))
+    reset_cur()
     extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_flip("reopen", ent_c, 21, "подтверждена")], 21))
     with DB(ex_db) as db:
         run = last_run(db)
@@ -1416,15 +1430,11 @@ def test_extract_validation(db_path: Path) -> None:
               and run["status"] == "partial",
               "extract: (j) reopen при живом дубле отклонён без исключения",
               f"applied={run and run['ops_applied']} rejected={run and run['ops_rejected']}")
-        cur = db.conn.execute(
-            "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
-        check(cur is not None and int(cur["value"]) == 21,
-              "extract: (j) курсор двигается несмотря на отклонённый reopen",
-              str(cur and cur["value"]))
         e = db.conn.execute("SELECT closed_ts FROM entities WHERE id=?", (ent_c,)).fetchone()
         check(e["closed_ts"] is not None, "extract: (j) старая сущность осталась закрытой",
               str(e["closed_ts"]))
-    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([], 23))
+    reset_cur()
+    extract_mod.run(str(ex_db), provider=lambda prompt, p: result([]))
     with DB(ex_db) as db:
         run = last_run(db)
         check(run is not None and run["ops_rejected"] == 0,
@@ -1440,11 +1450,14 @@ def test_extract_validation(db_path: Path) -> None:
                 "VALUES(-100888, ?, 7, ?, ?, 1, 'Иван', 0, ?)",
                 (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
         db.conn.commit()
+    reset_cur()
     extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_new("Задача E", 24, "принята")], 24))
     with DB(ex_db) as db:
         ent_e = db.conn.execute(
             "SELECT id FROM entities WHERE title='Задача E'").fetchone()["id"]
+    reset_cur()
     extract_mod.run(str(ex_db), provider=lambda prompt, p: result([op_flip("close", ent_e, 25, "закрыта")], 25))
+    reset_cur()
     extract_mod.run(str(ex_db), provider=lambda prompt, p: result(
         [op_new("Задача E", 26, "снова"), op_flip("reopen", ent_e, 27, "переоткрываем")], 27))
     with DB(ex_db) as db:
@@ -1460,10 +1473,6 @@ def test_extract_validation(db_path: Path) -> None:
         check(n_open == 1 and e_closed is not None,
               "extract: (j) reopen при внутрибатчевом дубле пропущен, краша нет",
               f"open={n_open} closed_ts={e_closed}")
-        cur = db.conn.execute(
-            "SELECT value FROM meta WHERE key='extract:-100888:7:construction'").fetchone()
-        check(cur is not None and int(cur["value"]) == 27,
-              "extract: (j) курсор дошёл до конца батча", str(cur and cur["value"]))
 
     with DB(ex_db) as db:
         db.upsert_topic(-100888, 9, "Бюджет")
@@ -1518,6 +1527,7 @@ def test_extract_validation(db_path: Path) -> None:
                 (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
         db.conn.commit()
 
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([op_new("Залить фундамент", 28, "фундаменту")]))
     with DB(ex_db) as db:
         n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
@@ -1531,6 +1541,7 @@ def test_extract_validation(db_path: Path) -> None:
               f"applied={run['ops_applied']}")
 
     twin = op_new("Двойная задача", 30, "закрыта и переоткрыта")
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([twin, dict(twin)]))
     with DB(ex_db) as db:
         n = db.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
@@ -1546,6 +1557,7 @@ def test_extract_validation(db_path: Path) -> None:
         run = last_run(db)
         check(run["ops_applied"] == 2, "extract: (l) обе операции засчитаны", str(run["ops_applied"]))
 
+    reset_cur()
     extract_mod.run(str(ex_db), provider=provider([
         op_new("Acme Cloud — триал 30 дней", 29, "триал Acme Cloud", dedup_hint="acme.cloud"),
         op_new("Триал 30 дней на Acme Cloud", 29, "триал Acme Cloud", dedup_hint=" Acme.Cloud "),
@@ -2754,6 +2766,7 @@ def test_marked_migration(db_path: Path) -> None:
         db.watch_add(777, 1, alias="старая")
         db.set_cursor(777, 0, 10)
         db.set_meta("backfill:777", "10")
+        db.conn.execute("PRAGMA user_version=0")
 
     with DB(mig_db) as db:
         ids = {r["id"] for r in db.chats()}
@@ -3186,7 +3199,7 @@ def test_extract_all_indexed(db_path: Path) -> None:
             db.upsert_topic(-100111, 7, "Тема")
             db.upsert_topic(-100111, 8, "Оффтоп")
             if watch:
-                db.watch_add(-100111, 7)
+                db.watch_add(-100111, 7, project="стройка")
             for cid, mid, tid, text in ((-100111, 101, 7, "задача подготовить отчёт"),
                                         (-100111, 102, 8, "решено согласовать смету"),
                                         (-100222, 201, 1, "обещаю прислать акт")):
@@ -3207,7 +3220,8 @@ def test_extract_all_indexed(db_path: Path) -> None:
 
     ai_db2 = db_path.parent / "all_indexed2.sqlite"
     seed(ai_db2, watch=False)
-    made2 = extract_mod.run(str(ai_db2), provider=extract_mod.provider_stub, all_indexed=True)
+    made2 = extract_mod.run(str(ai_db2), provider=extract_mod.provider_stub,
+                            all_indexed=True, any_scope=True)
     scopes2 = {(m["chat_id"], m["topic_id"]) for m in made2}
     check({(-100111, 7), (-100111, 8), (-100222, 1)} == scopes2,
           "extract: --all-indexed покрывает все (chat, topic) индекса", str(scopes2))
@@ -3288,6 +3302,12 @@ def test_services_pack(db_path: Path) -> None:
     import extract as extract_mod
     from packs import PACKS
 
+    def reset_sv():
+        with DB(sv_db) as db:
+            db.conn.execute("DELETE FROM meta WHERE key=?",
+                            ("extract:-100444:1:services",))
+            db.conn.commit()
+
     def sop(title, msg, quote, hint, kind="trial", due_text=None):
         return {"op": "new", "kind": kind, "title": title, "entity_id": None,
                 "body": None, "owner": None, "due_text": due_text, "due_ts": None,
@@ -3307,6 +3327,7 @@ def test_services_pack(db_path: Path) -> None:
               "services: триал с kind/title/due_text через dedup_hint-схему",
               f"n={n} kind={e and e['kind']} attrs={e and e['attrs_json']}")
 
+    reset_sv()
     extract_mod.run(str(sv_db), packs=[PACKS["services"]], provider=lambda p, pk: {
         "ops": [sop("Триал на Acme Cloud", 402, "сервис betaai.com", " Acme.Cloud ")],
         "covered_upto_msg_id": 402})
@@ -3329,6 +3350,7 @@ def test_services_pack(db_path: Path) -> None:
                 "VALUES(-100444, ?, 1, ?, ?, 1, 'Марат', 0, ?)",
                 (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
         db.conn.commit()
+    reset_sv()
     extract_mod.run(str(sv_db), packs=[PACKS["services"]],
                     provider=extract_mod.provider_stub)
     with DB(sv_db) as db:
@@ -3349,8 +3371,8 @@ def test_pipeline(db_path: Path) -> None:
     if pl_db.exists():
         pl_db.unlink()
     with DB(pl_db) as db:
-        db.watch_add(-100222, 1)
-        db.watch_add(-100333, 1)
+        db.watch_add(-100222, 1, project="стройка")
+        db.watch_add(-100333, 1, project="стройка")
         db.conn.execute(
             "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
             "created_ts, updated_ts) VALUES"
@@ -3623,7 +3645,7 @@ def test_extract_telemetry(db_path: Path) -> None:
     now = int(time.time())
     with DB(tl_db) as db:
         db.upsert_chat(-100561, "Телеметрия", None, "supergroup", False, 2)
-        db.watch_add(-100561, 1)
+        db.watch_add(-100561, 1, project="стройка")
         for mid, text in ((11, "решено: ставить телеметрию"), (12, "обычное сообщение")):
             ts = now - 60
             db.conn.execute(
@@ -3680,7 +3702,7 @@ def test_evidence_norm(db_path: Path) -> None:
     now = int(time.time())
     with DB(ev_db) as db:
         db.upsert_chat(-100562, "Нормализация", None, "supergroup", False, 2)
-        db.watch_add(-100562, 1)
+        db.watch_add(-100562, 1, project="стройка")
         for mid, text in ((21, "Регистр СМЕШАН и\u00a0неразрывный пробел"),
                           (22, "ＦＵＬＬWIDTH знаки в тексте")):
             ts = now - 60
@@ -3758,7 +3780,7 @@ def test_extract_bisection(db_path: Path) -> None:
     now = int(time.time())
     with DB(bs_db) as db:
         db.upsert_chat(-100563, "Бисекция", None, "supergroup", False, 2)
-        db.watch_add(-100563, 1)
+        db.watch_add(-100563, 1, project="стройка")
         for mid in range(31, 35):
             ts = now - 60
             db.conn.execute(
@@ -4167,6 +4189,7 @@ def test_global_dedup(db_path: Path) -> None:
                 "(9101, 9001, 1000, 'new'), (9102, 9002, 2000, 'new')")
     con.execute("INSERT INTO integrations(entity_id, system, synced_ts) VALUES"
                 "(9001, 'file', 100), (9002, 'file', 200), (9002, 'notion', 50)")
+    con.execute("PRAGMA user_version=0")
     con.commit()
     con.close()
 
@@ -4999,7 +5022,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    db_path = Path(tempfile.gettempdir()) / "tg_agent_test" / "tg_index.sqlite"
+    db_path = Path(tempfile.mkdtemp(prefix="tg_agent_test_")) / "tg_index.sqlite"
     if db_path.parent.exists():
         for f in db_path.parent.iterdir():
             f.unlink()
@@ -5062,7 +5085,8 @@ def main() -> int:
     test_media_download(db_path)
     test_proclock(db_path)
     test_live_reconnect_hardening(db_path)
-    for suite in ("tests_index_media", "tests_packs_semantics", "tests_export_101"):
+    for suite in ("tests_index_media", "tests_packs_semantics", "tests_export_101",
+                  "tests_ops_report", "tests_media_ingest", "tests_db_core"):
         rc = subprocess.run([sys.executable, "-X", "utf8",
                              str(Path(__file__).parent / f"{suite}.py")],
                             cwd=str(Path(__file__).parent)).returncode

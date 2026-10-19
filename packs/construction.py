@@ -6,10 +6,12 @@ PACK: dict = {
     "scope_filter": {
         "topic_title_regex": None,
         "alias_regex": None,
-        "project_regex": None,
+        "project_regex": r"\S",
         "exclude_project_regex": "^сервисы$",
         "chat_ids": None,
+        "require_match": True,
     },
+    "dedup_scope": "project",
     "kinds": {
         "decision": {
             "description": "Принятое решение по проекту.",
@@ -46,11 +48,12 @@ PACK: dict = {
         "Относительные даты (например, «к пятнице») разрешай относительно даты "
         "сообщения и одновременно сохраняй исходную формулировку в due_text. "
         "Если у сущности есть срок, due_ts заполняй всегда, вычисляя точную дату. "
+        "Формулировки «завтра», «через N дней/недель/месяцев», «до N числа», "
+        "«до 19 августа» тоже записывай в due_text дословно. "
         "Явные обещания и обязательства участников помечай kind promise.\n\n"
         "close и reopen применяй только при явном подтверждении в сообщениях; "
         "при сомнениях не меняй статус.\n\n"
-        "Отвечай строго по предоставленной JSON-схеме. "
-        "covered_upto_msg_id установи равным id последнего фактически обработанного сообщения."
+        "Отвечай строго по предоставленной JSON-схеме."
     ),
     "field_policies": {"body": "append"},
     "backfill_days": 14,
@@ -58,7 +61,7 @@ PACK: dict = {
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["ops", "covered_upto_msg_id"],
+        "required": ["ops"],
         "properties": {
             "ops": {
                 "type": "array",
@@ -74,7 +77,6 @@ PACK: dict = {
                         "owner",
                         "due_text",
                         "due_ts",
-                        "confidence",
                         "supersedes",
                         "evidence",
                     ],
@@ -87,10 +89,10 @@ PACK: dict = {
                         "owner": {"type": ["string", "null"]},
                         "due_text": {"type": ["string", "null"]},
                         "due_ts": {"type": ["number", "null"]},
-                        "confidence": {"type": "number"},
                         "supersedes": {"type": ["integer", "null"]},
                         "evidence": {
                             "type": "array",
+                            "minItems": 1,
                             "items": {
                                 "type": "object",
                                 "additionalProperties": False,
@@ -105,7 +107,6 @@ PACK: dict = {
                     },
                 },
             },
-            "covered_upto_msg_id": {"type": "integer"},
         },
     },
 }

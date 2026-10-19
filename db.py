@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS extraction_runs (
     ops_applied   INTEGER DEFAULT 0,
     ops_rejected  INTEGER DEFAULT 0,
     ops_overflow  INTEGER DEFAULT 0,
+    rejects_json  TEXT,
     status        TEXT,
     duration_ms   INTEGER,
     finish_reason TEXT,
@@ -249,38 +250,59 @@ END;
 CREATE TRIGGER IF NOT EXISTS trg_msg_ad AFTER DELETE ON messages BEGIN
     DELETE FROM messages_fts WHERE rowid = old.rowid;
 END;
-CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE ON messages BEGIN
+-- OF text: mark_deleted (UPDATE deleted=1) не должен возвращать текст в FTS
+CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
     DELETE FROM messages_fts WHERE rowid = old.rowid;
     INSERT INTO messages_fts(rowid, chat_id, topic_id, text)
     VALUES (new.rowid, new.chat_id, new.topic_id, COALESCE(new.text, ''));
 END;
 """
 
+SCHEMA_VERSION = 2
+
 
 class DB:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, readonly: bool = False):
         self.path = Path(path)
+        if readonly:
+            self.conn = sqlite3.connect(
+                self.path.resolve().as_uri() + "?mode=ro", uri=True)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA busy_timeout=5000")
+            self.conn.execute("PRAGMA query_only=ON")
+            self.fts = self._probe_fts()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")  # live.py + sync.py + ui.py могут писать одновременно
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if version >= SCHEMA_VERSION:
+            self.fts = self._probe_fts()
+            return
         self.conn.executescript(SCHEMA)
         try:
             # IF NOT EXISTS не обновляет триггер в старых базах — дропаем принудительно
             self.conn.execute("DROP TRIGGER IF EXISTS trg_msg_ad")
+            self.conn.execute("DROP TRIGGER IF EXISTS trg_msg_au")
             self.conn.executescript(FTS_SCHEMA)
             self.fts = True
         except sqlite3.OperationalError:
             self.fts = False  # поиск уедет на LIKE
-        self._migrate_message_edits()
-        self._migrate_marked_ids()
-        self._migrate_global_dedup()
-        self._migrate_watch_project()
-        self._migrate_entity_status()
-        self._migrate_topic_ids()
-        self._migrate_ops_overflow()
-        self._migrate_extract_telemetry()
+        # свежая база тоже приходит с user_version=0 — миграции идемпотентны
+        if version < 1:
+            self._migrate_message_edits()
+            self._migrate_marked_ids()
+            self._migrate_global_dedup()
+            self._migrate_watch_project()
+            self._migrate_entity_status()
+            self._migrate_topic_ids()
+            self._migrate_ops_overflow()
+            self._migrate_extract_telemetry()
+        if version < 2:
+            self._migrate_v2_columns()
+        self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
     def close(self) -> None:
@@ -293,13 +315,20 @@ class DB:
     def __exit__(self, *_exc) -> None:
         self.close()
 
+    def _probe_fts(self) -> bool:
+        try:
+            self.conn.execute("SELECT 1 FROM messages_fts LIMIT 1")
+        except sqlite3.OperationalError:
+            return False
+        return True
+
     # таблицы, где chat_id нужно перевести при миграции на marked-форму
     _MIGRATE_TABLES = (
         ("messages", "chat_id, msg_id, topic_id, ts, date_iso, sender_id, sender_name, "
                      "is_out, is_service, text, media, reply_to, views, forwards, "
                      "reactions, raw_json, edited_ts, deleted"),
         ("topics", "chat_id, topic_id, title, closed, messages, last_ts"),
-        ("watch", "chat_id, topic_id, alias, pinned, last_read, added_at"),
+        ("watch", "chat_id, topic_id, alias, pinned, last_read, added_at, project"),
         ("refs", "chat_id, msg_id, kind, value"),
         ("folder_chats", "folder_id, chat_id"),
         ("pins", "chat_id, msg_id, topic_id, ts, sender_name, text"),
@@ -430,6 +459,15 @@ class DB:
                 "ALTER TABLE extraction_runs ADD COLUMN finish_reason TEXT",
                 "ALTER TABLE extraction_runs ADD COLUMN usage_prompt INTEGER",
                 "ALTER TABLE extraction_runs ADD COLUMN usage_completion INTEGER"):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
+
+    def _migrate_v2_columns(self) -> None:
+        for ddl in (
+                "ALTER TABLE extraction_runs ADD COLUMN rejects_json TEXT",
+                "ALTER TABLE integrations ADD COLUMN external_id TEXT"):
             try:
                 self.conn.execute(ddl)
             except sqlite3.OperationalError:
@@ -677,19 +715,54 @@ class DB:
              msg["chat_id"], msg["msg_id"], ets),
         )
         if cur.rowcount:
+            self._record_dirty(msg["chat_id"], msg.get("topic_id"), msg["msg_id"])
             self.conn.commit()
             return True
         return False
 
     def mark_deleted(self, chat_id: int, msg_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT topic_id FROM messages WHERE chat_id=? AND msg_id=?",
+            (chat_id, msg_id),
+        ).fetchone()
+        if row is None:
+            return False
         cur = self.conn.execute(
             "UPDATE messages SET deleted=1 WHERE chat_id=? AND msg_id=? AND deleted=0",
             (chat_id, msg_id),
         )
-        if cur.rowcount:
-            self.conn.commit()
-            return True
-        return False
+        if not cur.rowcount:
+            return False
+        if self.fts:
+            self.conn.execute(
+                "DELETE FROM messages_fts WHERE rowid = "
+                "(SELECT rowid FROM messages WHERE chat_id=? AND msg_id=?)",
+                (chat_id, msg_id),
+            )
+        self._record_dirty(chat_id, row["topic_id"], msg_id)
+        self.conn.commit()
+        return True
+
+    def _record_dirty(self, chat_id: int, topic_id: Optional[int], msg_id: int) -> None:
+        # extract.py читает и гасит ключ dirty:{chat}:{topic} после перепрогона
+        if topic_id is None:
+            return
+        topic_id = 1 if topic_id in (0, 1) else topic_id
+        key = f"dirty:{chat_id}:{topic_id}"
+        row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        ids: list[int] = []
+        if row is not None and row["value"]:
+            try:
+                ids = [int(i) for i in json.loads(row["value"])]
+            except (TypeError, ValueError):
+                ids = []
+        ids = [i for i in ids if i != msg_id]
+        ids.append(msg_id)
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps(ids[-200:])),
+        )
 
     def set_topic_counters(self, chat_id: int, topic_id: int, messages: int, last_ts: Optional[int]) -> None:
         self.conn.execute(
@@ -770,7 +843,7 @@ class DB:
         date_from: Optional[int] = None,
         date_to: Optional[int] = None,
     ) -> list[dict]:
-        sql = "SELECT * FROM messages WHERE chat_id = ?"
+        sql = "SELECT * FROM messages WHERE chat_id = ? AND deleted = 0"
         args: list[Any] = [chat_id]
         if topic_id is not None:
             # 0 и 1 — General: сообщения без темы хранятся канонически как 1
@@ -817,7 +890,7 @@ class DB:
         sql = """
             SELECT m.*, c.title AS chat_title FROM messages m
             LEFT JOIN chats c ON c.id = m.chat_id
-            WHERE m.text LIKE ?
+            WHERE m.text LIKE ? AND m.deleted = 0
         """
         args: list[Any] = [f"%{query}%"]
         if chat_id is not None:
@@ -851,6 +924,7 @@ class DB:
             SELECT msg_id, date_iso, sender_name, text FROM messages
             WHERE chat_id = ? AND topic_id = COALESCE(?, 1)
               AND (ts, msg_id) {op} (?, ?)
+              AND deleted = 0
             ORDER BY ts {order}, msg_id {order} LIMIT ?
             """,
             (msg["chat_id"], msg.get("topic_id"), msg.get("ts") or 0, msg["msg_id"], n),
@@ -963,10 +1037,22 @@ class DB:
 
     def watch_set_project(self, chat_id: int, topic_id: int, project: Optional[str]) -> bool:
         topic_id = 1 if topic_id in (0, 1) else topic_id
+        row = self.conn.execute(
+            "SELECT project FROM watch WHERE chat_id = ? AND topic_id = ?",
+            (chat_id, topic_id),
+        ).fetchone()
+        if row is None:
+            return False
         cur = self.conn.execute(
             "UPDATE watch SET project = ? WHERE chat_id = ? AND topic_id = ?",
             (project, chat_id, topic_id),
         )
+        if row["project"] != project:
+            self.conn.execute(
+                "UPDATE entities SET project = ? WHERE chat_id = ? AND topic_id = ? "
+                "AND closed_ts IS NULL",
+                (project, chat_id, topic_id),
+            )
         self.conn.commit()
         return cur.rowcount > 0
 
@@ -1026,7 +1112,7 @@ class DB:
         rows = self.conn.execute(
             """
             SELECT * FROM messages
-            WHERE chat_id = ? AND topic_id = ? AND msg_id > ?
+            WHERE chat_id = ? AND topic_id = ? AND msg_id > ? AND deleted = 0
             ORDER BY msg_id LIMIT ?
             """,
             (chat_id, topic_id, last_read, limit),
@@ -1043,7 +1129,8 @@ class DB:
             out.append(d)
             max_id = max(max_id, d["msg_id"])
         pending = self.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE chat_id=? AND topic_id=? AND msg_id > ?",
+            "SELECT COUNT(*) FROM messages WHERE chat_id=? AND topic_id=? "
+            "AND msg_id > ? AND deleted = 0",
             (chat_id, topic_id, last_read),
         ).fetchone()[0]
         return {
@@ -1252,7 +1339,8 @@ class DB:
                 if rids:
                     marks = ",".join("?" * len(rids))
                     for m in self.conn.execute(
-                        f"SELECT rowid, * FROM messages WHERE rowid IN ({marks})",
+                        f"SELECT rowid, * FROM messages WHERE rowid IN ({marks}) "
+                        f"AND deleted = 0",
                         [r["rid"] for r in rids],
                     ):
                         d = dict(m)

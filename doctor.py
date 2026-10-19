@@ -3,14 +3,20 @@
 
 Проверяет окружение офлайн (библиотеки, креды, сессия, БД, FTS5, self-test
 маскировки). С --live дополнительно пробует подключиться к Telegram.
+--providers: одна мини-компляция к настроенному extract/digest-провайдеру
+(сеть, только по явному запросу; мёртвый ключ виден как HTTP 401).
+--quality: заполненность полей сущностей по пакетам и гистограмма причин
+отказов из extraction_runs.rejects_json.
 Код возврата: 0 — можно работать (предупреждения допустимы), 1 — есть ошибки.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -21,7 +27,95 @@ from env import load_env  # noqa: E402
 load_env()
 
 
-def run_checks(live: bool = False) -> list[dict]:
+def _provider_check(prefix: str) -> dict:
+    from llm_http import call_with_deadline, extra_body, key_list, post_json_keys
+
+    label = f"{prefix.lower()}-провайдер (live)"
+    provider = os.environ.get(f"{prefix}_PROVIDER", "stub")
+    if provider != "openai":
+        return {"name": label, "ok": None,
+                "detail": f"provider={provider} — сетевая проверка неприменима"}
+    url = os.environ.get(f"{prefix}_URL")
+    if not url:
+        return {"name": label, "ok": False, "detail": f"нет {prefix}_URL"}
+    body = {
+        "model": os.environ.get(f"{prefix}_MODEL", "gpt-4o-mini"),
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}],
+    }
+    body.update(extra_body(url))
+    try:
+        call_with_deadline(post_json_keys, 60,
+                           url.rstrip("/") + "/chat/completions",
+                           key_list(os.environ.get(f"{prefix}_KEY")), body, 30)
+    except Exception as exc:
+        msg = f"{type(exc).__name__}: {exc}"[:200]
+        if "HTTP 401" in msg or "HTTP 403" in msg:
+            return {"name": label, "ok": False, "detail": f"ключ мёртв — {msg}"}
+        return {"name": label, "ok": False, "detail": msg}
+    return {"name": label, "ok": True, "detail": f"{url} отвечает"}
+
+
+def _count_rejects(raw: str, hist: Counter) -> None:
+    try:
+        data = json.loads(raw)
+    except Exception:
+        hist["<нечитаемо>"] += 1
+        return
+    if isinstance(data, dict):
+        for reason, cnt in data.items():
+            hist[str(reason)] += int(cnt) if isinstance(cnt, (int, float)) else 1
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                reason = item.get("reason") or item.get("error")
+                hist[str(reason) if reason else "<без причины>"] += 1
+            elif item is not None:
+                hist[str(item)] += 1
+
+
+def quality_checks(db_path: str | Path | None = None) -> list[dict]:
+    out: list[dict] = []
+    path = Path(db_path or os.environ.get("TG_DB", str(HERE / "tg_index.sqlite")))
+    if not path.exists():
+        return [{"name": "качество извлечения", "ok": None, "detail": f"нет БД {path}"}]
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        for r in conn.execute(
+                "SELECT pack, COUNT(*) n, "
+                "SUM(owner IS NOT NULL AND owner != '') owner_n, "
+                "SUM(due_ts IS NOT NULL) due_n, "
+                "SUM(body IS NOT NULL AND body != '') body_n "
+                "FROM entities GROUP BY pack ORDER BY pack"):
+            n = r["n"] or 1
+
+            def pct(v, n=n) -> str:
+                return f"{100 * (v or 0) // n}%"
+
+            out.append({"name": f"заполненность [{r['pack']}]", "ok": None,
+                        "detail": f"n={r['n']}: owner {pct(r['owner_n'])}, "
+                                  f"due {pct(r['due_n'])}, body {pct(r['body_n'])}"})
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(extraction_runs)")}
+        if "rejects_json" not in cols:
+            out.append({"name": "причины отказов", "ok": None,
+                        "detail": "нет колонки extraction_runs.rejects_json — "
+                                  "гистограмма недоступна"})
+            return out
+        hist: Counter = Counter()
+        for r in conn.execute(
+                "SELECT rejects_json FROM extraction_runs "
+                "WHERE rejects_json IS NOT NULL AND rejects_json != ''"):
+            _count_rejects(r["rejects_json"], hist)
+        detail = (", ".join(f"{k}: {v}" for k, v in hist.most_common(10))
+                  if hist else "отказов не зафиксировано")
+        out.append({"name": "причины отказов", "ok": None, "detail": detail})
+    finally:
+        conn.close()
+    return out
+
+
+def run_checks(live: bool = False, providers: bool = False) -> list[dict]:
     out: list[dict] = []
 
     def add(name: str, ok, detail: str = "") -> None:
@@ -122,12 +216,20 @@ def run_checks(live: bool = False) -> list[dict]:
         except Exception as exc:
             add("Telegram (live)", False, str(exc)[:200])
 
+    if providers:
+        for prefix in ("EXTRACT", "DIGEST"):
+            out.append(_provider_check(prefix))
+
     return out
 
 
 def main() -> int:
     live = "--live" in sys.argv
-    checks = run_checks(live=live)
+    providers = "--providers" in sys.argv
+    quality = "--quality" in sys.argv
+    checks = run_checks(live=live, providers=providers)
+    if quality:
+        checks.extend(quality_checks())
     failed = False
     for c in checks:
         mark = "✅" if c["ok"] is True else ("⚠️ " if c["ok"] is None else "❌")

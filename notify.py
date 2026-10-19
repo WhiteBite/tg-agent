@@ -26,29 +26,44 @@ def _allowed() -> bool:
 
 def _send(messages: list[str]) -> dict:
     import asyncio
+    import threading
 
-    from sync import make_client, start_kwargs
+    out: dict = {}
 
-    async def _run() -> tuple[int, list[str]]:
-        client = make_client()
-        await client.start(**start_kwargs())
-        sent = 0
-        errors: list[str] = []
+    def _worker() -> None:
         try:
-            for text in messages:
-                try:
-                    await client.send_message("me", text)
-                    sent += 1
-                except Exception as exc:
-                    errors.append(f"{type(exc).__name__}: {str(exc)[:200]}")
-        finally:
-            await client.disconnect()
-        return sent, errors
+            out["res"] = asyncio.run(_telegram_send(messages))
+        except BaseException as exc:
+            out["exc"] = exc
 
-    sent, errors = asyncio.run(_run())
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join()
+    if "exc" in out:
+        raise out["exc"]
+    sent, errors = out["res"]
     if errors:
         return {"ok": False, "sent": sent, "errors": errors}
     return {"ok": True, "sent": sent}
+
+
+async def _telegram_send(messages: list[str]) -> tuple[int, list[str]]:
+    from sync import make_client, start_kwargs
+
+    client = make_client()
+    await client.start(**start_kwargs())
+    sent = 0
+    errors: list[str] = []
+    try:
+        for text in messages:
+            try:
+                await client.send_message("me", text)
+                sent += 1
+            except Exception as exc:
+                errors.append(f"{type(exc).__name__}: {str(exc)[:200]}")
+    finally:
+        await client.disconnect()
+    return sent, errors
 
 
 def notify(messages: list[str], dry_run: bool = True) -> dict:

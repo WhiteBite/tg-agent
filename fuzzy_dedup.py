@@ -30,6 +30,7 @@ from env import load_env  # noqa: E402
 load_env()
 
 from db import DB  # noqa: E402
+from packs import PACKS  # noqa: E402
 
 _RICH_FIELDS = ("title", "body", "owner", "due_ts", "project", "attrs_json")
 
@@ -54,7 +55,10 @@ def clusters(db: DB, pack: str | None) -> list[list[dict]]:
     for r in db.conn.execute(sql + " ORDER BY id", args):
         nt = norm_title(r["title"])
         if nt:
-            groups.setdefault((r["pack"], r["kind"], nt), []).append(dict(r))
+            gkey = (r["pack"], r["kind"], nt)
+            if (PACKS.get(r["pack"]) or {}).get("dedup_scope") == "project":
+                gkey = gkey + (r["project"] or "",)
+            groups.setdefault(gkey, []).append(dict(r))
     return [g for g in groups.values() if len(g) > 1]
 
 

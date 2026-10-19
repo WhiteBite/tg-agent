@@ -97,6 +97,7 @@ def summarize(rows: list[dict], alias: str) -> str:
 
 def run(db_path: str = DB_PATH) -> list[dict]:
     made = []
+    max_rows = int(os.environ.get("DIGEST_MAX_ROWS") or 500)
     with DB(db_path) as db:
         for w in db.watch_list():
             key = f"digest_upto:{w['chat_id']}:{w['topic_id']}"
@@ -104,8 +105,8 @@ def run(db_path: str = DB_PATH) -> list[dict]:
             upto = int(row["value"]) if row else 0
             rows = [dict(r) for r in db.conn.execute(
                 "SELECT * FROM messages WHERE chat_id=? AND topic_id=? "
-                "AND msg_id>? AND is_service=0 ORDER BY msg_id",
-                (w["chat_id"], w["topic_id"], upto))]
+                "AND msg_id>? AND is_service=0 ORDER BY msg_id LIMIT ?",
+                (w["chat_id"], w["topic_id"], upto, max_rows))]
             if not rows:
                 continue
             for r in rows:

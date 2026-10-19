@@ -130,6 +130,8 @@ read-only SQL) скрыт по умолчанию, включается `TG_EXPO
 ```bash
 python3 doctor.py          # офлайн: библиотеки, креды, сессия, БД, FTS5, self-test маскировки
 python3 doctor.py --live   # + реальное подключение к Telegram
+python3 doctor.py --providers  # opt-in: одна мини-компляция к настроенному extract/digest-провайдеру (живой ключ; мёртвый — HTTP 401)
+python3 doctor.py --quality    # заполненность owner/due/body по пакетам + гистограмма причин отказа из rejects_json
 ```
 
 Гоняй перед первым `sync.py` и после любых «почему не работает».
@@ -279,7 +281,9 @@ DIGEST_PROVIDER=openai DIGEST_URL=https://api.openai.com/v1 \
 ```
 
 По каждой слежуемой теме берёт сообщения после прошлого дайджеста (курсор в
-`meta`), строит контекст и кладёт выжимку в таблицу `digests`. Агент читает
+`meta`), строит контекст и кладёт выжимку в таблицу `digests`. За прогон не
+больше `DIGEST_MAX_ROWS` строк (дефолт 500); хвост, не вошедший в окно,
+подбирается следующим прогоном по курсору. Агент читает
 через `tg_digests`, UI показывает баннером 📝 в теме. Проще всего гонять
 по cron раз в день.
 
@@ -302,13 +306,16 @@ generic, предметная область описана декларатив
 Пакеты: `construction` (PM для стройки: decision / task / promise / question)
 и `services` (сервисы и триалы: service / trial / promo; ключ дедупа —
 `dedup_hint`: домен или слаг сервиса, поэтому «Триал 30 дней на Acme» и
-«Acme Cloud trial» схлопываются в одну сущность). Дедуп глобальный между
-чатами: один сервис из разных чатов — одна сущность с несколькими источниками
+«Acme Cloud trial» схлопываются в одну сущность). Дедуп собирает один
+сервис из разных чатов в одну сущность с несколькими источниками
 (`entity_sources`); слияние пишется в `entity_events` (op='merge'), редирект
-старого id — в `entity_aliases`, `tg_entity` резолвит его автоматически. `services` прицелен в темы
+старого id — в `entity_aliases`, `tg_entity` резолвит его автоматически. Область
+дедупа задаёт поле `dedup_scope`: у `construction` он по проекту, у `services`
+остаётся глобальным. `services` прицелен в темы
 watch-листа с проектом «сервисы» (`watch.py add --project сервисы`) — не
 шумит в код-чатах; scope меняется в `packs/services.py`. В `packs/construction.py`
-— `exclude_project_regex: "^сервисы$"`: констракшн не запускается на проекте
+— `scope_filter.require_match` с `exclude_project_regex: "^сервисы$"`:
+констракшн требует непустой проект и не запускается на проекте
 «сервисы», скоупы изолированы. `--until-done`
 крутит раунды (по 200 сообщений на тему), пока хвост истории не кончится;
 `--workers N` (или `EXTRACT_WORKERS`) дожёвывает темы параллельно — разовая
@@ -323,14 +330,22 @@ watch-листа с проектом «сервисы» (`watch.py add --project
 пары (chat, topic) индекса — для массовой обработки «кучи групп», без
 курирования. По каждой паре (пакет, тема) курсор `extract:<chat>:<topic>:<pack>`
 в `meta`; за один прогон не больше 200 сообщений, остаток подберёт следующий.
-Провайдер отвечает JSON-операциями new/update/close/reopen; каждая обязана
-нести evidence — цитаты сообщений. Цитата проверяется как подстрока текста
+Курсор после прогона всегда выставляется на максимальный msg_id обработанной
+пачки (поле `covered_upto_msg_id` в операциях провайдера убрано; clamp по
+overflow оставлен). Провайдер отвечает JSON-операциями new/update/close/reopen; каждая обязана
+нести evidence — цитаты сообщений (`minItems: 1`). Цитата проверяется как подстрока текста
 сохранённого сообщения (плюс транскрипты медиа); операция без валидного
-evidence отклоняется. Операции применяются одной транзакцией
+evidence отклоняется, причины отказа пишутся в `extraction_runs.rejects_json`
+(не больше 50 за прогон), нормализация цитаты сводит ё→е. Поле `confidence`
+из схем пакетов убрано (колонка осталась, не заполняется). Операции применяются одной транзакцией
 (`entities`, `entity_events`, `extraction_runs`), сбой провайдера курсор не
 двигает. Срок из текста: если провайдер не дал `due_ts`, детерминированный
 fallback в `extract.py` разбирает `due_text` — абсолютные даты (`20.10.2026`,
-`20.10.26`), дата без года (`20.10`) резолвится по дате сообщения.
+`20.10.26`), русские названия месяцев («19 августа»), «N числа», относительные
+(«сегодня»/«завтра»/«послезавтра», «через N дней/недель/месяц») и ISO-даты —
+всё резолвится по дате сообщения; срок ставится на конец дня (23:59:59 UTC),
+а не на полночь. Update без явного `due_ts` больше не затирает ранее
+выставленный точный срок.
 `supersedes`: решение new/update может сослаться на открытую сущность того же
 scope — цель закрывается, в `entity_events` пишется строка op='supersede'. Валидных операций больше 50 за прогон: применяются первые по позиции
 evidence, остаток фиксируется как `ops_overflow` (status=partial), а курсор
@@ -341,6 +356,9 @@ run `status='filtered'`, остальные сообщения обрабаты�
 Сетевой сбой ретраит батч до 3 раз (интервал `EXTRACT_NET_RETRY_DELAY`,
 по умолчанию 15с); сломанная область завершает прогон ненулевым кодом —
 незавершённый хвост виден сразу, курсоры позволяют перезапустить с места.
+Отредактированные и удалённые сообщения перепрогоняются: id пишутся в
+`meta`-ключ `dirty:{chat}:{topic}`, следующий прогон темы их снимает и
+переизвлекает по ним.
 
 Теги проектов: `python3 watch.py add ... --project "Объекд"` или
 `python3 watch.py project --chat @mygroup --topic 789 --project "Объекд"`.
@@ -357,8 +375,13 @@ python3 pipeline.py --loop 30 --send # демон: полный цикл каж�
 ```
 
 Одна команда для автономного режима: шаги независимы, сбой одного не
-останавливает остальные (упавший шаг — в отчёте и в exit code 1); extract
-дожёвывает хвост сообщений до конца. После извлечения `fuzzy` сливает дубли
+останавливает остальные (упавший шаг — в отчёте и в exit code 1); каждый шаг
+зажат по времени `PIPELINE_STEP_BUDGET` (дефолт 900с) — зависший шаг
+помечается упавшим, конвейер не виснет; extract вне `--loop` дожёвывает хвост
+до конца, в `--loop` — по окну за цикл (курсоры продолжают следующий).
+`run()` захватывает локи `proclock`, поэтому разовый запуск не гоняется
+параллельно с loop-демоном (лок занят — выход 0 «уже запущен»). В отчёте
+`report["extract"]` — сводные `ops_rejected`/`ops_overflow`. После извлечения `fuzzy` сливает дубли
 сущностей по нормализованному title (`FUZZY_MAX_MERGES`, дефолт 500), а
 `export` дописывает JSONL-фид для внешних потребителей (по умолчанию
 `export.jsonl` рядом с базой, путь — `TG_EXPORT_PATH`; формат строки
@@ -386,7 +409,9 @@ python3 pipeline.py --loop 30 --send # демон: полный цикл каж�
 `<db>.live.lock`; при смерти процесса ОС снимает её сама — протухших файлов не
 остаётся). Логи дописываются в `pipeline.log` / `live.log` / `morning.log`
 (в gitignore). Утренней сводке sync не нужен — loop-демон и так держит данные
-свежими, а Telegram-API не конкурирует. Остановка: снять задачи
+свежими, а Telegram-API не конкурирует. Задаче утренней сводки нужен
+`TG_MONITOR_FORCE=1`: иначе дедуп monitor по хэшу отчёта глушит повторную
+отправку в тот же день. Остановка: снять задачи
 `Get-CimInstance Win32_Process -Filter "Name='python.exe'"` и убить PID'ы
 демонов; для отключения автозапуска — удалить `tg-agent.cmd` из Startup и
 `schtasks /delete /tn tg-agent-morning /f`.
@@ -407,6 +432,10 @@ python3 monitor.py --send                # отправить сводку в Sa
 и кросс-чатные повторы (события merge/dedup — сервис снова всплыл в другом
 чате) со временем появления: утренний
 `pipeline.py --loop 1440 --send` превращается в ежедневную сводку о триалах.
+Есть блок «зависшие вопросы» — открытые question старше
+`MONITOR_QUESTION_DAYS` (дефолт 3). Сканы ограничены по объёму.
+`--send` дедупится по хэшу отчёта (`meta['monitor:last_hash']`): одинаковая
+сводка второй раз не отправляется, `TG_MONITOR_FORCE=1` обходит проверку.
 `--send` — это `notify.py`:
 
 ```bash
@@ -418,7 +447,10 @@ echo "текст" | TG_ALLOW_SEND=1 python3 notify.py --send   # из stdin, п�
 `notify.py` — единственный модуль репозитория, который умеет писать в Telegram
 (в свои Saved Messages). Реальная отправка только при `TG_ALLOW_SEND=1`, по
 умолчанию везде dry-run; `TG_NOTIFY_CAP` (по умолчанию 10) ограничивает число
-сообщений за вызов. MCP-сервер `notify.py` не импортирует — агент отправки
+сообщений за вызов. Отправка идёт в worker-потоке на собственном event loop,
+поэтому работает и изнутри уже запущенного цикла (`pipeline --send` раньше
+падал с `asyncio.run() cannot be called from a running event loop`).
+MCP-сервер `notify.py` не импортирует — агент отправки
 по-прежнему не видит.
 
 ## Медиа-транскрипция
@@ -426,6 +458,7 @@ echo "текст" | TG_ALLOW_SEND=1 python3 notify.py --send   # из stdin, п�
 ```bash
 MEDIA_PROVIDER=stub python3 media.py                    # заглушка без сети
 MEDIA_PROVIDER=openai python3 media.py --limit 50       # скачивание + транскрипция
+python3 media.py --sweep-pending                        # разовый дренаж легаси-pending -> skipped, без скачивания
 ```
 
 `sync.py` и `live.py` ставят в очередь только транскрибируемое аудио —
@@ -443,7 +476,9 @@ openai-провайдер — DashScope `qwen3-asr-flash` через chat/comple
 (Telethon `download_media` в `_run_with_client`); если байтов аудио нет,
 openai-провайдер отвечает `ValueError`. Готовые транскрипции `extract.py`
 подмешивает в промпт извлечения (и evidence-проверка учитывает их текст).
-`pipeline.py` гоняет шаг автоматически после sync.
+`pipeline.py` гоняет шаг автоматически после sync. `--sweep-pending` — разовый
+дренаж строк `pending`, накопившихся до гейта `is_transcribable`: одним UPDATE
+они помечаются `skipped` и не скачиваются.
 
 ## Экспорт
 
@@ -457,11 +492,16 @@ python3 export.py --system notion                  # структурирова�
 Выгружает сущности и их события во внешние системы. Путь file-провайдера:
 `--out`, иначе `TG_EXPORT_PATH`, иначе `export.jsonl` рядом с базой. Курсор
 каждого провайдера живёт в таблице `integrations` (entity_id, system):
-выгружаются только сущности с событиями свежее `synced_ts`; сущности без
-событий не выгружаются никогда. `101` — реализованный REST-провайдер
+выгружаются только сущности с событиями свежее курсора; сущности без
+событий не выгружаются никогда. Курсор 101 — по `entity_events.id`, а не по
+вторичному `ts` (события в одну секунду раньше молча терялись). `101` — реализованный REST-провайдер
 (stdlib urllib): env `EXPORT_101_URL` + JWT-токен `EXPORT_101_TOKEN`, путь
 `EXPORT_101_PATH` (дефолт `/entities`), таймаут `EXPORT_101_TIMEOUT`; один POST
-на сущность с телом `{"entity", "events", "exported_ts"}`, курсор продвигается
+на сущность с телом `{"entity", "events", "exported_ts"}` и заголовком
+`Idempotency-Key: {entity_id}-{max_event_id}`; 5xx и сетевые сбои ретраятся до
+3 раз с backoff (`EXPORT_101_RETRIES`); упавшая сущность не обрывает прогон —
+она уходит в `failed` в ответе, id/external_id из ответа пишется в
+`integrations.external_id`; курсор продвигается
 только после 2xx; без кредов — структурированный `{"ok": false, "error": ...}`
 без исключения. `notion` остаётся заглушкой со словарём-ошибкой.
 
@@ -473,8 +513,11 @@ python3 export.py --system notion                  # структурирова�
   контента; правка = явный запуск команды).
 - **Сообщения — источник истины, правки подхватываются.** Строка отражает
   последнее состояние текста (`edited_ts`); предыдущие версии правок не
-  сохраняются. Удаление — флаг `deleted=1`: строка остаётся и отдаётся
-  читалками. Сущности — пересчитываемая проекция: каждая обязана цитатами из
+  сохраняются. Удаление — флаг `deleted=1`: строка остаётся в базе, но
+  читалки (история, `tg_new`, поиск, `_around`) её отдают с фильтром
+  `deleted=0`, а `mark_deleted` вычищает строку из FTS — удалённое не
+  ищется, отредактированное ищется по новому тексту (триггер FTS —
+  `AFTER UPDATE OF text`). Сущности — пересчитываемая проекция: каждая обязана цитатами из
   сохранённых сообщений (проверка на подстроку), без валидного evidence
   операция не применяется; цитата в `entity_events` может ссылаться на текст
   до правки.
@@ -516,17 +559,17 @@ python3 export.py --system notion                  # структурирова�
 | `sync.py` | Telethon → SQLite: инкрементальная синхронизация, бэкфилл чанками, папки, пины, подхват правок (`edited_ts`) |
 | `search.py` | Глобальный поиск Telegram: публичные каналы/группы/юзеры по ключевому слову |
 | `folders.py` | Правка состава папок Telegram: add/remove чатов (второй пишущий модуль, контент не пишет) |
-| `pipeline.py` | Автономный конвейер: sync → media → extract → fuzzy → export → digest → monitor одним прогоном |
-| `db.py` | Индекс: схема, FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`), `run_sql` с блокировками |
-| `server.py` | MCP-сервер (stdio): 13 read-only инструментов |
+| `pipeline.py` | Автономный конвейер: sync → media → extract → fuzzy → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
+| `db.py` | Индекс: схема с миграциями по `PRAGMA user_version`, FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
+| `server.py` | MCP-сервер (stdio): 13 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
 | `live.py` | Новые сообщения в реальном времени (`events.NewMessage`), правки и удаления (`MessageEdited` / `MessageDeleted`) |
 | `digest.py` | Дайджесты: stub или openai-совместимый LLM |
-| `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт, due_text→due_ts fallback, supersedes |
-| `packs/` | Декларативные пакеты извлечения: `construction` (decision/task/promise/question), `services` (service/trial/promo) |
-| `monitor.py` | Сводка просроченного и дедлайнов по проектам; `--send` через `notify.py` |
+| `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт, due_text→due_ts fallback (ru-месяцы, относительные, конец дня), supersedes, причины отказа в `rejects_json`, перепрогон dirty |
+| `packs/` | Декларативные пакеты извлечения: `construction` (decision/task/promise/question), `services` (service/trial/promo); scope-фильтры (`require_match`, `exclude_project_regex`) и `dedup_scope` |
+| `monitor.py` | Сводка просроченного и дедлайнов по проектам, зависшие вопросы; `--send` через `notify.py`, дедуп по хэшу отчёта |
 | `notify.py` | Уведомления в Saved Messages; единственный пишущий модуль, гейт `TG_ALLOW_SEND=1` |
-| `media.py` | Очередь транскрипции аудио (voice + audio-документы): гейт `is_transcribable` на инджесте, рефетч и скачивание из Telegram, гейты до скачивания, qwen3-asr-flash (stub/openai) |
-| `export.py` | Выгрузка сущностей во внешние системы (file / 101 по REST; notion — заглушка-ошибка) |
+| `media.py` | Очередь транскрипции аудио (voice + audio-документы): гейт `is_transcribable` на инджесте, рефетч и скачивание из Telegram, гейты до скачивания, `--sweep-pending`, qwen3-asr-flash (stub/openai) |
+| `export.py` | Выгрузка сущностей во внешние системы (file / 101 по REST с id-курсором, ретраями и Idempotency-Key; notion — заглушка-ошибка) |
 | `services_report.py` | Каталог сервисов из сущностей: rollup по dedup_key, `--days/--query/--top/--hide-closed` |
 | `fuzzy_dedup.py` | Maintenance-проход: слияние дублей сущностей по нормализованному title (richer-keeper, cap, идемпотентный) |
 | `proclock.py` | Lockfile одиночного инстанса для демонов (pipeline --loop, live.py) |
@@ -535,12 +578,15 @@ python3 export.py --system notion                  # структурирова�
 | `login.py` | Логин QR-кодом (или телефон+код), `--export` — строка сессии |
 | `env.py` | Чтение `.env` всеми скриптами (env-переменные приоритетнее) |
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
-| `doctor.py` | Диагностика окружения |
+| `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 478 офлайн-проверок (без аккаунта Telegram) + запуск трёх suites ниже — всего 594, гоняются в CI |
+| `test_offline.py` | 761 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс шесть suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
-| `tests_packs_semantics.py` | пак: срок из due_text, изоляция по проекту, supersedes (запускается из `test_offline.py`) |
+| `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
+| `tests_ops_report.py` | операционная автономка: notify в живом loop, бюджет шагов, lock, дедуп сводки, doctor --quality (запускается из `test_offline.py`) |
+| `tests_media_ingest.py` | sweep pending + граница tg_mark_read (запускается из `test_offline.py`) |
+| `tests_db_core.py` | user_version-миграции, read-only, deleted/FTS, dirty, каскад проекта (запускается из `test_offline.py`) |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -589,9 +635,10 @@ python3 export.py --system notion                  # структурирова�
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **478 проверок плюс три suites подпроцессами
-(`tests_index_media.py`, `tests_packs_semantics.py`, `tests_export_101.py`) —
-всего 594, все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
+`python3 test_offline.py` — **761 проверок: свои проверки плюс шесть suites
+подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
+`tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
+`tests_db_core.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
   `--chat @канал`, `--folder`, `--watched`, `--dry-run`, раскладка по темам
@@ -602,19 +649,23 @@ python3 export.py --system notion                  # структурирова�
   live.py и watch.py видят одни и те же id
 - `db.py`: темы, история, окно по времени, **FTS5-поиск** (включая фильтр по
   чату), статистика, watch-лист (`watch_new` / `watch_mark_read` / удаление),
+  миграции по `PRAGMA user_version` (DDL не повторяется на каждом открытии),
+  read-only-путь (`DB(readonly=True)` без миграций и с `query_only`), каскад
+  проекта в `watch_set_project`, скрытие `deleted=1` от читалок;
   `run_sql` и его гейты (`query_only` + authorizer: `DELETE`, `PRAGMA`,
   `SELECT; DROP`, `UPDATE`, `ATTACH` — блокируются; слово в LIKE-литерале — нет)
 - **маскировка секретов на инджесте**: токен не доезжает до `messages.text`,
   `raw_json` и `refs`; LIKE-фолбэк и `run_sql` выдают замаскированное
 - **FTS-триггёр удаления**: `DELETE FROM messages` чистит индекс (раньше падал)
 - **правки/удаления в индексе**: `db.update_message` / `db.mark_deleted`, FTS
-  отдаёт новый текст после правки; sync подхватывает `edit_date` в rescan и
+  отдаёт новый текст после правки, удалённое скрыто от читалок и из FTS; sync подхватывает `edit_date` в rescan и
   backfill (`edited_messages` в отчёте); `live.handle_edit` /
   `live.handle_delete` на подставных событиях
 - **настоящий `server.py` как подпроцесс по MCP stdio**: `initialize` →
   `tools/list` (13 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
   включая сценарий «прочитал → отметил → непрочитанного нет»; `tg_new` честно
-  держит `truncated` при лимите; отдельный прогон с `TG_ALLOW_LIVE=1` —
+  держит `truncated` при лимите; `tg_mark_read` отклоняет id выше максимума
+  индекса темы; отдельный прогон с `TG_ALLOW_LIVE=1` —
   live-инструменты регистрируются, без кредов отвечают JSON-ошибкой, а не
   зависают
 - папки: `GetDialogFiltersRequest` на фейках → состав папок в индексе
@@ -633,34 +684,43 @@ python3 export.py --system notion                  # структурирова�
   (401 без / 200 с)
 - `TG_STRICT_WATCH=1`: второй сервер-подпроцесс — чужой чат отклонён,
   слежуемый читается, `tg_find`/`tg_topics` вне watch слепы
-- `doctor.run_checks()`: формат чеков, FTS5 и redact self-test
+- `doctor.run_checks()`: формат чеков, FTS5 и redact self-test; `--quality`
+  (заполненность полей по пакетам + гистограмма причин из `rejects_json`) и
+  `--providers` (без настроенного openai-провайдера сеть не трогается)
 - бюджет контекста дайджеста: `build_context` вписывается в `DIGEST_MAX_CHARS`
-  и честно помечает обрезку
+  и честно помечает обрезку; строки за прогон ограничены `DIGEST_MAX_ROWS`
+  (дефолт 500), хвост подбирается курсором
 - `extract.run`: курсор по (пакет, тема), окно `backfill_days` на первом прогоне,
   лимит 200 сообщений; операции new/update/close/reopen одной транзакцией;
-  **evidence-гейт**: цитата вне текста сообщения отклоняется, сбой провайдера
+  **evidence-гейт**: цитата вне текста сообщения отклоняется, причины отказа
+  пишутся в `rejects_json`, сбой провайдера
   курсор не двигает; **overflow**: операции сверх 50 фиксируются в
   `ops_overflow`, курсор остаётся до первой отброшенной, следующий прогон
   дочитывает; `--all-indexed` покрывает все (chat, topic) индекса; дедуп
   `dedup_hint` сильнее title; отдаётся через MCP `tg_entities`/`tg_entity`/
   `tg_overdue`
-- `monitor.collect`: просрочка и горизонт `--days-ahead`, фильтр по проекту;
+- `monitor.collect`: просрочка и горизонт `--days-ahead`, фильтр по проекту,
+  блок зависших вопросов; дедуп `--send` по хэшу отчёта с обходом через
+  `TG_MONITOR_FORCE=1`;
   `notify`: dry-run по умолчанию, реальная отправка только за `TG_ALLOW_SEND=1`,
   cap `TG_NOTIFY_CAP`; `server.py` его не импортирует
 - `media`: sync/live ставят в очередь только транскрибируемое аудио (voice +
   audio-документы, гейт `is_transcribable`), stub-транскрипт попадает
-  в промпт извлечения; openai без скачанных байтов — `ValueError`
+  в промпт извлечения; openai без скачанных байтов — `ValueError`;
+  `--sweep-pending` помечает легаси-pending как skipped одним UPDATE
 - `export.run`: file-провайдер пишет JSONL, курсор в `integrations` (повторный
   прогон дубликатов не даёт; краш посреди прогона — закоммичено до сущности,
   повтор выгружает только остаток); 101 — реальный HTTP-провайдер, проверен
-  против локального фейк-сервера (POST, тело, курсор только после 2xx, ошибка
+  против локального фейк-сервера (POST, тело, id-курсор по `entity_events.id`,
+  ретраи на 5xx, continue-on-error со списком `failed`, `Idempotency-Key`,
+  запись `external_id`, курсор только после 2xx, ошибка
   без кредов); notion — словарь-ошибка без исключения. Живой пуш в 101 не
   проверялся (нет кредов/контракта)
 - **topic_id канонически NOT NULL** (=1 General): вставка без темы и миграция
   старых баз с NULL, запросы идут по индексу `ix_msg_chat_topic` (EXPLAIN PLAN
   проверяется), watch/history/search/stats видят то же
 - `server._db()` кэширует соединение на поток — схема/миграции не гоняются
-  на каждый tool-call
+  на каждый tool-call; миграции дополнительно гейтятся `PRAGMA user_version`
 - **`tg_live_*` + `tg_live_search`**: живые запросы регистрируются при
   `TG_ALLOW_LIVE=1`; без кредов — JSON-ошибка, не зависание
 - `search.search_global`: каналы/группы/юзеры с marked-id и kind,
@@ -668,13 +728,23 @@ python3 export.py --system notion                  # структурирова�
 - пакет `services`: триал с due_text через dedup_hint-схему, другая
   формулировка с тем же hint — дубликат; stub создаёт service/trial/promo
 - семантика паков (`tests_packs_semantics.py`): детерминированный `due_text` →
-  `due_ts` (абсолютные даты, дата без года по дате сообщения); изоляция
-  construction от проекта «сервисы» через `exclude_project_regex`; supersedes:
+  `due_ts` (абсолютные даты, ru-месяцы, относительные, ISO — по дате сообщения,
+  конец дня вместо полуночи), no-downgrade точного срока при update; изоляция
+  construction от проекта «сервисы» через `require_match` + `exclude_project_regex`;
+  `dedup_scope` project/global; схемы пакетов: evidence `minItems=1`, без
+  `confidence`; supersedes:
   цель закрывается, событие op='supersede' в `entity_events`. Качество и
   частота извлечения на реальных чатах не проверены: rate `promise` и реальная
   заполняемость due/supersedes ждут живого прогона `EXTRACT_PROVIDER=openai`
 - `pipeline.run`: sync→extract→digest→monitor на фейк-клиенте (10 сообщений,
-  2 дайджеста), второй прогон инкрементален, `--skip sync` — офлайн-шаги
+  2 дайджеста), второй прогон инкрементален, `--skip sync` — офлайн-шаги;
+  в отчёте extract — сводные `ops_rejected`/`ops_overflow`
+- операционная автономка (`tests_ops_report.py`): notify в живом event loop
+  (worker-поток), бюджет шага `PIPELINE_STEP_BUDGET`, proclock-лок one-shot,
+  дедуп сводки monitor, зависшие вопросы, `doctor --quality`;
+  `tests_media_ingest.py`: sweep pending и граница `tg_mark_read`;
+  `tests_db_core.py`: user_version-миграции, read-only, deleted/FTS, dirty,
+  каскад проекта
 - проект у тем watch (`watch.py --project`, подкоманда `project`) наследуется
   сущностями и фильтруется в `tg_entities`/`tg_overdue`/`monitor`
 
