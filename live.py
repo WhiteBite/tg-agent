@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Live-режим: новые сообщения Telegram пишутся в индекс в реальном времени.
+"""Live-режим: новые сообщения, правки и удаления Telegram пишутся в индекс
+в реальном времени (правки — через edited_ts, удаления — флаг deleted).
 
     python3 live.py
 
@@ -60,8 +61,33 @@ def handle_message(db: DB, msg, chat_id: int, forum: bool) -> bool:
     if not db.insert_message(row):
         return False
     db.insert_refs(chat_id, row["msg_id"], extract_refs(row["text"], row["fwd_from"]))
-    media_mod.enqueue(db, chat_id, row["msg_id"], row["media"])
+    if media_mod.is_transcribable(msg):
+        media_mod.enqueue(db, chat_id, row["msg_id"], row["media"])
     return True
+
+
+def handle_edit(db: DB, msg, chat_id: int, forum: bool) -> bool:
+    """Правка сообщения -> обновление строки индекса (+refs); сообщения,
+    которых ещё нет, вставляются целиком. False — если менять нечего."""
+    tid = sync_mod.topic_of_message(msg) if forum else None
+    if tid is None:
+        tid = 1
+    row = sync_mod.message_row(msg, chat_id, tid, None)
+    if not db.update_message(row) and not db.insert_message(row):
+        return False
+    db.insert_refs(chat_id, row["msg_id"], extract_refs(row["text"], row["fwd_from"]))
+    if media_mod.is_transcribable(msg):
+        media_mod.enqueue(db, chat_id, row["msg_id"], row["media"])
+    return True
+
+
+def handle_delete(db: DB, chat_id: int, msg_ids: list[int]) -> int:
+    """Удаления -> флаг deleted; возвращает число помеченных строк."""
+    n = 0
+    for mid in msg_ids:
+        if db.mark_deleted(chat_id, mid):
+            n += 1
+    return n
 
 
 async def main() -> None:
@@ -90,23 +116,50 @@ async def main() -> None:
 
     print(f"live: слушаю {len(state['ids'])} чатов ({len(state['forums'])} форумов). Ctrl-C для стопа.")
 
+    def known(cid: int) -> bool:
+        if cid in state["ids"]:
+            return True
+        # чат могли добавить в индекс/лист после старта — перечитываем не чаще раза в 30с
+        now = time.monotonic()
+        if now - state["refreshed"] > 30:
+            state["ids"], state["forums"] = collect_ids()
+            state["refreshed"] = now
+        return cid in state["ids"]
+
     @client.on(events.NewMessage)
     async def on_new(event):  # noqa: ANN
         cid = getattr(event, "chat_id", None)
-        if cid is None:
+        if cid is None or not known(cid):
             return
-        if cid not in state["ids"]:
-            # чат могли добавить в индекс/лист после старта — перечитываем не чаще раза в 30с
-            now = time.monotonic()
-            if now - state["refreshed"] > 30:
-                state["ids"], state["forums"] = collect_ids()
-                state["refreshed"] = now
-            if cid not in state["ids"]:
-                return
         try:
             if handle_message(db, event.message, cid, cid in state["forums"]):
                 print(f"  + {cid}/{event.message.id}", flush=True)
         except Exception as exc:  # не роняем демона на одном кривом сообщении
+            print(f"  ! {cid}: {exc}", file=sys.stderr)
+
+    @client.on(events.MessageEdited)
+    async def on_edit(event):  # noqa: ANN
+        cid = getattr(event, "chat_id", None)
+        if cid is None or not known(cid):
+            return
+        try:
+            if handle_edit(db, event.message, cid, cid in state["forums"]):
+                print(f"  ~ {cid}/{event.message.id}", flush=True)
+        except Exception as exc:
+            print(f"  ! {cid}: {exc}", file=sys.stderr)
+
+    @client.on(events.MessageDeleted)
+    async def on_delete(event):  # noqa: ANN
+        # в личных чатах и малых группах Telegram не сообщает, где удалили — chat_id None
+        cid = getattr(event, "chat_id", None)
+        ids = list(getattr(event, "deleted_ids", None) or [])
+        if cid is None or not ids or not known(cid):
+            return
+        try:
+            n = handle_delete(db, cid, ids)
+            if n:
+                print(f"  - {cid}: {n} удалено", flush=True)
+        except Exception as exc:
             print(f"  ! {cid}: {exc}", file=sys.stderr)
 
     try:

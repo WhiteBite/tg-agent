@@ -245,6 +245,7 @@ def message_row(msg: Any, chat_id: int, topic_id: Optional[int], client: Any) ->
     if fwd is not None:
         fid = getattr(fwd, "from_id", None)
         fwd_cid = getattr(fid, "channel_id", None) or getattr(fid, "user_id", None)
+    edit_date = getattr(msg, "edit_date", None)
     return {
         "chat_id": chat_id,
         "msg_id": int(msg.id),
@@ -262,6 +263,8 @@ def message_row(msg: Any, chat_id: int, topic_id: Optional[int], client: Any) ->
         "forwards": getattr(msg, "forwards", None),
         "reactions": reactions,
         "fwd_from": fwd_cid,
+        "edited_ts": int(edit_date.timestamp()) if edit_date is not None else None,
+        "deleted": False,
     }
 
 
@@ -331,9 +334,10 @@ async def pull_chat(
     """
     attempt = 0
     total_new = 0
+    total_edited = 0
     total_per_topic: dict[int, int] = {}
     while True:  # FloodWait: повторяем проход; вставки идемпотентны
-        new = seen = 0
+        new = seen = edited = 0
         max_id = min_id
         per_topic: dict[int, int] = {}
         try:
@@ -351,17 +355,26 @@ async def pull_chat(
                     max_id = max(max_id, msg.id)
                     continue
                 row = message_row(msg, chat_id, tid, client)
-                if db.insert_message(row):
+                fresh = db.insert_message(row)
+                if fresh:
                     new += 1
                     per_topic[tid] = per_topic.get(tid, 0) + 1
+                elif row["edited_ts"] is not None:
+                    # строка уже есть (обычно вставлена live.py) — подтягиваем правку
+                    fresh = db.update_message(row)
+                    if fresh:
+                        edited += 1
+                if fresh:
                     db.insert_refs(chat_id, row["msg_id"],
                                    extract_refs(row["text"], row["fwd_from"]))
-                    media_mod.enqueue(db, chat_id, row["msg_id"], row["media"])
+                    if media_mod.is_transcribable(msg):
+                        media_mod.enqueue(db, chat_id, row["msg_id"], row["media"])
                 max_id = max(max_id, msg.id)
             break
         except _FloodWait as exc:
             # вставленные до FloodWait строки в ретрае вернут False — считаем их сразу
             total_new += new
+            total_edited += edited
             for tid, cnt in per_topic.items():
                 total_per_topic[tid] = total_per_topic.get(tid, 0) + cnt
             attempt += 1
@@ -369,9 +382,11 @@ async def pull_chat(
                 raise
             await _flood_sleep(exc, attempt)
     total_new += new
+    total_edited += edited
     for tid, cnt in per_topic.items():
         total_per_topic[tid] = total_per_topic.get(tid, 0) + cnt
-    return {"new": total_new, "seen": seen, "max_id": max_id, "per_topic": total_per_topic}
+    return {"new": total_new, "edited": total_edited, "seen": seen,
+            "max_id": max_id, "per_topic": total_per_topic}
 
 
 def _peer_marked(p: Any) -> Optional[int]:
@@ -468,6 +483,7 @@ async def sync_chat(
         "title": title,
         "is_forum": forum,
         "new_messages": res["new"],
+        "edited_messages": res["edited"],
         "seen_messages": res["seen"],
         "topics": [
             {
@@ -534,10 +550,12 @@ async def backfill(
     while True:
         attempt = 0
         rows: list[dict[str, Any]] = []
+        audio_ids: set[int] = set()
         while True:  # FloodWait: повторяем тот же чанк (вставки идемпотентны)
             chunk_seen = 0
             chunk_max = cursor
             rows = []
+            audio_ids = set()
             try:
                 async for msg in client.iter_messages(
                     chat_id, limit=chunk_size, offset_id=cursor, reverse=True
@@ -548,6 +566,8 @@ async def backfill(
                         tid = 1
                     if not dry_run:
                         rows.append(message_row(msg, chat_id, tid, client))
+                        if media_mod.is_transcribable(msg):
+                            audio_ids.add(int(msg.id))
                     chunk_max = max(chunk_max, msg.id)
                     if max_messages and total_seen + chunk_seen >= max_messages:
                         break
@@ -564,8 +584,12 @@ async def backfill(
                 db.insert_refs(chat_id, row["msg_id"],
                                extract_refs(row["text"], row["fwd_from"]))
             for row in rows:
-                if row["media"] in media_mod.MEDIA_KINDS:
+                if row["msg_id"] in audio_ids:
                     media_mod.enqueue(db, chat_id, row["msg_id"], row["media"])
+            for row in rows:
+                if row["edited_ts"] is not None and db.update_message(row):
+                    db.insert_refs(chat_id, row["msg_id"],
+                                   extract_refs(row["text"], row["fwd_from"]))
             db.set_meta(f"backfill:{chat_id}", str(chunk_max))
             db.conn.commit()
         total_new += chunk_new
@@ -606,10 +630,12 @@ async def backfill_window(
     total_new = total_seen = 0
     for cid in chats:
         rows: list[dict[str, Any]] = []
+        audio_ids: set[int] = set()
         attempt = 0
         try:
             while True:  # FloodWait: повторяем чат
                 rows = []
+                audio_ids = set()
                 try:
                     async for msg in client.iter_messages(
                             cid, offset_date=boundary, reverse=True, limit=None):
@@ -618,6 +644,8 @@ async def backfill_window(
                             tid = 1
                         if not dry_run:
                             rows.append(message_row(msg, cid, tid, client))
+                            if media_mod.is_transcribable(msg):
+                                audio_ids.add(int(msg.id))
                         total_seen += 1
                     break
                 except _FloodWait as exc:
@@ -638,8 +666,12 @@ async def backfill_window(
             db.insert_refs(cid, row["msg_id"],
                            extract_refs(row["text"], row["fwd_from"]))
         for row in rows:
-            if row["media"] in media_mod.MEDIA_KINDS:
+            if row["msg_id"] in audio_ids:
                 media_mod.enqueue(db, cid, row["msg_id"], row["media"])
+        for row in rows:
+            if row["edited_ts"] is not None and db.update_message(row):
+                db.insert_refs(cid, row["msg_id"],
+                               extract_refs(row["text"], row["fwd_from"]))
         db.conn.commit()
         total_new += new
         print(f"  {cid}: окно {days}д — {len(rows)} сообщений, новых {new}", flush=True)

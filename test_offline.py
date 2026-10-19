@@ -52,8 +52,19 @@ class MessageMediaPhoto(FakeMedia):
     pass
 
 
+class DocumentAttributeVoice:
+    def __init__(self, duration: int = 5):
+        self.duration = duration
+
+
+class VoiceDoc:
+    size = 1000
+    mime_type = "audio/ogg"
+    attributes = [DocumentAttributeVoice()]
+
+
 class MessageMediaVoice(FakeMedia):
-    pass
+    document = VoiceDoc()
 
 
 class MessageActionTopicCreated:
@@ -1957,8 +1968,8 @@ def test_export(db_path: Path) -> None:
     check(res_n.get("ok") is False and "не реализован" in res_n.get("error", ""),
           "export: notion — структурированная ошибка без исключения", str(res_n))
     res_1 = export_mod.run(str(exp_db), system="101")
-    check(res_1.get("ok") is False and "не реализован" in res_1.get("error", ""),
-          "export: 101 — структурированная ошибка без исключения", str(res_1))
+    check(res_1.get("ok") is False and "EXPORT_101_URL" in res_1.get("error", ""),
+          "export: 101 — структурированная ошибка без кредов", str(res_1))
     res_b = export_mod.run(str(exp_db), system="bogus")
     check(res_b.get("ok") is False and "неизвестная система" in res_b.get("error", ""),
           "export: неизвестная система — структурированная ошибка", str(res_b))
@@ -5051,6 +5062,12 @@ def main() -> int:
     test_media_download(db_path)
     test_proclock(db_path)
     test_live_reconnect_hardening(db_path)
+    for suite in ("tests_index_media", "tests_packs_semantics", "tests_export_101"):
+        rc = subprocess.run([sys.executable, "-X", "utf8",
+                             str(Path(__file__).parent / f"{suite}.py")],
+                            cwd=str(Path(__file__).parent)).returncode
+        if rc != 0:
+            FAILURES.append(suite)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

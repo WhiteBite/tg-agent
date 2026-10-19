@@ -85,6 +85,59 @@ def _norm_cmp(text: str | None) -> str:
     return " ".join(unicodedata.normalize("NFKC", text or "").casefold().split())
 
 
+_DUE_FULL_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
+_DUE_SHORT_RE = re.compile(r"\b(\d{1,2})\.(\d{2})\b")
+
+
+def _parse_due_text(due_text: str | None, msg_ts: int | None) -> int | None:
+    """Абсолютная дата из due_text -> unix-ts (полночь UTC). Год без цифр года
+    разрешается по дате сообщения; без неё и без явного года срок неопределим."""
+    if not due_text:
+        return None
+    m = _DUE_FULL_RE.search(due_text)
+    if m is not None:
+        year_s = m.group(3)
+        if len(year_s) == 2:
+            year = 2000 + int(year_s)
+        elif len(year_s) == 4:
+            year = int(year_s)
+        else:
+            return None
+        try:
+            return int(datetime(year, int(m.group(2)), int(m.group(1)),
+                                tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            return None
+    m = _DUE_SHORT_RE.search(due_text)
+    if m is None or msg_ts is None:
+        return None
+    day, month = int(m.group(1)), int(m.group(2))
+    anchor = datetime.fromtimestamp(msg_ts, timezone.utc)
+    for year in (anchor.year, anchor.year + 1):
+        try:
+            d = datetime(year, month, day, tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if d.date() >= anchor.date():
+            return int(d.timestamp())
+    return None
+
+
+def _evidence_ts(db: DB, op: dict) -> int | None:
+    ev = (op.get("evidence") or [{}])[0]
+    row = db.conn.execute(
+        "SELECT ts FROM messages WHERE chat_id=? AND msg_id=?",
+        (ev.get("chat_id"), ev.get("msg_id"))).fetchone()
+    return row["ts"] if row is not None else None
+
+
+def _op_due_ts(db: DB, op: dict) -> int | float | None:
+    due = op.get("due_ts")
+    if due is None and op.get("due_text"):
+        due = _parse_due_text(op.get("due_text"), _evidence_ts(db, op))
+    return due
+
+
 def scope_matches(scope_filter: dict, w: dict) -> bool:
     sf = scope_filter or {}
     for field, key in (("topic_title", "topic_title_regex"),
@@ -92,6 +145,9 @@ def scope_matches(scope_filter: dict, w: dict) -> bool:
         rx = sf.get(key)
         if rx is not None and not re.search(rx, w.get(field) or ""):
             return False
+    ex = sf.get("exclude_project_regex")
+    if ex is not None and re.search(ex, w.get("project") or ""):
+        return False
     chat_ids = sf.get("chat_ids")
     if chat_ids is not None and w["chat_id"] not in chat_ids:
         return False
@@ -274,6 +330,20 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
             hay = _norm_cmp(f"{row['text'] or ''} [{row['media']}: {row['transcript']}]")
         if _norm_cmp(ev.get("quote")) not in hay:
             return False, "quote не подстрока сообщения"
+    sup = op.get("supersedes")
+    if sup is not None:
+        if not isinstance(sup, int):
+            return False, "supersedes не число"
+        srow = db.conn.execute(
+            "SELECT closed_ts FROM entities WHERE id=? AND pack=?",
+            (sup, pack["id"])).fetchone()
+        member = srow is not None and db.conn.execute(
+            "SELECT 1 FROM entity_sources WHERE entity_id=? AND chat_id=? AND topic_id=?",
+            (sup, w["chat_id"], w["topic_id"])).fetchone() is not None
+        if not member:
+            return False, f"supersedes {sup} вне скоупа"
+        if srow["closed_ts"] is not None:
+            return False, f"supersedes {sup}: сущность закрыта"
     if name == "new":
         return True, ""
     entity_id = op.get("entity_id")
@@ -344,6 +414,25 @@ def _touch_source(db: DB, entity_id: int, w: dict, now: int) -> None:
         (entity_id, w["chat_id"], w["topic_id"], now, now))
 
 
+def _apply_supersede(db: DB, pack: dict, op: dict, new_id: int,
+                     run_id: int, now: int) -> None:
+    sup = op.get("supersedes")
+    if not isinstance(sup, int):
+        return
+    cur = db.conn.execute(
+        "UPDATE entities SET closed_ts=?, status='closed', updated_ts=? "
+        "WHERE id=? AND pack=? AND closed_ts IS NULL",
+        (now, now, sup, pack["id"]))
+    if cur.rowcount == 0:
+        return
+    ev = (op.get("evidence") or [{}])[0]
+    db.conn.execute(
+        "INSERT INTO entity_events(entity_id, run_id, ts, op, field, to_val, "
+        "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?)",
+        (sup, run_id, now, "supersede", "superseded_by", str(new_id),
+         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+
+
 def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> None:
     kind = op["kind"]
     title = op.get("title") or ""
@@ -352,13 +441,14 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
     dedup_key = hashlib.sha1(
         f"{kind}|{hint or _norm(title).lower()}".encode("utf-8")).hexdigest()
     attrs = {"due_text": op.get("due_text")} if op.get("due_text") else None
+    op_due = _op_due_ts(db, op)
     try:
         cur = db.conn.execute(
             "INSERT INTO entities(pack, chat_id, topic_id, kind, title, body, owner, "
             "due_ts, project, confidence, attrs_json, dedup_key, created_ts, updated_ts) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pack["id"], w["chat_id"], w["topic_id"], kind, title, op.get("body"),
-             op.get("owner"), op.get("due_ts"), w.get("project"), op.get("confidence"),
+             op.get("owner"), op_due, w.get("project"), op.get("confidence"),
              json.dumps(attrs, ensure_ascii=False) if attrs is not None else None,
              dedup_key, now, now))
         entity_id = cur.lastrowid
@@ -369,6 +459,7 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
                 "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
                 (entity_id, run_id, now, "new", None,
                  ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+        _apply_supersede(db, pack, op, entity_id, run_id, now)
         return
     except sqlite3.IntegrityError:
         row = db.conn.execute(
@@ -387,8 +478,8 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
         owner = op["owner"]
         changes.append(("owner", row["owner"], owner))
     due_ts = row["due_ts"]
-    if due_ts is None and op.get("due_ts") is not None:
-        due_ts = op["due_ts"]
+    if due_ts is None and op_due is not None:
+        due_ts = op_due
         changes.append(("due_ts", row["due_ts"], due_ts))
     project = row["project"]
     if (project is None or project == "") and w.get("project"):
@@ -416,6 +507,7 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
             (entity_id, run_id, now, "update", field,
              None if old is None else str(old), None if new is None else str(new),
              ev0.get("chat_id"), ev0.get("msg_id"), ev0.get("quote")))
+    _apply_supersede(db, pack, op, entity_id, run_id, now)
     _touch_source(db, entity_id, w, now)
 
 
@@ -425,9 +517,12 @@ def _apply_update(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) 
     if row is None:
         return
     _touch_source(db, entity_id, w, now)
+    _apply_supersede(db, pack, op, entity_id, run_id, now)
     title = op.get("title") or row["title"]
     owner = op.get("owner") if op.get("owner") is not None else row["owner"]
-    due_ts = op.get("due_ts") if op.get("due_ts") is not None else row["due_ts"]
+    due_ts = _op_due_ts(db, op)
+    if due_ts is None:
+        due_ts = row["due_ts"]
     confidence = op.get("confidence") if op.get("confidence") is not None else row["confidence"]
     attrs = {"due_text": op.get("due_text")} if op.get("due_text") else None
     attrs_json = json.dumps(attrs, ensure_ascii=False) if attrs is not None else row["attrs_json"]

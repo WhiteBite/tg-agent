@@ -4,8 +4,9 @@
     MEDIA_PROVIDER=stub python3 media.py                # заглушка без сети
     MEDIA_PROVIDER=openai python3 media.py --limit 50   # скачивание + транскрипция
 
-sync.py и live.py ставят голосовые и документы в очередь (таблица
-media_assets, status=pending); воркер рефетчит сообщение из Telegram по id
+sync.py и live.py ставят в очередь (таблица media_assets, status=pending) только
+аудио — голосовые и аудио-документы (не-аудио документы не попадают); воркер
+рефетчит сообщение из Telegram по id
 (file_reference живёт только на свежем объекте), классифицирует аудио по
 атрибутам (DocumentAttributeVoice/Audio, mime audio/* как фолбэк) и до
 скачивания отсекает не-аудио, >10MB и >5мин статусом skipped; удалённые
@@ -118,6 +119,10 @@ def _audio_info(msg) -> dict | None:
     duration = next((a.duration for a in attrs
                      if getattr(a, "duration", None) is not None), None)
     return {"size": getattr(doc, "size", None), "duration": duration, "mime": mime}
+
+
+def is_transcribable(msg) -> bool:
+    return _audio_info(msg) is not None
 
 
 def _pending(db: DB, limit: int | None, kinds: tuple) -> list[dict]:

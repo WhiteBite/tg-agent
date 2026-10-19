@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS messages (
     forwards    INTEGER,
     reactions   TEXT,
     raw_json    TEXT,
+    edited_ts   INTEGER,
+    deleted     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, msg_id)
 );
 
@@ -247,6 +249,11 @@ END;
 CREATE TRIGGER IF NOT EXISTS trg_msg_ad AFTER DELETE ON messages BEGIN
     DELETE FROM messages_fts WHERE rowid = old.rowid;
 END;
+CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE ON messages BEGIN
+    DELETE FROM messages_fts WHERE rowid = old.rowid;
+    INSERT INTO messages_fts(rowid, chat_id, topic_id, text)
+    VALUES (new.rowid, new.chat_id, new.topic_id, COALESCE(new.text, ''));
+END;
 """
 
 
@@ -266,6 +273,7 @@ class DB:
             self.fts = True
         except sqlite3.OperationalError:
             self.fts = False  # поиск уедет на LIKE
+        self._migrate_message_edits()
         self._migrate_marked_ids()
         self._migrate_global_dedup()
         self._migrate_watch_project()
@@ -289,7 +297,7 @@ class DB:
     _MIGRATE_TABLES = (
         ("messages", "chat_id, msg_id, topic_id, ts, date_iso, sender_id, sender_name, "
                      "is_out, is_service, text, media, reply_to, views, forwards, "
-                     "reactions, raw_json"),
+                     "reactions, raw_json, edited_ts, deleted"),
         ("topics", "chat_id, topic_id, title, closed, messages, last_ts"),
         ("watch", "chat_id, topic_id, alias, pinned, last_read, added_at"),
         ("refs", "chat_id, msg_id, kind, value"),
@@ -300,6 +308,15 @@ class DB:
         ("entity_events", "entity_id, run_id, ts, op, field, from_val, to_val, chat_id, msg_id, quote"),
         ("media_assets", "chat_id, msg_id, kind, status, text, engine, ts"),
     )
+
+    def _migrate_message_edits(self) -> None:
+        for ddl in (
+                "ALTER TABLE messages ADD COLUMN edited_ts INTEGER",
+                "ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0"):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
 
     def _migrate_marked_ids(self) -> None:
         """До 0.3.1 чаты хранились с сырыми положительными id Telethon; переносим
@@ -597,7 +614,7 @@ class DB:
 
     _MSG_COLS = ("chat_id, msg_id, topic_id, ts, date_iso, "
                  "sender_id, sender_name, is_out, is_service, text, media, reply_to, "
-                 "views, forwards, reactions, raw_json")
+                 "views, forwards, reactions, raw_json, edited_ts, deleted")
 
     @staticmethod
     def _msg_values(msg: dict[str, Any]) -> tuple:
@@ -618,13 +635,15 @@ class DB:
             msg.get("forwards"),
             json.dumps(msg.get("reactions") or [], ensure_ascii=False),
             json.dumps(msg, ensure_ascii=False, default=str),
+            msg.get("edited_ts"),
+            int(msg.get("deleted") or 0),
         )
 
     def insert_message(self, msg: dict[str, Any]) -> bool:
         """Вставляет сообщение; возвращает False, если оно уже было."""
         cur = self.conn.execute(
             f"INSERT OR IGNORE INTO messages({self._MSG_COLS}) "
-            f"VALUES({','.join('?' * 16)})",
+            f"VALUES({','.join('?' * 18)})",
             self._msg_values(msg),
         )
         if cur.rowcount:
@@ -638,10 +657,39 @@ class DB:
             return 0
         cur = self.conn.executemany(
             f"INSERT OR IGNORE INTO messages({self._MSG_COLS}) "
-            f"VALUES({','.join('?' * 16)})",
+            f"VALUES({','.join('?' * 18)})",
             [self._msg_values(r) for r in rows],
         )
         return cur.rowcount
+
+    def update_message(self, msg: dict[str, Any]) -> bool:
+        """Обновляет правку сообщения; False, если строки нет или правка не новее
+        сохранённой (повтор того же события/ретрай скана — идемпотентно)."""
+        ets = msg.get("edited_ts")
+        cur = self.conn.execute(
+            "UPDATE messages SET text=?, media=?, reactions=?, views=?, forwards=?, "
+            "edited_ts=?, raw_json=? "
+            "WHERE chat_id=? AND msg_id=? AND (edited_ts IS NULL OR edited_ts < ?)",
+            (msg.get("text"), msg.get("media"),
+             json.dumps(msg.get("reactions") or [], ensure_ascii=False),
+             msg.get("views"), msg.get("forwards"), ets,
+             json.dumps(msg, ensure_ascii=False, default=str),
+             msg["chat_id"], msg["msg_id"], ets),
+        )
+        if cur.rowcount:
+            self.conn.commit()
+            return True
+        return False
+
+    def mark_deleted(self, chat_id: int, msg_id: int) -> bool:
+        cur = self.conn.execute(
+            "UPDATE messages SET deleted=1 WHERE chat_id=? AND msg_id=? AND deleted=0",
+            (chat_id, msg_id),
+        )
+        if cur.rowcount:
+            self.conn.commit()
+            return True
+        return False
 
     def set_topic_counters(self, chat_id: int, topic_id: int, messages: int, last_ts: Optional[int]) -> None:
         self.conn.execute(

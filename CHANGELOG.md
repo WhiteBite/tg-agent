@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 — 2026-10-19
+Индекс догоняет реальность переписки, медиа-очередь точна, экспорт 101 работает:
+- Правки и удаления сообщений доходят до индекса: `db.py` — колонки `edited_ts`/`deleted` (+миграция старых баз, FTS-триггер), `update_message`/`mark_deleted`; `sync.py` подхватывает `edit_date` в rescan и backfill (`edited_messages` в отчёте); `live.py` обрабатывает `MessageEdited`/`MessageDeleted`. Строка отражает последний текст, предыдущие версии правок не хранятся; удаление — флаг, строка остаётся видима читалкам.
+- Медиа-очередь: sync/live ставят в очередь только транскрибируемое аудио (voice + аудио-документы, гейт `media.is_transcribable`); обычные документы больше не enqueue. Скачивание реализовано (Telethon `download_media`); openai без байтов — `ValueError`.
+- Паки: изоляция скоупа — `exclude_project_regex: "^сервисы$"` в construction; детерминированный fallback `due_text` → `due_ts` (абсолютные даты, дата без года резолвится по дате сообщения); ссылка `supersedes` — new/update закрывает открытую сущность того же scope с событием op='supersede'.
+- `export.py`: провайдер 101 — реальный HTTP POST (stdlib urllib): `EXPORT_101_URL`, JWT `EXPORT_101_TOKEN`, `EXPORT_101_PATH` (дефолт `/entities`), `EXPORT_101_TIMEOUT`; один POST на сущность, курсор двигается только после 2xx; без кредов — структурированная ошибка. notion остаётся заглушкой.
+- Тесты: `tests_index_media.py`, `tests_packs_semantics.py`, `tests_export_101.py` запускаются из `test_offline.py` подпроцессами; проверки: 475 → 594.
+
 ## 0.6.0 — 2026-10-14
 Замкнутый цикл: LLM-мозг, накопление базы, проактивные сводки, автономность:
 - `extract.py`: `--until-done` — раунды (по 200 сообщений на тему) дожёвывают весь хвост истории за один запуск; курсор и overflow-семантика прежние.
