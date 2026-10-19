@@ -497,16 +497,21 @@ python3 export.py --system notion                  # структурирова�
 каждого провайдера живёт в таблице `integrations` (entity_id, system):
 выгружаются только сущности с событиями свежее курсора; сущности без
 событий не выгружаются никогда. Курсор 101 — по `entity_events.id`, а не по
-вторичному `ts` (события в одну секунду раньше молча терялись). `101` — реализованный REST-провайдер
-(stdlib urllib): env `EXPORT_101_URL` + JWT-токен `EXPORT_101_TOKEN`, путь
-`EXPORT_101_PATH` (дефолт `/entities`), таймаут `EXPORT_101_TIMEOUT`; один POST
-на сущность с телом `{"entity", "events", "exported_ts"}` и заголовком
-`Idempotency-Key: {entity_id}-{max_event_id}`; 5xx и сетевые сбои ретраятся до
-3 раз с backoff (`EXPORT_101_RETRIES`); упавшая сущность не обрывает прогон —
-она уходит в `failed` в ответе, id/external_id из ответа пишется в
-`integrations.external_id`; курсор продвигается
-только после 2xx; без кредов — структурированный `{"ok": false, "error": ...}`
-без исключения. `notion` остаётся заглушкой со словарём-ошибкой.
+вторичному `ts` (события в одну секунду раньше молча терялись). `101` — реальный
+REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group.ru), auth —
+`EXPORT_101_TOKEN` либо `EXPORT_101_LOGIN` + `EXPORT_101_PASSWORD` (вход
+`/api/auth/sign-in/`, refresh пары на 401 через `/api/auth/refresh-token/`).
+Сущности kinds из `EXPORT_101_KINDS` (дефолт `task,promise`) уходят задачами в
+`EXPORT_101_PATH` (дефолт `/api/tasks/v2/`): create — POST, при наличии
+`integrations.external_id` — PATCH `.../{guid}/`; `EXPORT_101_COMMENTS=1` пишет
+событие комментарием; переименование полей под контракт 101 — `EXPORT_101_MAP`
+(`{"title","body","due_ts"}` → поля 101); `EXPORT_101_DRY=1` — показать, что уедет,
+без отправки (курсор не двигается). 5xx/сеть ретраятся (`EXPORT_101_RETRIES`,
+`EXPORT_101_BACKOFF`), 4xx не ретраится; упавшая сущность не обрывает прогон (уходит
+в `failed`), `external_id` из ответа (guid) пишется в `integrations.external_id`,
+курсор — только после 2xx; без кредов — структурированный `{"ok": false, "error": ...}`
+без исключения. Тела задач в сваггере 101 нет — дефолтный `EXPORT_101_MAP`
+консервативен и настраивается. `notion` остаётся заглушкой со словарём-ошибкой.
 
 ## Безопасность
 
@@ -573,7 +578,7 @@ python3 export.py --system notion                  # структурирова�
 | `monitor.py` | Сводка просроченного и дедлайнов по проектам, зависшие вопросы; `--send` через `notify.py`, дедуп по хэшу отчёта |
 | `notify.py` | Уведомления в Saved Messages; единственный пишущий модуль, гейт `TG_ALLOW_SEND=1` |
 | `media.py` | Очередь транскрипции аудио (voice + audio-документы): гейт `is_transcribable` на инджесте, рефетч и скачивание из Telegram, гейты до скачивания, `--sweep-pending`, qwen3-asr-flash (stub/openai) |
-| `export.py` | Выгрузка сущностей во внешние системы (file / 101 по REST с id-курсором, ретраями и Idempotency-Key; notion — заглушка-ошибка) |
+| `export.py` | Выгрузка сущностей во внешние системы (file / 101 — REST-задачи с JWT sign-in+refresh, id-курсор, ретраи, upsert по guid; notion — заглушка-ошибка) |
 | `services_report.py` | Каталог сервисов из сущностей: rollup по dedup_key, `--days/--query/--top/--hide-closed` |
 | `fuzzy_dedup.py` | Maintenance-проход: слияние дублей сущностей по нормализованному title (richer-keeper, cap, идемпотентный) |
 | `proclock.py` | Lockfile одиночного инстанса для демонов (pipeline --loop, live.py) |

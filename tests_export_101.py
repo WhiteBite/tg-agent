@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Проверки 101-провайдера export.py против локального http.server (127.0.0.1).
 
-Реально исполняются: POST-механика (Bearer/Content-Type/тело записи), курсор
-integrations по id события (двойное событие в одну секунду не теряется),
-идемпотентность, остаток после курсора, ретраи 5xx (три неудачи потом успех,
+Реально исполняются: JWT-механика (Bearer-токен напрямую, sign-in по
+логину/паролю через /api/auth/sign-in/, обновление пары на 401 через
+/api/auth/refresh-token/), create POST и PATCH .../{guid}/ с комментарием
+по EXPORT_101_COMMENTS, карта полей (только непустые поля, без обёртки
+entity/events и без Idempotency-Key), фильтр kinds, dry-режим без сети,
+курсор integrations по id события (двойное событие в одну секунду не
+теряется), идемпотентность, ретраи 5xx (три неудачи потом успех,
 исчерпание попыток), 4xx без ретрая и без блокировки остальных сущностей,
-Idempotency-Key, external_id из ответа, file-провайдер на id-курсоре,
-поведение на HTTP 500 и сетевой сбой, отсутствие кредов, EXPORT_101_PATH,
-сторонний реестр TG_EXTRA_PROVIDERS (merge поверх встроенных, пустой без env,
-битый путь — исключение наружу). Живой 101 API не зовётся.
+external_id (guid/id) из ответа, file-провайдер на id-курсоре, поведение на
+сетевом сбое, отсутствие кредов, EXPORT_101_PATH, сторонний реестр
+TG_EXTRA_PROVIDERS (merge поверх встроенных, пустой без env, битый путь —
+исключение наружу). Живой 101 API не зовётся.
 """
 
 from __future__ import annotations
@@ -32,8 +36,11 @@ import export as export_mod  # noqa: E402
 
 FAILURES: list[str] = []
 
-ENV_KEYS = ("EXPORT_101_URL", "EXPORT_101_TOKEN", "EXPORT_101_PATH",
-            "EXPORT_101_TIMEOUT", "EXPORT_101_RETRIES", "EXPORT_101_BACKOFF")
+ENV_KEYS = ("EXPORT_101_URL", "EXPORT_101_TOKEN", "EXPORT_101_REFRESH",
+            "EXPORT_101_LOGIN", "EXPORT_101_PASSWORD", "EXPORT_101_PATH",
+            "EXPORT_101_TIMEOUT", "EXPORT_101_RETRIES", "EXPORT_101_BACKOFF",
+            "EXPORT_101_KINDS", "EXPORT_101_MAP", "EXPORT_101_DRY",
+            "EXPORT_101_COMMENTS")
 
 
 def check(cond: bool, label: str, extra: str = "") -> None:
@@ -76,33 +83,91 @@ def external_id_of(db_path: Path, entity_id: int) -> str | None:
 
 
 class CaptureHandler(http.server.BaseHTTPRequestHandler):
+    """Фейк-сервер 101: auth-пара, задачи (create/PATCH/комментарии).
+
+    Запросы задач (всё вне /api/auth/) идут через _handle_task: статус можно
+    форсировать глобально (status + fail_first), по title сущности
+    (title_status) или один раз отдать 401 (once_401) для проверки refresh.
+    """
+
     requests: list[dict] = []
     status: int = 200
     fail_first: int | None = None
-    entity_status: dict[int, int] = {}
+    title_status: dict[str, int] = {}
     response_body: bytes = b""
+    once_401: bool = False
+    guid_seq: int = 0
+    task_count: int = 0
 
-    def do_POST(self) -> None:
+    def _body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(n).decode("utf-8"))
+        raw = self.rfile.read(n) if n else b""
+        try:
+            out = json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError:
+            out = {}
+        return out if isinstance(out, dict) else {}
+
+    def _capture(self, body: dict) -> None:
         CaptureHandler.requests.append({
+            "method": self.command,
             "path": self.path,
             "auth": self.headers.get("Authorization"),
             "ctype": self.headers.get("Content-Type"),
             "idem": self.headers.get("Idempotency-Key"),
             "body": body,
         })
-        code = CaptureHandler.entity_status.get(body["entity"]["id"])
-        if code is None:
-            after_fail = (CaptureHandler.fail_first is not None
-                          and len(CaptureHandler.requests) > CaptureHandler.fail_first)
-            code = 200 if after_fail else CaptureHandler.status
-        payload = CaptureHandler.response_body if code == 200 else b""
+
+    def _send(self, code: int, payload: bytes) -> None:
         self.send_response(code)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         if payload:
             self.wfile.write(payload)
+
+    def _task_code(self, body: dict) -> int:
+        if CaptureHandler.once_401:
+            CaptureHandler.once_401 = False
+            return 401
+        forced = CaptureHandler.title_status.get(body.get("title"))
+        if forced is not None:
+            return forced
+        after_fail = (CaptureHandler.fail_first is not None
+                      and CaptureHandler.task_count > CaptureHandler.fail_first)
+        return 200 if after_fail else CaptureHandler.status
+
+    def _handle_task(self, body: dict) -> None:
+        CaptureHandler.task_count += 1
+        code = self._task_code(body)
+        if code != 200:
+            self._send(code, b"")
+            return
+        if self.path.endswith("/comments/"):
+            self._send(200, b"{}")
+            return
+        if self.command == "PATCH":
+            self._send(200, b"{}")
+            return
+        CaptureHandler.guid_seq += 1
+        payload = CaptureHandler.response_body or \
+            f'{{"guid": "g{CaptureHandler.guid_seq}"}}'.encode()
+        self._send(200, payload)
+
+    def do_POST(self) -> None:
+        body = self._body()
+        self._capture(body)
+        if self.path == "/api/auth/sign-in/":
+            self._send(200, b'{"token": "signin-token", "refresh_token": "refresh-abc"}')
+            return
+        if self.path == "/api/auth/refresh-token/":
+            self._send(200, b'{"token": "fresh-token", "refreshToken": "refresh-new"}')
+            return
+        self._handle_task(body)
+
+    def do_PATCH(self) -> None:
+        body = self._body()
+        self._capture(body)
+        self._handle_task(body)
 
     def log_message(self, fmt: str, *args: object) -> None:
         pass
@@ -112,18 +177,28 @@ def reset_capture() -> None:
     CaptureHandler.requests = []
     CaptureHandler.status = 200
     CaptureHandler.fail_first = None
-    CaptureHandler.entity_status = {}
+    CaptureHandler.title_status = {}
     CaptureHandler.response_body = b""
+    CaptureHandler.once_401 = False
+    CaptureHandler.guid_seq = 0
+    CaptureHandler.task_count = 0
 
 
 def seed(db_path: Path, now: int) -> None:
     with DB(db_path) as db:
-        for eid, title in ((1, "Залить фундамент"), (2, "Заказать арматуру"), (3, "Без событий")):
-            db.conn.execute(
-                "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, "
-                "created_ts, updated_ts) "
-                "VALUES(?, 'construction', -100999, 7, 'task', ?, ?, ?)",
-                (eid, title, now, now))
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, body, due_ts, "
+            "created_ts, updated_ts) VALUES(1, 'construction', -100999, 7, 'task', "
+            "'Залить фундамент', 'выкопать траншею', ?, ?, ?)",
+            (now + 86400, now, now))
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, "
+            "created_ts, updated_ts) VALUES(2, 'construction', -100999, 7, 'task', "
+            "'Заказать арматуру', ?, ?)", (now, now))
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, "
+            "created_ts, updated_ts) VALUES(3, 'construction', -100999, 7, 'task', "
+            "'Без событий', ?, ?)", (now, now))
         for eid, mid in ((1, 11), (2, 12)):
             db.conn.execute(
                 "INSERT INTO entity_events(entity_id, run_id, ts, op, chat_id, msg_id, quote) "
@@ -131,14 +206,15 @@ def seed(db_path: Path, now: int) -> None:
         db.conn.commit()
 
 
-def seed_entities(db_path: Path, now: int, ids: tuple[int, ...]) -> None:
+def seed_entities(db_path: Path, now: int, ids: tuple[int, ...],
+                  kind: str = "task") -> None:
     with DB(db_path) as db:
         for eid in ids:
             db.conn.execute(
                 "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, "
                 "created_ts, updated_ts) "
-                "VALUES(?, 'construction', -100999, 7, 'task', ?, ?, ?)",
-                (eid, f"Сущность {eid}", now, now))
+                "VALUES(?, 'construction', -100999, 7, ?, ?, ?, ?)",
+                (eid, kind, f"Сущность {eid}", now, now))
         db.conn.commit()
 
 
@@ -149,7 +225,7 @@ def test_missing_creds(db_path: Path) -> None:
     check(res.get("ok") is False and isinstance(res.get("error"), str) and bool(res["error"]),
           "101 без кредов: структурированная ошибка без исключения", str(res))
     check("EXPORT_101_URL" in res.get("error", "") and "EXPORT_101_TOKEN" in res.get("error", ""),
-          "101 без кредов: ошибка называет обе переменные", str(res))
+          "101 без URL: ошибка называет и URL, и токен", str(res))
     with DB(db_path) as db:
         n = db.conn.execute("SELECT COUNT(*) FROM integrations WHERE system='101'").fetchone()[0]
     check(n == 0, "101 без кредов: курсор integrations не тронут", str(n))
@@ -158,19 +234,25 @@ def test_missing_creds(db_path: Path) -> None:
     res = export_mod.run(str(db_path), system="101")
     check(res.get("ok") is False and "EXPORT_101_TOKEN" in res.get("error", "")
           and "EXPORT_101_URL" not in res.get("error", ""),
-          "101: ошибка называет только реально отсутствующую переменную", str(res))
+          "101: URL есть, авторизации нет — ошибка называет только токен", str(res))
 
 
 def test_push(db_path: Path, base: str) -> None:
-    print("=== 101: пуш сущностей, заголовки, курсор, идемпотентность ===")
+    print("=== 101: create/PATCH/комментарии, заголовки, курсор, идемпотентность ===")
+    reset_capture()
+    with DB(db_path) as db:
+        due = db.conn.execute("SELECT due_ts FROM entities WHERE id=1").fetchone()["due_ts"]
     set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="jwt-test-token")
     res = export_mod.run(str(db_path), system="101")
-    check(res.get("ok") is True and res.get("exported") == 2,
+    check(res.get("ok") is True and res.get("exported") == 2
+          and res.get("url") == base + "/api/tasks/v2/",
           "101: первый прогон — 2 сущности с событиями, без событий — не выгружена", str(res))
-    check(len(CaptureHandler.requests) == 2,
-          "101: ровно два POST-запроса (по одному на сущность)", str(len(CaptureHandler.requests)))
-    check(all(r["path"] == "/entities" for r in CaptureHandler.requests),
-          "101: путь по умолчанию /entities",
+    check(len(CaptureHandler.requests) == 2
+          and all(r["method"] == "POST" for r in CaptureHandler.requests),
+          "101: ровно два POST на путь задач (по одному на сущность)",
+          str([(r["method"], r["path"]) for r in CaptureHandler.requests]))
+    check(all(r["path"] == "/api/tasks/v2/" for r in CaptureHandler.requests),
+          "101: путь по умолчанию /api/tasks/v2/",
           str([r["path"] for r in CaptureHandler.requests]))
     check(all(r["auth"] == "Bearer jwt-test-token" for r in CaptureHandler.requests),
           "101: заголовок Authorization: Bearer <JWT>",
@@ -178,18 +260,20 @@ def test_push(db_path: Path, base: str) -> None:
     check(all(r["ctype"] == "application/json" for r in CaptureHandler.requests),
           "101: заголовок Content-Type: application/json",
           str([r["ctype"] for r in CaptureHandler.requests]))
-    check([r["body"]["entity"]["id"] for r in CaptureHandler.requests] == [1, 2],
-          "101: сущности по порядку id",
-          str([r["body"]["entity"]["id"] for r in CaptureHandler.requests]))
-    check(all(set(r["body"]) == {"entity", "events", "exported_ts"}
-              for r in CaptureHandler.requests),
-          "101: тело записи как у file-провайдера (entity/events/exported_ts)")
-    check(all(len(r["body"]["events"]) == 1 and r["body"]["events"][0]["quote"] == "фраза"
-              for r in CaptureHandler.requests),
-          "101: события доехали с цитатами")
-    check(all(isinstance(r["body"]["exported_ts"], int) for r in CaptureHandler.requests),
-          "101: exported_ts — целое")
-
+    check(all(r["idem"] is None for r in CaptureHandler.requests),
+          "101: заголовок Idempotency-Key не отправляется",
+          str([r["idem"] for r in CaptureHandler.requests]))
+    bodies = [r["body"] for r in CaptureHandler.requests]
+    check(bodies == [{"title": "Залить фундамент", "description": "выкопать траншею",
+                      "deadline": due},
+                     {"title": "Заказать арматуру"}],
+          "101: тело — карта полей (title/description/deadline), пустые поля опущены",
+          str(bodies))
+    check(all("entity" not in b and "events" not in b for b in bodies),
+          "101: без обёртки entity/events", str(bodies))
+    check(external_id_of(db_path, 1) == "g1" and external_id_of(db_path, 2) == "g2",
+          "101: guid из ответа записан в integrations.external_id",
+          f"{external_id_of(db_path, 1)} {external_id_of(db_path, 2)}")
     with DB(db_path) as db:
         ints = db.conn.execute(
             "SELECT entity_id, synced_ts FROM integrations WHERE system='101' "
@@ -204,67 +288,161 @@ def test_push(db_path: Path, base: str) -> None:
 
     add_event(db_path, 1, int(time.time()) - 60, "новое событие", 98)
     res3 = export_mod.run(str(db_path), system="101")
-    last = CaptureHandler.requests[-1]["body"]
+    last = CaptureHandler.requests[-1]
     check(res3.get("ok") is True and res3.get("exported") == 1
           and len(CaptureHandler.requests) == 3
-          and last["entity"]["id"] == 1
-          and [e["quote"] for e in last["events"]] == ["новое событие"],
-          "101: остаток после курсора — одна сущность и только новое событие", str(res3))
+          and last["method"] == "PATCH" and last["path"] == "/api/tasks/v2/g1/"
+          and last["auth"] == "Bearer jwt-test-token"
+          and last["body"] == {"title": "Залить фундамент", "description": "выкопать траншею",
+                               "deadline": due},
+          "101: новое событие у выгруженной сущности — PATCH .../{guid}/ с той же картой полей",
+          str(last))
+    check(not any(r["path"].endswith("/comments/") for r in CaptureHandler.requests),
+          "101: без EXPORT_101_COMMENTS комментарий не отправляется",
+          str([r["path"] for r in CaptureHandler.requests]))
+
+    add_event(db_path, 1, int(time.time()) - 50, "ещё событие", 99)
+    set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="jwt-test-token",
+            EXPORT_101_COMMENTS="1")
+    res4 = export_mod.run(str(db_path), system="101")
+    tail = CaptureHandler.requests[-2:]
+    check(res4.get("ok") is True and res4.get("exported") == 1
+          and len(CaptureHandler.requests) == 5
+          and tail[0]["method"] == "PATCH" and tail[0]["path"] == "/api/tasks/v2/g1/"
+          and tail[1]["method"] == "POST" and tail[1]["path"] == "/api/tasks/v2/g1/comments/"
+          and tail[1]["body"] == {"text": "обновление: ещё событие"},
+          "101: EXPORT_101_COMMENTS=1 — PATCH + POST .../{guid}/comments/ с текстом события",
+          str(tail))
 
 
-def test_http_error(db_path: Path, base: str) -> None:
-    print("=== 101: HTTP 500 — курсор на месте, сущность переотправляется ===")
-    add_event(db_path, 2, int(time.time()) - 30, "сдвиг срока", 99)
-    before = cursor_of(db_path, 2)
-    n0 = len(CaptureHandler.requests)
-    CaptureHandler.status = 500
+def test_kinds(db_path: Path, base: str) -> None:
+    print("=== 101: EXPORT_101_KINDS — чужие kind не уходят в 101 ===")
+    reset_capture()
+    now = int(time.time())
+    seed_entities(db_path, now, (1,))
+    seed_entities(db_path, now, (2,), kind="question")
+    add_event(db_path, 1, now - 100, "задача", 211)
+    add_event(db_path, 2, now - 100, "вопрос", 212)
+    set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="jwt-test-token")
+    res = export_mod.run(str(db_path), system="101")
+    check(res.get("ok") is True and len(CaptureHandler.requests) == 1
+          and CaptureHandler.requests[0]["body"]["title"] == "Сущность 1",
+          "101 kinds: выгружена только сущность из EXPORT_101_KINDS (task)",
+          str([(r["method"], r["body"].get("title")) for r in CaptureHandler.requests]))
+    check(cursor_of(db_path, 2) is not None,
+          "101 kinds: пропущенный kind не застревает в очереди (курсор двинут)",
+          str(cursor_of(db_path, 2)))
+    res2 = export_mod.run(str(db_path), system="101")
+    check(res2.get("ok") is True and len(CaptureHandler.requests) == 1,
+          "101 kinds: повторный прогон ничего не доотправляет", str(res2))
+
+
+def test_dry(db_path: Path, base: str) -> None:
+    print("=== 101: EXPORT_101_DRY — без сети и без движения курсора ===")
+    reset_capture()
+    now = int(time.time())
+    seed_entities(db_path, now, (1, 2))
+    seed_entities(db_path, now, (3,), kind="question")
+    seed_entities(db_path, now, (4,))
+    for eid, mid in ((1, 221), (2, 222), (3, 223)):
+        add_event(db_path, eid, now - 100, f"событие {eid}", mid)
+    set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="jwt-test-token", EXPORT_101_DRY="1")
+    res = export_mod.run(str(db_path), system="101")
+    check(res.get("ok") is True and res.get("dry") is True and res.get("would_export") == 2
+          and res.get("url") == base + "/api/tasks/v2/",
+          "101 dry: would_export считает только нужные kind с событиями", str(res))
+    check(len(CaptureHandler.requests) == 0,
+          "101 dry: ни одного HTTP-запроса", str(CaptureHandler.requests))
+    check(cursor_of(db_path, 1) is None and cursor_of(db_path, 2) is None,
+          "101 dry: курсор не двинулся", f"{cursor_of(db_path, 1)} {cursor_of(db_path, 2)}")
+    set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="jwt-test-token")
+    res2 = export_mod.run(str(db_path), system="101")
+    check(res2.get("ok") is True and len(CaptureHandler.requests) == 2,
+          "101 dry: после dry реальный прогон выгружает то же самое", str(res2))
+
+
+def test_sign_in(db_path: Path, base: str) -> None:
+    print("=== 101: LOGIN+PASSWORD — sign-in, затем Bearer ===")
+    reset_capture()
+    now = int(time.time())
+    seed_entities(db_path, now, (1,))
+    add_event(db_path, 1, now - 100, "по логину", 231)
+    set_env(EXPORT_101_URL=base, EXPORT_101_LOGIN="u1", EXPORT_101_PASSWORD="p1")
+    res = export_mod.run(str(db_path), system="101")
+    check(res.get("ok") is True and res.get("exported") == 1
+          and len(CaptureHandler.requests) == 2,
+          "101 sign-in: прогон успешен, sign-in + один запрос задач", str(res))
+    first, second = CaptureHandler.requests
+    check(first["method"] == "POST" and first["path"] == "/api/auth/sign-in/"
+          and first["body"] == {"login": "u1", "password": "p1"} and first["auth"] is None,
+          "101 sign-in: POST /api/auth/sign-in/ с логином/паролем без Bearer", str(first))
+    check(second["method"] == "POST" and second["path"] == "/api/tasks/v2/"
+          and second["auth"] == "Bearer signin-token",
+          "101 sign-in: токен из ответа используется как Bearer", str(second))
+    check(external_id_of(db_path, 1) == "g1",
+          "101 sign-in: guid записан", str(external_id_of(db_path, 1)))
+
+
+def test_401_refresh(db_path: Path, base: str) -> None:
+    print("=== 101: 401 → refresh-token → повтор с новым токеном ===")
+    reset_capture()
+    now = int(time.time())
+    seed_entities(db_path, now, (1,))
+    eid = add_event(db_path, 1, now - 100, "протухший токен", 241)
+    set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="stale-token",
+            EXPORT_101_REFRESH="refresh-xyz")
+    CaptureHandler.once_401 = True
     try:
-        res4 = export_mod.run(str(db_path), system="101")
+        res = export_mod.run(str(db_path), system="101")
     finally:
-        CaptureHandler.status = 200
-    keys500 = [r["idem"] for r in CaptureHandler.requests[n0:]]
-    check(res4.get("ok") is False and "500" in str(res4.get("error", "")),
-          "101: HTTP 500 — словарь-ошибка без исключения", str(res4))
-    check(cursor_of(db_path, 2) == before,
-          "101: после HTTP 500 курсор не двигался", f"{before}")
-    check(len(keys500) >= 1 and len(set(keys500)) == 1,
-          "101: Idempotency-Key одинаков на всех ретраях", str(keys500))
-    n_before = len(CaptureHandler.requests)
-    res5 = export_mod.run(str(db_path), system="101")
-    last = CaptureHandler.requests[-1]["body"]
-    check(res5.get("ok") is True and res5.get("exported") == 1
-          and len(CaptureHandler.requests) == n_before + 1
-          and last["entity"]["id"] == 2
-          and [e["quote"] for e in last["events"]] == ["сдвиг срока"],
-          "101: после 500 сущность переотправлена целиком", str(res5))
-    check(CaptureHandler.requests[-1]["idem"] == keys500[0],
-          "101: ключ переотправки совпадает с ключом неудавшихся попыток",
-          str(CaptureHandler.requests[-1]["idem"]))
+        CaptureHandler.once_401 = False
+    check(res.get("ok") is True and res.get("exported") == 1,
+          "101 refresh: после обновления токена сущность выгружена", str(res))
+    check([r["path"] for r in CaptureHandler.requests] ==
+          ["/api/tasks/v2/", "/api/auth/refresh-token/", "/api/tasks/v2/"],
+          "101 refresh: 401 → POST /api/auth/refresh-token/ → повтор запроса",
+          str([r["path"] for r in CaptureHandler.requests]))
+    check(CaptureHandler.requests[1]["body"] == {"refreshToken": "refresh-xyz"}
+          and CaptureHandler.requests[1]["auth"] is None,
+          "101 refresh: тело {refreshToken}, без Bearer", str(CaptureHandler.requests[1]))
+    check(CaptureHandler.requests[0]["auth"] == "Bearer stale-token"
+          and CaptureHandler.requests[2]["auth"] == "Bearer fresh-token",
+          "101 refresh: повтор идёт с обновлённым токеном",
+          str([r["auth"] for r in CaptureHandler.requests]))
+    check(external_id_of(db_path, 1) == "g1" and cursor_of(db_path, 1) == eid,
+          "101 refresh: guid и курсор записаны после успеха",
+          f"{external_id_of(db_path, 1)} {cursor_of(db_path, 1)}")
 
 
 def test_path_and_network(db_path: Path, base: str) -> None:
     print("=== 101: EXPORT_101_PATH и сетевой сбой ===")
-    add_event(db_path, 1, int(time.time()) - 10, "для пути", 100)
+    reset_capture()
+    now = int(time.time())
+    seed_entities(db_path, now, (1,))
+    add_event(db_path, 1, now - 100, "для пути", 251)
     set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="jwt-test-token",
             EXPORT_101_PATH="/api/v2/things")
-    res6 = export_mod.run(str(db_path), system="101")
-    check(res6.get("ok") is True and res6.get("exported") == 1
-          and CaptureHandler.requests[-1]["path"] == "/api/v2/things",
-          "101: EXPORT_101_PATH переопределяет путь", str(res6))
+    res = export_mod.run(str(db_path), system="101")
+    check(res.get("ok") is True and res.get("exported") == 1
+          and CaptureHandler.requests[-1]["path"] == "/api/v2/things"
+          and CaptureHandler.requests[-1]["method"] == "POST",
+          "101: EXPORT_101_PATH переопределяет путь", str(res))
 
     dead = http.server.HTTPServer(("127.0.0.1", 0), CaptureHandler)
     dead_port = dead.server_address[1]
     dead.server_close()
-    add_event(db_path, 2, int(time.time()) - 5, "для сети", 101)
-    before = cursor_of(db_path, 2)
+    add_event(db_path, 1, now - 50, "для сети", 252)
+    before = cursor_of(db_path, 1)
     set_env(EXPORT_101_URL=f"http://127.0.0.1:{dead_port}",
-            EXPORT_101_TOKEN="jwt-test-token", EXPORT_101_TIMEOUT="2")
-    res7 = export_mod.run(str(db_path), system="101")
-    check(res7.get("ok") is False and isinstance(res7.get("error"), str)
-          and bool(res7["error"]),
-          "101: сетевой сбой — словарь-ошибка без исключения", str(res7))
-    check(cursor_of(db_path, 2) == before,
-          "101: после сетевого сбоя курсор не двигался", f"{before}")
+            EXPORT_101_TOKEN="jwt-test-token", EXPORT_101_TIMEOUT="2",
+            EXPORT_101_RETRIES="2")
+    res2 = export_mod.run(str(db_path), system="101")
+    check(res2.get("ok") is False and res2.get("failed") == [1]
+          and "попыток: 3" in str(res2.get("error", "")),
+          "101: сетевой сбой — словарь-ошибка, ретраи исчерпаны", str(res2))
+    check(cursor_of(db_path, 1) == before and external_id_of(db_path, 1) == "g1",
+          "101: после сетевого сбоя курсор и external_id не тронуты",
+          f"{cursor_of(db_path, 1)} {external_id_of(db_path, 1)}")
 
 
 def test_same_second(db_path: Path, base: str) -> None:
@@ -283,11 +461,9 @@ def test_same_second(db_path: Path, base: str) -> None:
     last = CaptureHandler.requests[-1]
     check(res2.get("ok") is True and res2.get("exported") == 1
           and len(CaptureHandler.requests) == 2
-          and [e["quote"] for e in last["body"]["events"]] == ["второе в ту же секунду"],
-          "101 id-курсор: второе событие с тем же ts не потеряно, первое не повторено",
+          and last["method"] == "PATCH" and last["path"] == "/api/tasks/v2/g1/",
+          "101 id-курсор: второе событие с тем же ts не потеряно (PATCH по guid)",
           str(res2))
-    check(last["idem"] == f"1-{id_b}",
-          "101: Idempotency-Key = <entity_id>-<max_event_id>", str(last["idem"]))
     check(cursor_of(db_path, 1) == id_b,
           "101 id-курсор: synced_ts хранит max id события", str(cursor_of(db_path, 1)))
     res3 = export_mod.run(str(db_path), system="101")
@@ -311,12 +487,13 @@ def test_retry_success(db_path: Path, base: str) -> None:
     finally:
         CaptureHandler.status = 200
         CaptureHandler.fail_first = None
-    keys = [r["idem"] for r in CaptureHandler.requests]
     check(res.get("ok") is True and res.get("exported") == 1
           and len(CaptureHandler.requests) == 4,
           "101 ретраи: 3 неудачи + успех на 4-й попытке, сущность выгружена", str(res))
-    check(len(set(keys)) == 1 and keys[0] == f"1-{eid}",
-          "101 ретраи: Idempotency-Key одинаков на всех попытках", str(keys))
+    check(all(r["method"] == "POST" and r["path"] == "/api/tasks/v2/"
+              and r["body"]["title"] == "Сущность 1"
+              for r in CaptureHandler.requests),
+          "101 ретраи: все попытки — один и тот же запрос", str(len(CaptureHandler.requests)))
     check(cursor_of(db_path, 1) == eid,
           "101 ретраи: курсор двинулся только после успеха", str(cursor_of(db_path, 1)))
 
@@ -330,17 +507,17 @@ def test_retry_exhausted(db_path: Path, base: str) -> None:
     add_event(db_path, 2, now - 100, "проедет", 402)
     set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="jwt-test-token",
             EXPORT_101_RETRIES="3")
-    CaptureHandler.entity_status = {1: 500}
+    CaptureHandler.title_status = {"Сущность 1": 500}
     try:
         res = export_mod.run(str(db_path), system="101")
     finally:
-        CaptureHandler.entity_status = {}
-    per_entity = [r["body"]["entity"]["id"] for r in CaptureHandler.requests]
+        CaptureHandler.title_status = {}
+    titles = [r["body"]["title"] for r in CaptureHandler.requests]
     check(res.get("ok") is False and res.get("exported") == 1
           and res.get("failed") == [1] and "500" in str(res.get("error", "")),
           "101 5xx: ok=False, failed=[1], вторая сущность выгружена", str(res))
-    check(per_entity == [1, 1, 1, 1, 2],
-          "101 5xx: 4 попытки на первую сущность, вторая — сразу после", str(per_entity))
+    check(titles == ["Сущность 1"] * 4 + ["Сущность 2"],
+          "101 5xx: 4 попытки на первую сущность, вторая — сразу после", str(titles))
     check(cursor_of(db_path, 1) is None and cursor_of(db_path, 2) is not None,
           "101 5xx: курсор упавшей не двинулся, успешной — двинулся",
           f"{cursor_of(db_path, 1)} {cursor_of(db_path, 2)}")
@@ -355,60 +532,70 @@ def test_4xx_no_retry(db_path: Path, base: str) -> None:
     add_event(db_path, 2, now - 100, "хороший запрос", 502)
     set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="jwt-test-token",
             EXPORT_101_RETRIES="3")
-    CaptureHandler.entity_status = {1: 400}
+    CaptureHandler.title_status = {"Сущность 1": 400}
     try:
         res = export_mod.run(str(db_path), system="101")
     finally:
-        CaptureHandler.entity_status = {}
-    per_entity = [r["body"]["entity"]["id"] for r in CaptureHandler.requests]
+        CaptureHandler.title_status = {}
+    titles = [r["body"]["title"] for r in CaptureHandler.requests]
     check(res.get("ok") is False and res.get("exported") == 1
           and res.get("failed") == [1] and "400" in str(res.get("error", "")),
           "101 4xx: ok=False, failed=[1], ошибка называет код", str(res))
-    check(per_entity == [1, 2],
+    check(titles == ["Сущность 1", "Сущность 2"],
           "101 4xx: ровно одна попытка на 4xx, вторая сущность не заблокирована",
-          str(per_entity))
+          str(titles))
     add_event(db_path, 1, now - 50, "восстановление", 503)
     res2 = export_mod.run(str(db_path), system="101")
-    last = CaptureHandler.requests[-1]["body"]
+    last = CaptureHandler.requests[-1]
     check(res2.get("ok") is True and res2.get("exported") == 1
-          and last["entity"]["id"] == 1
-          and [e["quote"] for e in last["events"]] == ["плохой запрос", "восстановление"],
-          "101 4xx: упавшая сущность выгружается целиком после починки", str(res2))
+          and last["method"] == "POST" and last["path"] == "/api/tasks/v2/"
+          and last["body"]["title"] == "Сущность 1",
+          "101 4xx: упавшая сущность создаётся заново после починки (external_id не было)",
+          str(res2))
 
 
-def test_idempotency_external_id(db_path: Path, base: str) -> None:
-    print("=== 101: Idempotency-Key и external_id из ответа ===")
+def test_external_id(db_path: Path, base: str) -> None:
+    print("=== 101: external_id из ответа (guid/id), PATCH по нему ===")
     reset_capture()
     now = int(time.time())
-    seed_entities(db_path, now, (1,))
-    eid = add_event(db_path, 1, now - 100, "с external_id", 601)
+    seed_entities(db_path, now, (1, 2, 3))
+    add_event(db_path, 1, now - 100, "с guid", 601)
     set_env(EXPORT_101_URL=base, EXPORT_101_TOKEN="jwt-test-token")
-    CaptureHandler.response_body = b'{"external_id": "ext-777"}'
+    CaptureHandler.response_body = b'{"guid": "ext-777"}'
     try:
         res = export_mod.run(str(db_path), system="101")
         check(res.get("ok") is True and res.get("exported") == 1
-              and CaptureHandler.requests[0]["idem"] == f"1-{eid}",
-              "101: Idempotency-Key <entity_id>-<max_event_id> в заголовке",
-              str(CaptureHandler.requests[0]["idem"]))
-        check(external_id_of(db_path, 1) == "ext-777",
-              "101: external_id из ответа записан в integrations",
+              and external_id_of(db_path, 1) == "ext-777",
+              "101: guid из ответа записан в integrations.external_id",
               str(external_id_of(db_path, 1)))
-        eid2 = add_event(db_path, 1, now - 50, "с id", 602)
-        CaptureHandler.response_body = b'{"id": 888}'
+        add_event(db_path, 1, now - 50, "обновление", 602)
         res2 = export_mod.run(str(db_path), system="101")
-        check(res2.get("ok") is True
-              and CaptureHandler.requests[-1]["idem"] == f"1-{eid2}",
-              "101: ключ меняется с новым max_event_id",
-              str(CaptureHandler.requests[-1]["idem"]))
-        check(external_id_of(db_path, 1) == "888",
-              "101: id из ответа тоже пишется в external_id",
-              str(external_id_of(db_path, 1)))
-        add_event(db_path, 1, now - 40, "без id", 603)
-        CaptureHandler.response_body = b"{}"
+        check(res2.get("ok") is True and res2.get("exported") == 1
+              and CaptureHandler.requests[-1]["method"] == "PATCH"
+              and CaptureHandler.requests[-1]["path"] == "/api/tasks/v2/ext-777/",
+              "101: обновление идёт PATCH .../{external_id}/", str(res2))
+        CaptureHandler.response_body = b'{"id": 888}'
+        add_event(db_path, 2, now - 40, "с id", 603)
         res3 = export_mod.run(str(db_path), system="101")
-        check(res3.get("ok") is True and external_id_of(db_path, 1) == "888",
-              "101: ответ без id не затирает external_id",
-              str(external_id_of(db_path, 1)))
+        check(res3.get("ok") is True and res3.get("exported") == 1
+              and external_id_of(db_path, 2) == "888",
+              "101: id из ответа тоже пишется в external_id",
+              str(external_id_of(db_path, 2)))
+        CaptureHandler.response_body = b"{}"
+        add_event(db_path, 3, now - 30, "без id", 604)
+        res4 = export_mod.run(str(db_path), system="101")
+        check(res4.get("ok") is True and res4.get("exported") == 1
+              and external_id_of(db_path, 3) is None,
+              "101: ответ без guid/id не записывает external_id",
+              str(external_id_of(db_path, 3)))
+        CaptureHandler.response_body = b'{"guid": "g-late"}'
+        add_event(db_path, 3, now - 20, "догон", 605)
+        res5 = export_mod.run(str(db_path), system="101")
+        check(res5.get("ok") is True and res5.get("exported") == 1
+              and external_id_of(db_path, 3) == "g-late"
+              and CaptureHandler.requests[-1]["method"] == "POST",
+              "101: без external_id сущность создаётся заново и пишет guid",
+              str(external_id_of(db_path, 3)))
     finally:
         CaptureHandler.response_body = b""
 
@@ -500,13 +687,16 @@ def main() -> int:
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     try:
         test_push(db_path, base)
-        test_http_error(db_path, base)
-        test_path_and_network(db_path, base)
+        test_kinds(tmp / "kinds.sqlite", base)
+        test_dry(tmp / "dry.sqlite", base)
+        test_sign_in(tmp / "signin.sqlite", base)
+        test_401_refresh(tmp / "refresh.sqlite", base)
+        test_path_and_network(tmp / "path_net.sqlite", base)
         test_same_second(tmp / "same_second.sqlite", base)
         test_retry_success(tmp / "retry.sqlite", base)
         test_retry_exhausted(tmp / "retry_dead.sqlite", base)
         test_4xx_no_retry(tmp / "4xx.sqlite", base)
-        test_idempotency_external_id(tmp / "idem.sqlite", base)
+        test_external_id(tmp / "extid.sqlite", base)
         test_file_id_cursor(tmp / "file_id.sqlite", tmp / "file_id.jsonl")
         test_extra_providers(tmp)
     finally:

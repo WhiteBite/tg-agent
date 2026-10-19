@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.1 — 2026-10-20
+Экспорт 101 под реальный REST-контракт (сваггер `101 API.yaml`):
+- `export.py`: auth 101 через JWT — `EXPORT_101_TOKEN` либо `EXPORT_101_LOGIN`+`EXPORT_101_PASSWORD` (вход `/api/auth/sign-in/`, refresh пары на 401 через `/api/auth/refresh-token/`); сущности уходят задачами в `/api/tasks/v2/` (create POST, при `integrations.external_id` — PATCH `.../{guid}/`), поля под контракт — `EXPORT_101_MAP`, kinds — `EXPORT_101_KINDS`, комментарий события — `EXPORT_101_COMMENTS=1`, `EXPORT_101_DRY=1` — без отправки. Тело задачи в сваггере не описано — дефолтный маппинг консервативен и настраивается.
+- `tests_export_101.py`: переписаны под контракт (sign-in, 401→refresh, create/PATCH/комментарий, dry-run, ретраи, continue-on-error).
+
 ## 0.9.0 — 2026-10-20
 Офлайн-бэклог под PM-кейс: статусная модель, авто-закрытие вопросов, реакции, читалки, маршрутизация сводок, наблюдаемость:
 - `db.py`/`extract.py`/`packs/`/`services_report.py`: статусы `open/in_progress/blocked/done` (терминал — `closed_ts`); ops `start/block/unblock` с проверкой переходов; `close`→`done`; миграция v3 `closed`→`done`; `update` не трогает статус.
