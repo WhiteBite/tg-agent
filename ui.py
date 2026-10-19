@@ -303,6 +303,36 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 self._json({"running": _sync["running"], "code": _sync["code"],
                             "lines": _sync["lines"][-20:]})
+        elif u.path == "/api/projects":
+            with _db() as db:
+                projects: set[str] = set()
+                for w in db.watch_list():
+                    if w.get("project"):
+                        projects.add(w["project"])
+                out: list[dict] = []
+                for proj in sorted(projects):
+                    brief = db.project_brief(proj)
+                    lv = db.get_meta(f"ui:project_visit:{proj}")
+                    last_visit = int(lv) if lv else None
+                    new_since = 0
+                    if last_visit:
+                        ch = db.entity_changes(last_visit, project=proj)
+                        new_since = ch["count"]
+                    counts = brief.get("counts") or {}
+                    out.append({
+                        "name": proj,
+                        "open": brief.get("open", 0),
+                        "in_progress": counts.get("in_progress", 0),
+                        "blocked": counts.get("blocked", 0),
+                        "done": counts.get("done", 0),
+                        "overdue": brief.get("overdue", 0),
+                        "open_questions": brief.get("open_questions", 0),
+                        "promises_no_due": brief.get("promises_no_due", 0),
+                        "promises_no_owner": brief.get("promises_no_owner", 0),
+                        "last_visit": last_visit,
+                        "new_since_visit": new_since,
+                    })
+            self._json({"projects": out})
         elif u.path == "/api/available":
             self._json(tg_chats())
         else:
@@ -363,6 +393,22 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/sync":
                 run_sync()
                 self._json({"ok": True, "started": True})
+            elif u.path == "/api/projects/visit":
+                proj = b.get("project")
+                if not proj or not isinstance(proj, str):
+                    self._json({"ok": False, "error": "нужен project"}, 400)
+                    return
+                with _db() as db:
+                    known = False
+                    for w in db.watch_list():
+                        if w.get("project") == proj:
+                            known = True
+                            break
+                    if not known:
+                        self._json({"ok": False, "error": f"неизвестный проект: {proj}"}, 404)
+                        return
+                    db.set_meta(f"ui:project_visit:{proj}", str(int(time.time())))
+                self._json({"ok": True, "project": proj})
             elif u.path == "/api/sync_chat":
                 chat = str(b.get("chat") or "").strip()
                 if not chat or len(chat) > 64 or " " in chat:

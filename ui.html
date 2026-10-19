@@ -12,10 +12,12 @@
     --green:#4fae4e; --red:#e06c75;
   }
   *{box-sizing:border-box; margin:0; padding:0}
+  [hidden]{display:none!important}
   html,body{height:100%}
   body{background:var(--bg2); color:var(--text);
        font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
   #app{display:grid; grid-template-columns:58px 330px 300px 1fr; height:100vh}
+  #projpanel{grid-column:2/5}
 
   /* ------- рейка фильтров ------- */
   #rail{background:var(--bg); border-right:1px solid var(--line);
@@ -124,6 +126,19 @@
   details.pre{margin-top:8px; color:var(--muted); font-size:11px}
   details.pre pre{margin-top:6px; white-space:pre-wrap; max-height:160px; overflow:auto;
         background:var(--bg2); padding:8px; border-radius:8px}
+
+  /* ------- панель проектов ------- */
+  .pcard{background:var(--bg); border:1px solid var(--line); border-radius:10px;
+         padding:12px 14px; margin:6px 8px}
+  .pcard .pn{font-weight:600; font-size:15px; margin-bottom:6px}
+  .pcard .prow{display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--muted2); margin-bottom:4px}
+  .pcard .prow span{display:flex; align-items:center; gap:3px}
+  .pcard .pnum{color:var(--text); font-weight:600}
+  .pcard .pgap{font-size:11px; color:var(--muted); margin-top:4px}
+  .pcard .pact{display:flex; gap:8px; align-items:center; margin-top:8px}
+  .pcard .pbadge{font-size:11px; padding:2px 8px; border-radius:10px; line-height:18px}
+  .pbadge.unread{background:var(--badge); color:#fff}
+  .pbadge.clean{background:#24313d; color:var(--muted)}
 </style>
 </head>
 <body>
@@ -176,6 +191,11 @@
     <div class="list" id="msglist"><div class="empty">Слева — чаты, дальше — темы.<br>
       Отмечайте темы звёздочкой: агент в opencode увидит их в tg_watch.</div></div>
   </main>
+
+  <section class="col" id="projpanel" hidden>
+    <header><h2>Проекты</h2><div class="sub" id="pstatus"></div></header>
+    <div class="list" id="projlist"><div class="empty">загрузка…</div></div>
+  </section>
 </div>
 <div id="selbar"><span id="selcount"></span>
   <button class="btn accent" id="selcopy">⧉ markdown для агента</button>
@@ -202,13 +222,13 @@ const post = (p, b) => api(p, {method:"POST", headers:{"Content-Type":"applicati
 
 async function loadState(){
   STATE = await api("/api/state");
-  renderRail(); renderChats(); renderTopics(); renderMsgHeader(); renderPins();
+  renderRail(); renderChats(); renderTopics(); renderMsgHeader(); renderPins(); loadProjects();
   const s = STATE.stats;
   setStatus(`индекс: ${s.messages} сообщений · ${s.chats} чатов · отмечено тем: ${s.watched}`);
 }
 function setStatus(t){ $("#status").textContent = t; }
 
-const FILTERS = [["all","☰","все"],["watch","★","мои"],["forum","💬","форум"],["chan","📣","кан."]];
+const FILTERS = [["all","☰","все"],["watch","★","мои"],["forum","💬","форум"],["chan","📣","кан."],["projects","📊","Проекты"]];
 function renderRail(){
   $("#railbtns").innerHTML =
     FILTERS.map(([f,i,t])=>`<button data-f="${f}" class="${SEL.filter===f?"on":""}" title="${t}"><i>${i}</i>${t}</button>`).join("") +
@@ -216,6 +236,7 @@ function renderRail(){
        title="папка Telegram: ${esc(fo.title)}"><i>📁</i>${esc((fo.title||"?").split(" ")[0].slice(0,7))}</button>`).join("");
 }
 function chatMatches(c){
+  if (SEL.filter==="projects") return false;
   if (SEL.search && !((c.title||"")+(c.username||"")).toLowerCase().includes(SEL.search)) return false;
   if (SEL.filter==="watch") return c.watched.length>0;
   if (SEL.filter==="forum") return !!c.is_forum;
@@ -227,6 +248,10 @@ function chatMatches(c){
   return true;
 }
 function renderChats(){
+  const isP = SEL.filter === "projects";
+  $("#chats").hidden = isP; $("#topics").hidden = isP; $("#msgs").hidden = isP;
+  $("#projpanel").hidden = !isP;
+  if (isP){ renderProjects(); return; }
   const list = STATE.chats.filter(chatMatches)
     .sort((a,b)=> ((b.watched.length?2:0)+(b.new_total?1:0)) - ((a.watched.length?2:0)+(a.new_total?1:0))
                   || (b.last_ts||0)-(a.last_ts||0));
@@ -245,6 +270,46 @@ function renderChats(){
   }).join("") || `<div class="empty">ничего не найдено</div>`;
 }
 
+let PROJ = [];
+async function loadProjects(){
+  try{ PROJ = (await api("/api/projects")).projects || []; }
+  catch(e){ PROJ = []; }
+  if (SEL.filter==="projects") renderProjects();
+}
+function renderProjects(){
+  if (!PROJ.length){ $("#projlist").innerHTML = `<div class="empty">нет проектов — отметь темы с проектом в watch</div>`; return; }
+  const fmt = (n,label) => `<span>${label}: <b class="pnum">${n}</b></span>`;
+  $("#projlist").innerHTML = PROJ.map(p=>{
+    const gap = [];
+    if (p.open_questions > 0) gap.push(`открытых вопросов: ${p.open_questions}`);
+    if (p.promises_no_due > 0) gap.push(`обещаний без срока: ${p.promises_no_due}`);
+    if (p.promises_no_owner > 0) gap.push(`без ответственного: ${p.promises_no_owner}`);
+    const gapLine = gap.length ? `<div class="pgap">⚠ ${gap.join(" · ")}</div>` : "";
+    const badgeHtml = p.new_since_visit > 0
+      ? `<span class="pbadge unread">+${p.new_since_visit} с визита</span>`
+      : (p.last_visit ? `<span class="pbadge clean">всё прочитано</span>` : "");
+    return `<div class="pcard">
+      <div class="pn">${esc(p.name)}</div>
+      <div class="prow">
+        ${fmt(p.open,"открыто")} ${fmt(p.in_progress,"в работе")} ${fmt(p.blocked,"заблокировано")} ${fmt(p.overdue,"просрочено")} ${fmt(p.done,"сделано")}
+      </div>${gapLine}
+      <div class="pact">${badgeHtml}
+        <button class="btn" data-visit="${esc(p.name)}" title="отметить визит — сбросить счётчик нового">визит</button>
+      </div></div>`;
+  }).join("");
+  bindVisit();
+}
+function bindVisit(){
+  document.querySelectorAll("[data-visit]").forEach(b=>{
+    b.onclick = async ()=>{
+      const proj = b.dataset.visit;
+      b.disabled = true; b.textContent = "…";
+      try{ await post("/api/projects/visit",{project:proj}); await loadProjects(); renderProjects(); }
+      catch(e){ b.textContent = "ошибка"; }
+      finally{ if (b.disabled) b.disabled = false; }
+    };
+  });
+}
 function curChat(){ return STATE.chats.find(c=>c.id===SEL.chat); }
 function curWatched(topic){ const c=curChat(); return c && c.watched.find(w=>w.topic_id===topic); }
 
