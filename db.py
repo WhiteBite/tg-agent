@@ -725,6 +725,18 @@ class DB:
             return True
         return False
 
+    def update_reactions(self, chat_id: int, msg_id: int, items: list[dict]) -> bool:
+        """Снапшот реакций: [ {"emoji": str, "count": int}, ... ]. False, если
+        строки нет. Текст не меняется — FTS и dirty не затрагиваются."""
+        cur = self.conn.execute(
+            "UPDATE messages SET reactions=? WHERE chat_id=? AND msg_id=?",
+            (json.dumps(items, ensure_ascii=False), chat_id, msg_id),
+        )
+        if cur.rowcount:
+            self.conn.commit()
+            return True
+        return False
+
     def mark_deleted(self, chat_id: int, msg_id: int) -> bool:
         row = self.conn.execute(
             "SELECT topic_id FROM messages WHERE chat_id=? AND msg_id=?",

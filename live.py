@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Live-режим: новые сообщения, правки и удаления Telegram пишутся в индекс
-в реальном времени (правки — через edited_ts, удаления — флаг deleted).
+"""Live-режим: новые сообщения, правки, удаления и реакции Telegram пишутся в
+индекс в реальном времени (правки — через edited_ts, удаления — флаг deleted,
+реакции — агрегат-каунты в messages.reactions).
 
     python3 live.py
 
@@ -90,12 +91,33 @@ def handle_delete(db: DB, chat_id: int, msg_ids: list[int]) -> int:
     return n
 
 
+def reaction_items(update) -> list[dict]:  # noqa: ANN
+    """Агрегат-каунты из UpdateMessageReactions -> [{"emoji","count"}].
+    Снятие всех реакций даёт пустой список; count<=0 отбрасывается."""
+    items: list[dict] = []
+    for rc in getattr(getattr(update, "reactions", None), "results", None) or []:
+        count = getattr(rc, "count", 0) or 0
+        if count <= 0:
+            continue
+        r = getattr(rc, "reaction", None)
+        items.append({"emoji": getattr(r, "emoticon", None) or str(r),
+                      "count": int(count)})
+    return items
+
+
+def handle_reactions(db: DB, chat_id: int, msg_id: int, items: list[dict]) -> bool:
+    """Реакции -> снапшот messages.reactions. False, если сообщения нет в индексе."""
+    return db.update_reactions(chat_id, msg_id, items)
+
+
 async def main() -> None:
     lock = proclock.acquire_instance_lock(str(DB_PATH) + ".live.lock")
     if lock is None:
         raise SystemExit("live.py уже запущен (lockfile занят)")
     from telethon import TelegramClient, events
     from telethon.sessions import StringSession
+    from telethon.tl import types as tl_types
+    from telethon.utils import get_peer_id
 
     api_id = os.environ.get("TELEGRAM_API_ID")
     api_hash = os.environ.get("TELEGRAM_API_HASH")
@@ -159,6 +181,22 @@ async def main() -> None:
             n = handle_delete(db, cid, ids)
             if n:
                 print(f"  - {cid}: {n} удалено", flush=True)
+        except Exception as exc:
+            print(f"  ! {cid}: {exc}", file=sys.stderr)
+
+    # в Telethon 1.45 нет events.MessageReaction — снимаем агрегат-каунты с сырого UpdateMessageReactions
+    @client.on(events.Raw(types=tl_types.UpdateMessageReactions))
+    async def on_reaction(update):  # noqa: ANN
+        try:
+            cid = get_peer_id(update.peer)
+        except Exception:
+            return
+        if not known(cid):
+            return
+        try:
+            items = reaction_items(update)
+            if handle_reactions(db, cid, update.msg_id, items):
+                print(f"  r {cid}/{update.msg_id}", flush=True)
         except Exception as exc:
             print(f"  ! {cid}: {exc}", file=sys.stderr)
 

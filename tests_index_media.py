@@ -3,10 +3,10 @@
 
 Что реально исполняется:
   1. db.py: колонки edited_ts/deleted, миграция старых баз, update_message,
-     mark_deleted, FTS-триггер на UPDATE
+     mark_deleted, update_reactions, FTS-триггер на UPDATE
   2. sync.py: message_row с edit_date, подтягивание правок при рескане
      (pull_chat / backfill / backfill_window), в очередь медиа — только аудио
-  3. live.py: handle_edit / handle_delete
+  3. live.py: handle_edit / handle_delete / handle_reactions / reaction_items
   4. media.py: is_transcribable
 """
 
@@ -114,6 +114,31 @@ class MessageMediaVoice:  # как в test_offline: голосовое — docum
 
 class MessageMediaPhoto:
     pass
+
+
+class ReactionEmoji:
+    def __init__(self, emoticon):
+        self.emoticon = emoticon
+
+
+class ReactionCustom:
+    def __init__(self, document_id):
+        self.document_id = document_id
+
+
+class ReactionCount:
+    def __init__(self, reaction, count):
+        self.reaction, self.count = reaction, count
+
+
+class MessageReactions:
+    def __init__(self, results):
+        self.results = results
+
+
+class UpdateReactions:
+    def __init__(self, results):
+        self.reactions = MessageReactions(results)
 
 
 class FakeClient:
@@ -558,6 +583,62 @@ def test_live_edit_delete(tmp: Path) -> None:
           str(sorted(queued)))
 
 
+def test_live_reactions(tmp: Path) -> None:
+    print("=== live/db: реакции -> messages.reactions ===")
+    p = tmp / "reactions.sqlite"
+    with DB(p) as db:
+        db.insert_message({"chat_id": -100800, "msg_id": 1, "topic_id": 1,
+                           "ts": 100, "text": "текст"})
+        ok = live_mod.handle_reactions(db, -100800, 1, [{"emoji": "👍", "count": 2}])
+        row = db.conn.execute(
+            "SELECT reactions FROM messages WHERE chat_id=-100800 AND msg_id=1"
+        ).fetchone()
+        dirty = db.conn.execute(
+            "SELECT COUNT(*) FROM meta WHERE key LIKE 'dirty:%'").fetchone()[0]
+        fts = (db.conn.execute(
+            "SELECT COUNT(*) FROM messages_fts WHERE text='текст'").fetchone()[0]
+            if db.fts else 1)
+    check(ok and json.loads(row["reactions"]) == [{"emoji": "👍", "count": 2}],
+          "db.update_reactions: снапшот записан", str(row["reactions"]))
+    check(dirty == 0 and fts == 1,
+          "db.update_reactions: FTS и dirty не затронуты", f"{dirty}/{fts}")
+
+    with DB(p) as db:
+        live_mod.handle_reactions(db, -100800, 1, [{"emoji": "👍", "count": 2}])
+        again = db.conn.execute(
+            "SELECT reactions FROM messages WHERE chat_id=-100800 AND msg_id=1"
+        ).fetchone()
+    check(json.loads(again["reactions"]) == [{"emoji": "👍", "count": 2}],
+          "handle_reactions: повтор идемпотентен", str(again["reactions"]))
+
+    with DB(p) as db:
+        live_mod.handle_reactions(db, -100800, 1, [])
+        gone = db.conn.execute(
+            "SELECT reactions FROM messages WHERE chat_id=-100800 AND msg_id=1"
+        ).fetchone()
+    check(gone["reactions"] == "[]",
+          "handle_reactions: снятие реакции -> пустой список", str(gone["reactions"]))
+
+    with DB(p) as db:
+        missing = live_mod.handle_reactions(
+            db, -100800, 999, [{"emoji": "👍", "count": 1}])
+    check(missing is False, "handle_reactions: неизвестный msg_id -> False")
+
+    items = live_mod.reaction_items(UpdateReactions([
+        ReactionCount(ReactionEmoji("👍"), 2),
+        ReactionCount(ReactionEmoji("🔥"), 1),
+        ReactionCount(ReactionEmoji("👎"), 0),
+    ]))
+    check(items == [{"emoji": "👍", "count": 2}, {"emoji": "🔥", "count": 1}],
+          "reaction_items: агрегат-каунты, нулевые отбрасываются", str(items))
+    check(live_mod.reaction_items(UpdateReactions([])) == [],
+          "reaction_items: пустой апдейт -> []")
+    cust = ReactionCustom(777)
+    got = live_mod.reaction_items(UpdateReactions([ReactionCount(cust, 3)]))
+    check(got == [{"emoji": str(cust), "count": 3}],
+          "reaction_items: кастомный эмодзи -> str(reaction)", str(got))
+
+
 def test_is_transcribable() -> None:
     print("=== media.is_transcribable ===")
     cases = [
@@ -598,6 +679,7 @@ def main() -> int:
         test_backfill_edits(tmp)
         test_backfill_window_edits(tmp)
         test_live_edit_delete(tmp)
+        test_live_reactions(tmp)
         test_is_transcribable()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
