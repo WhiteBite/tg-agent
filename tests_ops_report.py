@@ -312,6 +312,128 @@ def test_aging_questions() -> None:
           "вопросы: счётчик в шапке сводки", lines[0][:160])
 
 
+def test_monitor_promise_gaps() -> None:
+    print("=== monitor: обещания без срока и без ответственного ===")
+    import monitor as monitor_mod
+
+    db = TMP / "promise_gaps.sqlite"
+    _seed_watch_db(db, project="стройка")
+    now = int(time.time())
+    with DB(db) as d:
+        d.conn.executemany(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "owner, due_ts, project, created_ts, updated_ts) "
+            "VALUES('construction', -100900, 1, 'promise', ?, 'open', ?, ?, 'стройка', ?, ?)",
+            [("Обещание без срока", "Иван", None, now - 2, now),
+             ("Обещание без ответственного", None, now + 7 * 86400, now - 1, now),
+             ("Полное обещание", "Мария", now + 3 * 86400, now, now)])
+        d.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "owner, due_ts, project, created_ts, updated_ts, closed_ts) "
+            "VALUES('construction', -100900, 1, 'promise', 'Закрытое без срока', "
+            "'done', NULL, NULL, 'стройка', ?, ?, ?)",
+            (now - 3, now - 3, now))
+        d.conn.commit()
+
+    s = monitor_mod.collect(str(db))
+    nd = [e["title"] for e in s["promises_no_due"]]
+    no = [e["title"] for e in s["promises_no_owner"]]
+    check(nd == ["Обещание без срока"],
+          "promises_no_due: только открытые promise без due_ts", str(nd))
+    check(no == ["Обещание без ответственного"],
+          "promises_no_owner: только открытые promise без owner", str(no))
+    lines = monitor_mod.format_report(s)
+    check("обещаний без срока: 1" in lines[0],
+          "promises: счётчик без срока в шапке", lines[0][:200])
+    check("обещаний без ответственного: 1" in lines[0],
+          "promises: счётчик без ответственного в шапке", lines[0][:200])
+    check(any("обещание без срока:" in ln and "Обещание без срока" in ln for ln in lines),
+          "promises: блок без срока виден в сводке", str(lines[:8]))
+    check(any("обещание без ответственного:" in ln and "Обещание без ответственного" in ln
+              for ln in lines),
+          "promises: блок без ответственного виден в сводке", str(lines[:8]))
+
+    empty = TMP / "promise_gaps_empty.sqlite"
+    _seed_watch_db(empty)
+    s2 = monitor_mod.collect(str(empty))
+    check(s2["promises_no_due"] == [] and s2["promises_no_owner"] == [],
+          "promises: пустая БД — списки пусты",
+          str((s2["promises_no_due"], s2["promises_no_owner"])))
+    lines2 = monitor_mod.format_report(s2)
+    check(not any("без срока" in ln or "без ответственного" in ln for ln in lines2),
+          "promises: пустые списки не добавляют строк", str(lines2))
+
+    filt = monitor_mod.collect(str(db), project="баня")
+    check(filt["promises_no_due"] == [] and filt["promises_no_owner"] == [],
+          "promises: фильтр по чужому проекту даёт пустые списки",
+          str((filt["promises_no_due"], filt["promises_no_owner"])))
+
+
+def test_monitor_stuck() -> None:
+    print("=== monitor: blocked+просрочено = застряло, in_progress остаётся просроченным ===")
+    import monitor as monitor_mod
+
+    db = TMP / "stuck.sqlite"
+    _seed_watch_db(db, project="стройка")
+    now = int(time.time())
+    with DB(db) as d:
+        d.conn.executemany(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "owner, due_ts, project, created_ts, updated_ts) "
+            "VALUES('construction', -100900, 1, 'task', ?, ?, 'Иван', ?, 'стройка', ?, ?)",
+            [("Застрявшая задача", "blocked", now - 2 * 86400, now - 3 * 86400, now),
+             ("Простая просрочка", "in_progress", now - 86400, now - 3 * 86400, now),
+             ("Заблокирована в срок", "blocked", now + 5 * 86400, now - 3 * 86400, now)])
+        d.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "owner, due_ts, project, created_ts, updated_ts, closed_ts) "
+            "VALUES('construction', -100900, 1, 'task', 'Закрытая застрявшая', 'blocked', "
+            "'Иван', ?, 'стройка', ?, ?, ?)",
+            (now - 2 * 86400, now - 3 * 86400, now, now))
+        d.conn.commit()
+
+    s = monitor_mod.collect(str(db))
+    st = [e["title"] for e in s["stuck"]]
+    check(st == ["Застрявшая задача"],
+          "stuck: только blocked и просроченные открытые", str(st))
+    ov = [e["title"] for e in s["overdue"]]
+    check("Простая просрочка" in ov and "Застрявшая задача" in ov,
+          "stuck: просроченные остаются и в общем overdue", str(ov))
+    p = s["projects"]["стройка"]
+    check([e["title"] for e in p["stuck"]] == ["Застрявшая задача"]
+          and [e["title"] for e in p["overdue"]] == ["Простая просрочка"],
+          "stuck: проект разделяет застрявшее и обычное просроченное",
+          str(([e["title"] for e in p["stuck"]], [e["title"] for e in p["overdue"]])))
+    lines = monitor_mod.format_report(s)
+    check("застряло: 1" in lines[0], "stuck: счётчик в шапке", lines[0][:200])
+    check(any("застряло:" in ln and "Застрявшая задача" in ln for ln in lines),
+          "stuck: маркер «застряло:» в строке проекта", str(lines))
+    proj_line = next(ln for ln in lines if ln.startswith("стройка:"))
+    segs = proj_line.split(" | ")
+    od_seg = next((s for s in segs if s.startswith("просрочено:")), "")
+    st_seg = next((s for s in segs if s.startswith("застряло:")), "")
+    check("Простая просрочка" in od_seg and "Застрявшая задача" not in od_seg
+          and "Застрявшая задача" in st_seg and "Простая просрочка" not in st_seg,
+          "stuck: in_progress рендерится обычным «просрочено:», blocked — «застряло:»",
+          proj_line)
+
+    r = monitor_mod.run(str(db))
+    check("stuck" in r and "promises_no_due" in r and "promises_no_owner" in r,
+          "run(): новые ключи в возвращаемом подмножестве", str(sorted(r)))
+
+    filt = monitor_mod.collect(str(db), project="баня")
+    check(filt["stuck"] == [], "stuck: фильтр по чужому проекту даёт пустой список",
+          str(filt["stuck"]))
+
+    empty = TMP / "stuck_empty.sqlite"
+    _seed_watch_db(empty)
+    s2 = monitor_mod.collect(str(empty))
+    check(s2["stuck"] == [], "stuck: пустая БД — список пуст")
+    lines2 = monitor_mod.format_report(s2)
+    check(not any("застряло" in ln for ln in lines2),
+          "stuck: пустой список не добавляет строк", str(lines2))
+
+
 def test_extract_report_rejected() -> None:
     print("=== pipeline: ops_rejected/ops_overflow в отчёте и в сводке ===")
     import extract as extract_mod
@@ -536,6 +658,8 @@ def main() -> int:
         test_oneshot_lock()
         test_notify_hash_dedup()
         test_aging_questions()
+        test_monitor_promise_gaps()
+        test_monitor_stuck()
         test_extract_report_rejected()
         test_doctor_quality()
         test_doctor_cost()
