@@ -34,6 +34,7 @@ from env import load_env  # noqa: E402
 load_env()
 
 import proclock  # noqa: E402
+from db import DB  # noqa: E402
 import sync as sync_mod  # noqa: E402
 import media as media_mod  # noqa: E402
 import extract as extract_mod  # noqa: E402
@@ -174,6 +175,9 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         }
     except Exception as exc:
         report["monitor"] = _step_err(exc, budget)
+    if all(res.get("ok") for res in report.values()):
+        with DB(db_path) as db:
+            db.set_meta("pipeline:last_ok_ts", str(int(time.time())))
     return report
 
 
