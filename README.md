@@ -10,7 +10,7 @@ Read-only связка: **Telethon (твой аккаунт) → локальн�
 
 1. ты выделяешь нужное (папка в Telegram **или** точечно темы через `watch.py`),
 2. это синхронизируется в локальный индекс (инкрементально, старая история — чанками),
-3. агент получает 13 read-only инструментов, которые знают твои алиасы и «что нового с прошлого раза».
+3. агент получает 16 read-only инструментов, которые знают твои алиасы и «что нового с прошлого раза».
 
 ---
 
@@ -113,9 +113,12 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_links` | Что шерили: топ @упоминаний, t.me, инвайтов, URL и источников пересылок |
 | `tg_topics` | Структура индекса: чаты, а по chat_id — его темы со счётчиками |
 | `tg_digests` | Готовые выжимки новых сообщений (создаёт `digest.py`) |
-| `tg_entities` | Извлечённые сущности (задачи, решения, обещания, вопросы): project, kind, status, owner, due_ts; фильтры pack/kind/status/project/chat_id и query — подстрока в title/body |
+| `tg_entities` | Извлечённые сущности (задачи, решения, обещания, вопросы): project, kind, status, owner, due_ts; фильтры pack/kind/status/project/owner/chat_id и query — подстрока в title/body |
 | `tg_entity` | Одна сущность по id: все поля и история событий — какое поле менялось, когда и с каким доказательством из сообщения |
 | `tg_overdue` | Открытые сущности со сроком: просроченные (`days_ahead=0`) или на горизонте N дней, по возрастанию due_ts |
+| `tg_changes` | Сущности с событиями новее `since_ts`: что менялось после отметки, у каждой — события с цитатой-доказательством; фильтры pack/project |
+| `tg_project_brief` | Сводка по проекту: counts по статусам, open, overdue, next_due, открытые вопросы, обещания без срока/ответственного, топ владельцев |
+| `tg_gaps` | Пробелы по проекту или пакету: открытые вопросы без ответа, обещания без срока и без ответственного, с причиной попадания |
 
 Отправки нет вообще: в `server.py` не существует инструмента, который что-то
 пишет в Telegram. Пишущих модуля два, оба вне MCP-сервера: `notify.py`
@@ -245,7 +248,7 @@ python3 search.py "ИИ" --type group --limit 30
 opencode mcp add telegram --global -- \
   ~/.venvs/tg-agent/bin/python ~/tg-agent/server.py
 opencode mcp list        # должно быть connected
-python3 server.py --list # проверить сервер отдельно: печатает 13 инструментов
+python3 server.py --list # проверить сервер отдельно: печатает 16 инструментов
 ```
 
 Файл `tg-agent.md` — пример промпта агента: порядок работы, требование начинать с
@@ -541,7 +544,8 @@ python3 export.py --system notion                  # структурирова�
 - **`TG_STRICT_WATCH=1`** — жёсткий гейт: `tg_read`/`tg_find`/`tg_stats`/
   `tg_links`/`tg_topics` работают только по темам из watch-листа, на остальное
   агент получает `access_denied` с подсказкой попросить тебя отметить тему.
-  Сущностные инструменты (`tg_entities`/`tg_entity`/`tg_overdue`) гейтятся так же,
+  Сущностные инструменты (`tg_entities`/`tg_entity`/`tg_overdue`/`tg_changes`/
+  `tg_gaps`) гейтятся так же,
   но merged-сущность видна, если в watch-листе любой из её исходных чатов
   (`entity_sources`); её события могут цитировать другие участвовавшие в слиянии чаты.
 - **UI с наружу — только с токеном.** При `HOST=0.0.0.0` UI вообще не стартует
@@ -561,7 +565,7 @@ python3 export.py --system notion                  # структурирова�
 | `folders.py` | Правка состава папок Telegram: add/remove чатов (второй пишущий модуль, контент не пишет) |
 | `pipeline.py` | Автономный конвейер: sync → media → extract → fuzzy → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
 | `db.py` | Индекс: схема с миграциями по `PRAGMA user_version`, FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
-| `server.py` | MCP-сервер (stdio): 13 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
+| `server.py` | MCP-сервер (stdio): 16 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
 | `live.py` | Новые сообщения в реальном времени (`events.NewMessage`), правки и удаления (`MessageEdited` / `MessageDeleted`) |
 | `digest.py` | Дайджесты: stub или openai-совместимый LLM |
 | `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт, due_text→due_ts fallback (ru-месяцы, относительные, конец дня), supersedes, причины отказа в `rejects_json`, перепрогон dirty |
@@ -662,7 +666,7 @@ python3 export.py --system notion                  # структурирова�
   backfill (`edited_messages` в отчёте); `live.handle_edit` /
   `live.handle_delete` на подставных событиях
 - **настоящий `server.py` как подпроцесс по MCP stdio**: `initialize` →
-  `tools/list` (13 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
+  `tools/list` (16 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
   включая сценарий «прочитал → отметил → непрочитанного нет»; `tg_new` честно
   держит `truncated` при лимите; `tg_mark_read` отклоняет id выше максимума
   индекса темы; отдельный прогон с `TG_ALLOW_LIVE=1` —

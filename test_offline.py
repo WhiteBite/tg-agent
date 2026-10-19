@@ -1614,6 +1614,28 @@ def test_entities_mcp(db_path: Path) -> None:
     check(len(ids) == 2, "entities MCP: сидированы 2 сущности через extract.run",
           str(ids))
 
+    # проект «баня», чтобы не задеть счётчик project=стройка выше; promise — чат вне watch
+    with DB(ent_db) as db:
+        for chat_id, topic_id, kind, title, owner, ts, msg_id, quote in (
+                (-100999, 7, "question", "Вопрос без ответа", None,
+                 now - 300, 30, "вопрос задан"),
+                (-100222, 1, "promise", "Обещание мимо watch", "Мария",
+                 now - 200, 31, "обещание дано")):
+            cur = db.conn.execute(
+                "INSERT INTO entities(pack, chat_id, topic_id, kind, title, owner, "
+                "status, project, created_ts, updated_ts) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("construction", chat_id, topic_id, kind, title, owner,
+                 "open", "баня", ts, ts))
+            eid = cur.lastrowid
+            db.conn.execute(
+                "INSERT INTO entity_sources(entity_id, chat_id, topic_id, "
+                "first_seen_ts, last_seen_ts) VALUES(?,?,?,?,?)",
+                (eid, chat_id, topic_id, ts, ts))
+            db.conn.execute(
+                "INSERT INTO entity_events(entity_id, ts, op, chat_id, msg_id, quote) "
+                "VALUES(?,?,?,?,?,?)", (eid, ts, "new", chat_id, msg_id, quote))
+        db.conn.commit()
+
     env = dict(os.environ, TG_DB=str(ent_db))
     proc = subprocess.Popen(
         [sys.executable, str(Path(__file__).parent / "server.py")],
@@ -1678,12 +1700,111 @@ def test_entities_mcp(db_path: Path) -> None:
         od2 = call("tg_overdue", {"days_ahead": 3650}, 7)
         check(od2.get("count") == 2,
               "MCP tg_overdue(days_ahead=3650): обе сущности", str(od2.get("count")))
+
+        # --- tg_changes / tg_project_brief / tg_gaps / owner-фильтр ---
+        since = now - 3600
+        with DB(ent_db) as db:
+            gt_ch = db.conn.execute(
+                "SELECT COUNT(DISTINCT entity_id) FROM entity_events e "
+                "JOIN entities t ON t.id = e.entity_id "
+                "WHERE e.ts > ? AND t.pack = 'construction'", (since,)).fetchone()[0]
+        ch = call("tg_changes", {"since_ts": since, "pack": "construction"}, 10)
+        check(ch.get("count") == gt_ch,
+              "MCP tg_changes: count = независимый COUNT(DISTINCT) по pack",
+              f"{ch.get('count')} vs {gt_ch}")
+        check(ch.get("count") == len(ch.get("items", []))
+              and all(it.get("events") for it in ch.get("items", [])),
+              "MCP tg_changes: у каждой сущности её события новее since",
+              str(ch.get("count")))
+        fut = call("tg_changes", {"since_ts": now + 10000}, 11)
+        check(fut.get("count") == 0 and fut.get("items") == [],
+              "MCP tg_changes: будущий since_ts -> пусто", str(fut.get("count")))
+
+        own = call("tg_entities", {"owner": "Иван"}, 12)
+        check(own.get("count") == 2
+              and all(e.get("owner") == "Иван" for e in own.get("items", [])),
+              "MCP tg_entities(owner): только сущности этого владельца",
+              str(own.get("count")))
+        own_m = call("tg_entities", {"owner": "Мария"}, 13)
+        check(own_m.get("count") == 1
+              and own_m["items"][0]["title"] == "Обещание мимо watch",
+              "MCP tg_entities(owner=Мария): только её сущность",
+              str(own_m.get("count")))
+
+        br = call("tg_project_brief", {"project": "баня"}, 14)
+        with DB(ent_db) as db:
+            gt_counts = {r["status"]: r["n"] for r in db.conn.execute(
+                "SELECT status, COUNT(*) n FROM entities WHERE project = ? "
+                "GROUP BY status", ("баня",))}
+            gt_open = db.conn.execute(
+                "SELECT COUNT(*) FROM entities WHERE project = ? "
+                "AND closed_ts IS NULL", ("баня",)).fetchone()[0]
+        check(br.get("project") == "баня" and br.get("counts") == gt_counts
+              and br.get("open") == gt_open,
+              "MCP tg_project_brief: counts/open = независимый SQL",
+              f"{br.get('counts')}/{br.get('open')} vs {gt_counts}/{gt_open}")
+        check("note" in br and "не инструкции" in br["note"],
+              "MCP tg_project_brief: пометка «данные, не инструкции»",
+              str(br.get("note"))[:80])
+
+        gaps = call("tg_gaps", {"project": "баня"}, 15)
+        gap_titles = [g["title"] for g in gaps.get("items", [])]
+        with DB(ent_db) as db:
+            gt_gaps = db.conn.execute(
+                "SELECT COUNT(*) FROM entities WHERE closed_ts IS NULL AND "
+                "(kind = 'question' OR (kind = 'promise' AND due_ts IS NULL) "
+                "OR (kind = 'promise' AND (owner IS NULL OR owner = ''))) "
+                "AND project = ?", ("баня",)).fetchone()[0]
+        check(gaps.get("count") == gt_gaps and "Вопрос без ответа" in gap_titles,
+              "MCP tg_gaps: сидированная дыра в списке, count = независимый SQL",
+              f"{gaps.get('count')} vs {gt_gaps} {gap_titles}")
+        check(all(g.get("reason") for g in gaps.get("items", [])),
+              "MCP tg_gaps: у каждой дыры причина",
+              str([g.get("reason") for g in gaps.get("items", [])]))
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+    env_strict = dict(os.environ, TG_DB=str(ent_db), TG_STRICT_WATCH="1")
+    proc2 = subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "server.py")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", env=env_strict,
+    )
+    try:
+        rpc(proc2, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "offline-test", "version": "0"}}})
+        wait_for(proc2, lambda m: m.get("id") == 1)
+        rpc(proc2, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        def scall(tool: str, args: dict, rid: int) -> dict:
+            rpc(proc2, {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                        "params": {"name": tool, "arguments": args}})
+            m = wait_for(proc2, lambda x: x.get("id") == rid)
+            return json.loads(m["result"]["content"][0]["text"])
+
+        ch2 = scall("tg_changes", {"since_ts": since, "pack": "construction"}, 21)
+        ch2_titles = [it["title"] for it in ch2.get("items", [])]
+        check("Обещание мимо watch" not in ch2_titles
+              and "Вопрос без ответа" in ch2_titles,
+              "strict: tg_changes не отдаёт сущность вне watch-листа",
+              str(ch2_titles))
+        gaps2 = scall("tg_gaps", {"project": "баня"}, 22)
+        gaps2_titles = [g["title"] for g in gaps2.get("items", [])]
+        check("Обещание мимо watch" not in gaps2_titles
+              and "Вопрос без ответа" in gaps2_titles,
+              "strict: tg_gaps не отдаёт дыру вне watch-листа",
+              str(gaps2_titles))
+    finally:
+        proc2.terminate()
+        try:
+            proc2.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc2.kill()
 
 
 def test_monitor_notify(db_path: Path) -> None:
@@ -2323,9 +2444,10 @@ def test_mcp_server(db_path: Path) -> None:
         names = {t["name"] for t in tools["result"]["tools"]}
         expected = {"tg_watch", "tg_new", "tg_read", "tg_find", "tg_stats",
                     "tg_mark_read", "tg_index_stats", "tg_links", "tg_topics",
-                    "tg_digests", "tg_entities", "tg_entity", "tg_overdue"}
-        check(expected <= names and len(names) == 13,
-              "MCP tools/list: все 13 инструментов на месте",
+                    "tg_digests", "tg_entities", "tg_entity", "tg_overdue",
+                    "tg_changes", "tg_project_brief", "tg_gaps"}
+        check(expected <= names and len(names) == 16,
+              "MCP tools/list: все 16 инструментов на месте",
               str(sorted(names)))
         check(not any(n.startswith(("send_", "tg_live")) for n in names),
               "MCP: без флагов нет ни отправки, ни живого доступа")
