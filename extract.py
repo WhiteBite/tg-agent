@@ -786,6 +786,46 @@ def _autoclose_replied_questions(db: DB, pack: dict, w: dict, rows: list[dict],
              w["chat_id"], reply["msg_id"], reply["text"][:80]))
 
 
+def _autoconfirm_reacted_questions(db: DB, pack: dict, w: dict,
+                                   run_id: int, now: int) -> None:
+    """Открытый вопрос скоупа закрывается, если на его evidence-сообщении
+    набралось min_count реакций из autoconfirm пакета; уже закрытый ответом
+    вопрос пропускается по guard'у closed_ts."""
+    ac = pack.get("autoconfirm") or {}
+    emojis = set(ac.get("emojis") or [])
+    if not emojis:
+        return
+    min_count = int(ac.get("min_count", 2))
+    for q in db.conn.execute(
+            "SELECT e.id, ev.msg_id AS qmsg, m.reactions AS reac "
+            "FROM entities e "
+            "JOIN entity_events ev ON ev.entity_id=e.id AND ev.op='new' "
+            "JOIN messages m ON m.chat_id=ev.chat_id AND m.msg_id=ev.msg_id "
+            "JOIN entity_sources s ON s.entity_id=e.id AND s.chat_id=? AND s.topic_id=? "
+            "WHERE e.pack=? AND e.kind='question' AND e.closed_ts IS NULL",
+            (w["chat_id"], w["topic_id"], pack["id"])):
+        parts: list[str] = []
+        total = 0
+        for item in json.loads(q["reac"] or "[]"):
+            if item.get("emoji") in emojis:
+                count = int(item.get("count") or 0)
+                if count > 0:
+                    parts.append(f"{item['emoji']}×{count}")
+                total += count
+        if total < min_count:
+            continue
+        cur = db.conn.execute(
+            "UPDATE entities SET status='done', closed_ts=?, updated_ts=? "
+            "WHERE id=? AND closed_ts IS NULL", (now, now, q["id"]))
+        if cur.rowcount == 0:
+            continue
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, "
+            "to_val, chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (q["id"], run_id, now, "auto_close", "status", "open", "done",
+             w["chat_id"], q["qmsg"], "реакции: " + " ".join(parts)))
+
+
 def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
                hi: int | None = None, cursor_key: str | None = None,
                cursor_floor: int | None = None,
@@ -919,6 +959,7 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
                          duration_ms, meta, rejects)
     _apply_ops(db, pack, w, valid, run_id)
     _autoclose_replied_questions(db, pack, w, rows, run_id, now)
+    _autoconfirm_reacted_questions(db, pack, w, run_id, now)
     new_cursor = max(cursor or 0, upto_msg)
     if overflow:
         clamp = dropped_min - 1

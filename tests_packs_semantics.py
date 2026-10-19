@@ -8,7 +8,7 @@ no-downgrade при update, require_match в scope-фильтре (construction 
 отклонений (rejects_json), dirty-репроцесс отредактированных сообщений,
 dedup_scope project/global и схему пакетов (minItems evidence, без
 covered_upto_msg_id и confidence), авто-закрытие вопросов ответом другого
-отправителя (auto_close).
+отправителя (auto_close) и суммой реакций подтверждения (autoconfirm).
 """
 
 from __future__ import annotations
@@ -999,6 +999,125 @@ def test_autoclose_replied_questions(root: Path) -> None:
               f"status={q1['status']} events={n}")
 
 
+def test_autoconfirm_reactions(root: Path) -> None:
+    print("=== autoconfirm: вопрос закрывается суммой реакций подтверждения ===")
+    con = PACKS["construction"]
+    ac = con.get("autoconfirm") or {}
+    check(ac.get("emojis") == ["👍", "✅", "✔️"] and ac.get("min_count") == 2,
+          "pack: construction объявляет autoconfirm 👍/✅/✔️ с min_count 2",
+          str(ac))
+    check("autoconfirm" not in PACKS["services"],
+          "pack: services без autoconfirm (подтверждений не признаёт)")
+
+    db_path = root / "autoconfirm.sqlite"
+    chat, topic = -100956, 16
+    msg_ts = ts_utc(2026, 6, 15)
+    with DB(db_path) as db:
+        db.upsert_chat(chat, "Объект-7", None, "supergroup", True, 6)
+        db.upsert_topic(chat, topic, "Объект-7")
+        db.watch_add(chat, topic, project="стройка")
+        seed_messages(db, chat, topic, {
+            951: "вопрос: согласовали подрядчика",
+            952: "вопрос: когда поставка окон",
+            953: "вопрос: цена за метр",
+            954: "вопрос: нужен ли забор",
+            955: "вопрос: где геодезист",
+        }, msg_ts)
+
+        def react(msg_id: int, reactions: list[dict]) -> None:
+            db.conn.execute(
+                "UPDATE messages SET reactions=? WHERE chat_id=? AND msg_id=?",
+                (json.dumps(reactions, ensure_ascii=False), chat, msg_id))
+
+        react(951, [{"emoji": "👍", "count": 2}])
+        react(952, [{"emoji": "👍", "count": 1}])
+        react(953, [{"emoji": "⚠️", "count": 5}])
+        react(954, [{"emoji": "👍", "count": 2}])
+        react(955, [{"emoji": "👍", "count": 1}, {"emoji": "✅", "count": 1}])
+        db.conn.execute(
+            "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+            "sender_id, sender_name, is_service, text, reply_to) "
+            "VALUES(?, ?, ?, ?, ?, 2, 'Пётр', 0, ?, ?)",
+            (chat, 961, topic, msg_ts + 60,
+             datetime.fromtimestamp(msg_ts + 60, timezone.utc).isoformat(),
+             "забор согласован", 954))
+        db.conn.commit()
+        set_cursor(db, chat, topic, "construction", 950)
+
+    pack = PACKS["construction"]
+
+    def op(msg, quote):
+        return {"op": "new", "kind": "question", "title": f"Вопрос {msg}",
+                "entity_id": None, "body": None, "owner": None,
+                "due_text": None, "due_ts": None, "supersedes": None,
+                "evidence": [{"chat_id": chat, "msg_id": msg, "quote": quote}]}
+
+    extract_mod.run(str(db_path), packs=[pack], workers=1,
+                    provider=lambda prompt, pk: {"ops": [
+                        op(951, "подрядчика"),
+                        op(952, "поставка окон"),
+                        op(953, "цена за метр"),
+                        op(954, "нужен ли забор"),
+                        op(955, "геодезист"),
+                    ]})
+    with DB(db_path) as db:
+        q1 = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
+        check(q1["status"] == "done" and q1["closed_ts"] is not None,
+              "autoconfirm: 👍×2 закрывает вопрос",
+              f"{q1['status']}/{q1['closed_ts']}")
+        ev = db.conn.execute(
+            "SELECT * FROM entity_events WHERE entity_id=1 AND op='auto_close'"
+        ).fetchone()
+        check(ev is not None and ev["field"] == "status"
+              and ev["from_val"] == "open" and ev["to_val"] == "done"
+              and ev["chat_id"] == chat and ev["msg_id"] == 951
+              and ev["quote"] == "реакции: 👍×2",
+              "autoconfirm: событие auto_close с реакцией evidence вопроса",
+              f"ev={dict(ev) if ev else None}")
+        q2 = db.conn.execute("SELECT * FROM entities WHERE id=2").fetchone()
+        check(q2["status"] == "open" and q2["closed_ts"] is None,
+              "autoconfirm: 👍×1 ниже min_count — вопрос открыт",
+              f"{q2['status']}/{q2['closed_ts']}")
+        q3 = db.conn.execute("SELECT * FROM entities WHERE id=3").fetchone()
+        check(q3["status"] == "open" and q3["closed_ts"] is None,
+              "autoconfirm: ⚠️×5 не подтверждающая эмодзи — вопрос открыт",
+              f"{q3['status']}/{q3['closed_ts']}")
+        q4 = db.conn.execute("SELECT * FROM entities WHERE id=4").fetchone()
+        n4 = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE entity_id=4 "
+            "AND op='auto_close'").fetchone()["c"]
+        check(q4["status"] == "done" and n4 == 1,
+              "autoconfirm: ответ+реакции — ровно одно auto_close-событие",
+              f"status={q4['status']} events={n4}")
+        q5 = db.conn.execute("SELECT * FROM entities WHERE id=5").fetchone()
+        ev5 = db.conn.execute(
+            "SELECT quote FROM entity_events WHERE entity_id=5 "
+            "AND op='auto_close'").fetchone()
+        check(q5["status"] == "done" and ev5 is not None
+              and ev5["quote"].startswith("реакции:")
+              and "👍" in ev5["quote"] and "✅" in ev5["quote"],
+              "autoconfirm: 👍×1+✅×1 в сумме дают min_count",
+              f"status={q5['status']} quote={ev5 and ev5['quote']}")
+        total = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE op='auto_close'"
+        ).fetchone()["c"]
+        check(total == 3, "autoconfirm: всего ровно три auto_close-события",
+              str(total))
+
+    with DB(db_path) as db:
+        set_cursor(db, chat, topic, "construction", 961)
+    extract_mod.run(str(db_path), packs=[pack], workers=1,
+                    provider=lambda prompt, pk: {"ops": []})
+    with DB(db_path) as db:
+        total = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE op='auto_close'"
+        ).fetchone()["c"]
+        q2 = db.conn.execute("SELECT status FROM entities WHERE id=2").fetchone()
+        check(total == 3 and q2["status"] == "open",
+              "autoconfirm: повторный прогон идемпотентен",
+              f"events={total} q2={q2['status']}")
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="packs_semantics_"))
     test_parse_due_text()
@@ -1012,6 +1131,7 @@ def main() -> int:
     test_yo_quote(root)
     test_status_transitions(root)
     test_autoclose_replied_questions(root)
+    test_autoconfirm_reactions(root)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

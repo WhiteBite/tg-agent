@@ -58,6 +58,7 @@ PACK: dict = {
         "Отвечай строго по предоставленной JSON-схеме."
     ),
     "field_policies": {"body": "append"},
+    "autoconfirm": {"emojis": ["👍", "✅", "✔️"], "min_count": 2},
     "backfill_days": 14,
     "ops": ["new", "update", "close", "reopen", "start", "block", "unblock"],
     "json_schema": {
