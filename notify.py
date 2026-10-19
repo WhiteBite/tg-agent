@@ -9,6 +9,8 @@
 его не импортирует, агент отправки по-прежнему не видит. Реальная отправка
 только при TG_ALLOW_SEND=1; TG_NOTIFY_CAP (по умолчанию 10) ограничивает число
 сообщений за вызов. Telethon импортируется лишь на пути реальной отправки.
+Адресат — «me» (Saved Messages); параметр to задаёт другой (его использует
+monitor.py для TG_NOTIFY_ROUTES).
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ def _allowed() -> bool:
     return os.environ.get("TG_ALLOW_SEND", "").strip().lower() in ALLOWED
 
 
-def _send(messages: list[str]) -> dict:
+def _send(messages: list[str], to: str = "me") -> dict:
     import asyncio
     import threading
 
@@ -32,7 +34,11 @@ def _send(messages: list[str]) -> dict:
 
     def _worker() -> None:
         try:
-            out["res"] = asyncio.run(_telegram_send(messages))
+            # дефолтный адресат идёт без to: внешние патчи _telegram_send(messages) должны работать
+            if to == "me":
+                out["res"] = asyncio.run(_telegram_send(messages))
+            else:
+                out["res"] = asyncio.run(_telegram_send(messages, to=to))
         except BaseException as exc:
             out["exc"] = exc
 
@@ -47,7 +53,7 @@ def _send(messages: list[str]) -> dict:
     return {"ok": True, "sent": sent}
 
 
-async def _telegram_send(messages: list[str]) -> tuple[int, list[str]]:
+async def _telegram_send(messages: list[str], to: str = "me") -> tuple[int, list[str]]:
     from sync import make_client, start_kwargs
 
     client = make_client()
@@ -57,7 +63,7 @@ async def _telegram_send(messages: list[str]) -> tuple[int, list[str]]:
     try:
         for text in messages:
             try:
-                await client.send_message("me", text)
+                await client.send_message(to, text)
                 sent += 1
             except Exception as exc:
                 errors.append(f"{type(exc).__name__}: {str(exc)[:200]}")
@@ -66,7 +72,7 @@ async def _telegram_send(messages: list[str]) -> tuple[int, list[str]]:
     return sent, errors
 
 
-def notify(messages: list[str], dry_run: bool = True) -> dict:
+def notify(messages: list[str], dry_run: bool = True, to: str = "me") -> dict:
     if dry_run:
         return {"ok": True, "dry_run": True, "planned": list(messages)}
     if not _allowed():
@@ -74,7 +80,7 @@ def notify(messages: list[str], dry_run: bool = True) -> dict:
     cap = int(os.environ.get("TG_NOTIFY_CAP", "10"))
     to_send = list(messages)[:cap]
     truncated = max(len(messages) - cap, 0)
-    result = _send(to_send)
+    result = _send(to_send, to=to)
     result["truncated"] = truncated
     return result
 

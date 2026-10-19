@@ -11,11 +11,15 @@
 прошлом; days_ahead задвигает границу вперёд для раздела «к сроку».
 Неизменившаяся сводка повторно не отправляется (hash в meta);
 TG_MONITOR_FORCE=1 обходит проверку.
+TG_NOTIFY_ROUTES (JSON {проект: адресат}) расщепляет отправку по проектам:
+каждому проекту — свой адресат и свой hash-ключ (monitor:last_hash:<проект>),
+остаток без маршрута — в «me» с общим ключом.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import time
@@ -72,13 +76,13 @@ def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
         questions = [dict(r) for r in d.conn.execute(q_sql, q_args)]
         since = now - news_hours * 3600
         news = [dict(r) for r in d.conn.execute(
-            "SELECT e.* FROM entities e WHERE e.created_ts >= ? OR EXISTS("
+            "SELECT e.* FROM entities e WHERE (e.created_ts >= ? OR EXISTS("
             "SELECT 1 FROM entity_events ev WHERE ev.entity_id = e.id AND ev.ts >= ? "
-            "AND (ev.op IN ('new', 'merge') OR ev.field = 'dedup')) "
-            "ORDER BY e.created_ts DESC LIMIT 200", (since, since))]
+            "AND (ev.op IN ('new', 'merge') OR ev.field = 'dedup')))" + proj_sql +
+            " ORDER BY e.created_ts DESC LIMIT 200", (since, since, *proj_args))]
         updated = d.conn.execute(
-            "SELECT COUNT(*) c FROM entities WHERE updated_ts >= ? AND created_ts < ?",
-            (now - news_hours * 3600, now - news_hours * 3600)).fetchone()["c"]
+            "SELECT COUNT(*) c FROM entities WHERE updated_ts >= ? AND created_ts < ?"
+            + proj_sql, (since, since, *proj_args)).fetchone()["c"]
         rej = d.conn.execute(
             "SELECT COALESCE(SUM(ops_rejected),0) r, COALESCE(SUM(ops_overflow),0) o "
             "FROM extraction_runs WHERE ts >= ?", (since,)).fetchone()
@@ -171,8 +175,98 @@ def format_report(summary: dict) -> list[str]:
     return lines
 
 
+def _routes() -> dict[str, str] | None:
+    raw = os.environ.get("TG_NOTIFY_ROUTES")
+    if raw is None or not raw.strip():
+        return None
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("TG_NOTIFY_ROUTES: ожидается JSON {проект: адресат}")
+    return {str(k): str(v) for k, v in parsed.items()}
+
+
+def _has_content(summary: dict) -> bool:
+    return bool(summary["projects"] or summary["overdue"] or summary["upcoming"]
+                or summary["news"] or summary["questions"] or summary["stuck"]
+                or summary["promises_no_due"] or summary["promises_no_owner"])
+
+
+def _filter_routed(summary: dict, routed: set[str]) -> dict:
+    def keep(e: dict) -> bool:
+        return (e["project"] or "") not in routed
+
+    out = dict(summary)
+    out["projects"] = {name: p for name, p in summary["projects"].items()
+                       if name not in routed}
+    for key in ("overdue", "upcoming", "news", "questions", "stuck",
+                "promises_no_due", "promises_no_owner"):
+        out[key] = [e for e in summary[key] if keep(e)]
+    return out
+
+
+def _run_routed(db_path: str | Path, days_ahead: int, send: bool, dry_run: bool,
+                news_hours: int, routes: dict[str, str]) -> dict:
+    summary = collect(db_path, days_ahead=days_ahead, news_hours=news_hours)
+    lines = format_report(summary)
+    result = None
+    if send:
+        if dry_run:
+            result = notify_mod.notify(lines, dry_run=True)
+        else:
+            force = os.environ.get("TG_MONITOR_FORCE", "").strip().lower() in notify_mod.ALLOWED
+            buckets: list[tuple[str, list[str], str]] = []
+            for name, target in routes.items():
+                sub = collect(db_path, days_ahead=days_ahead, project=name,
+                              news_hours=news_hours)
+                if _has_content(sub):
+                    buckets.append((target, format_report(sub), LAST_HASH_KEY + ":" + name))
+            remainder = _filter_routed(summary, set(routes))
+            if _has_content(remainder):
+                since = summary["now_ts"] - news_hours * 3600
+                with DB(db_path) as d:
+                    remainder["news_updated"] = d.conn.execute(
+                        "SELECT COUNT(*) c FROM entities WHERE updated_ts >= ? "
+                        "AND created_ts < ? AND (project IS NULL OR project NOT IN ("
+                        + ",".join("?" * len(routes)) + "))",
+                        (since, since, *routes.keys())).fetchone()["c"]
+                buckets.append(("me", format_report(remainder), LAST_HASH_KEY))
+            with DB(db_path) as d:
+                prevs = {key: d.get_meta(key) for _, _, key in buckets}
+            groups: dict[str, list[tuple[list[str], str, str]]] = {}
+            for target, sub_lines, key in buckets:
+                h = hashlib.sha1("\n".join(sub_lines).encode("utf-8")).hexdigest()
+                if prevs.get(key) != h or force:
+                    groups.setdefault(target, []).append((sub_lines, h, key))
+            if not groups:
+                result = {"ok": True, "skipped": True, "sent": 0}
+            else:
+                routed_res = []
+                for target, group in groups.items():
+                    combined = [ln for sub_lines, _, _ in group for ln in sub_lines]
+                    res = notify_mod.notify(combined, dry_run=False, to=target)
+                    routed_res.append({"to": target, "ok": res.get("ok"),
+                                       "sent": res.get("sent", 0)})
+                    if res.get("ok"):
+                        with DB(db_path) as d:
+                            for _, h, key in group:
+                                d.set_meta(key, h)
+                result = {"ok": all(r["ok"] for r in routed_res),
+                          "sent": sum(r["sent"] for r in routed_res),
+                          "routed": routed_res}
+    return {"projects": summary["projects"], "overdue": summary["overdue"],
+            "upcoming": summary["upcoming"], "news": summary["news"],
+            "questions": summary["questions"], "stuck": summary["stuck"],
+            "promises_no_due": summary["promises_no_due"],
+            "promises_no_owner": summary["promises_no_owner"],
+            "lines": lines, "notify": result}
+
+
 def run(db_path: str | Path = DB_PATH, days_ahead: int = 0, project: str | None = None,
         send: bool = False, dry_run: bool = True, news_hours: int = 24) -> dict:
+    routes = _routes()
+    if routes and project is None:
+        return _run_routed(db_path, days_ahead=days_ahead, send=send,
+                           dry_run=dry_run, news_hours=news_hours, routes=routes)
     summary = collect(db_path, days_ahead=days_ahead, project=project,
                       news_hours=news_hours)
     lines = format_report(summary)

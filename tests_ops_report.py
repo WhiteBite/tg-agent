@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ["TG_ENV_FILE"] = ""
+os.environ.pop("TG_NOTIFY_ROUTES", None)
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -273,6 +274,126 @@ def test_notify_hash_dedup() -> None:
         notify_mod._telegram_send = saved_t
         os.environ.pop("TG_ALLOW_SEND", None)
         os.environ.pop("TG_MONITOR_FORCE", None)
+
+
+def test_notify_routes() -> None:
+    print("=== monitor --send + TG_NOTIFY_ROUTES: маршрутизация по проектам ===")
+    import monitor as monitor_mod
+    import notify as notify_mod
+
+    db = TMP / "routes.sqlite"
+    _seed_watch_db(db)
+    now = int(time.time())
+    old = now - 30 * 3600
+    with DB(db) as d:
+        d.conn.executemany(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "due_ts, project, created_ts, updated_ts) "
+            "VALUES('tg', -100900, 1, 'task', ?, 'open', ?, ?, ?, ?)",
+            [("Задача A", now - 7200, "A", old, old),
+             ("Задача B", now - 7200, "B", old, old),
+             ("Задача вне проектов", now - 7200, None, old, old)])
+        d.conn.commit()
+
+    calls: list[tuple[str, list[str]]] = []
+
+    async def fake_transport(messages: list[str], to: str = "me") -> tuple[int, list[str]]:
+        calls.append((to, list(messages)))
+        return len(messages), []
+
+    saved_t = notify_mod._telegram_send
+    notify_mod._telegram_send = fake_transport
+    os.environ["TG_ALLOW_SEND"] = "1"
+    os.environ.pop("TG_MONITOR_FORCE", None)
+    os.environ["TG_NOTIFY_ROUTES"] = json.dumps({"A": "@x", "B": "me"})
+    try:
+        r1 = monitor_mod.run(str(db), send=True, dry_run=False)
+        to_x = [c for c in calls if c[0] == "@x"]
+        to_me = [c for c in calls if c[0] == "me"]
+        check(r1["notify"].get("ok") is True and len(calls) == 2,
+              "routes: ровно две отправки — по одной на адресата", str(calls)[:300])
+        check(len(to_x) == 1 and any("Задача A" in ln for ln in to_x[0][1])
+              and not any("Задача B" in ln or "Задача вне проектов" in ln
+                          for ln in to_x[0][1]),
+              "routes: @x получил только строки проекта A", str(to_x)[:300])
+        check(len(to_me) == 1 and any("Задача B" in ln for ln in to_me[0][1])
+              and any("Задача вне проектов" in ln for ln in to_me[0][1])
+              and not any("Задача A" in ln for ln in to_me[0][1]),
+              "routes: 'me' получил строки B и глобального остатка без A",
+              str(to_me)[:400])
+
+        with DB(db) as d:
+            d.conn.execute(
+                "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+                "due_ts, project, created_ts, updated_ts) "
+                "VALUES('tg', -100900, 1, 'task', 'Новая задача A', 'open', "
+                "?, 'A', ?, ?)",
+                (now - 3600, old, old))
+            d.conn.commit()
+        calls.clear()
+        r2 = monitor_mod.run(str(db), send=True, dry_run=False)
+        check(len(calls) == 1 and calls[0][0] == "@x"
+              and any("Новая задача A" in ln for ln in calls[0][1]),
+              "routes: изменение только A повторно уходит только в @x",
+              str(calls)[:300])
+        check(r2["notify"].get("ok") is True, "routes: повторный прогон ok",
+              str(r2["notify"])[:200])
+
+        calls.clear()
+        r3 = monitor_mod.run(str(db), send=True, dry_run=False)
+        check(len(calls) == 0 and r3["notify"].get("skipped") is True,
+              "routes: без изменений ничего не отправляется", str(r3["notify"]))
+
+        os.environ["TG_NOTIFY_ROUTES"] = "[]"
+        try:
+            monitor_mod.run(str(db), send=True, dry_run=False)
+            check(False, "routes: не-словарь в TG_NOTIFY_ROUTES отклоняется", "не упал")
+        except ValueError:
+            check(True, "routes: не-словарь в TG_NOTIFY_ROUTES отклоняется")
+    finally:
+        notify_mod._telegram_send = saved_t
+        os.environ.pop("TG_ALLOW_SEND", None)
+        os.environ.pop("TG_MONITOR_FORCE", None)
+        os.environ.pop("TG_NOTIFY_ROUTES", None)
+
+
+def test_notify_routes_unset() -> None:
+    print("=== monitor --send без TG_NOTIFY_ROUTES: одна отправка в 'me' ===")
+    import monitor as monitor_mod
+    import notify as notify_mod
+
+    db = TMP / "routes_unset.sqlite"
+    _seed_watch_db(db, project="утро")
+    now = int(time.time())
+    with DB(db) as d:
+        d.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "due_ts, project, created_ts, updated_ts) "
+            "VALUES('tg', -100900, 1, 'task', 'Без маршрутов', 'open', "
+            "?, 'утро', ?, ?)",
+            (now - 7200, now - 7200, now - 7200))
+        d.conn.commit()
+
+    calls: list[tuple[str, list[str]]] = []
+
+    async def fake_transport(messages: list[str], to: str = "me") -> tuple[int, list[str]]:
+        calls.append((to, list(messages)))
+        return len(messages), []
+
+    saved_t = notify_mod._telegram_send
+    notify_mod._telegram_send = fake_transport
+    os.environ["TG_ALLOW_SEND"] = "1"
+    os.environ.pop("TG_MONITOR_FORCE", None)
+    os.environ.pop("TG_NOTIFY_ROUTES", None)
+    try:
+        r = monitor_mod.run(str(db), send=True, dry_run=False)
+        check(r["notify"].get("ok") is True and len(calls) == 1
+              and calls[0][0] == "me",
+              "routes unset: ровно одна отправка в 'me' (легаси-путь)",
+              str(calls)[:200])
+    finally:
+        notify_mod._telegram_send = saved_t
+        os.environ.pop("TG_ALLOW_SEND", None)
 
 
 def test_aging_questions() -> None:
@@ -657,6 +778,8 @@ def main() -> int:
         test_step_budget()
         test_oneshot_lock()
         test_notify_hash_dedup()
+        test_notify_routes()
+        test_notify_routes_unset()
         test_aging_questions()
         test_monitor_promise_gaps()
         test_monitor_stuck()
