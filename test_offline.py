@@ -916,7 +916,7 @@ def test_entities_schema(db_path: Path) -> None:
     with DB(ent_db) as db:
         st = db.conn.execute(
             "SELECT status FROM entities WHERE title='Старая закрытая'").fetchone()["status"]
-        check(st == "closed", "entities: бэкфилл status для закрытых до фикса", st)
+        check(st == "done", "entities: бэкфилл status для закрытых до фикса", st)
 
 
 def test_extract_stub(db_path: Path) -> None:
@@ -1226,9 +1226,9 @@ def test_extract_validation(db_path: Path) -> None:
               "extract: (d) одно событие close с доказательством",
               f"msg_id={evc and evc['msg_id']}")
         open_ids = [e["id"] for e in db.entities_list(status="open")]
-        closed_ids = [e["id"] for e in db.entities_list(status="closed")]
+        closed_ids = [e["id"] for e in db.entities_list(status="done")]
         check(1 not in open_ids and 1 in closed_ids,
-              "extract: (d) close перевёл status в closed",
+              "extract: (d) close перевёл status в done",
               f"open={open_ids} closed={closed_ids}")
 
     reset_cur()
@@ -4615,7 +4615,7 @@ def test_report_topn(db_path: Path) -> None:
             "dedup_key, created_ts, updated_ts, closed_ts) VALUES"
             "(911, 'services', -100571, 1, 'service', 'Alpha', 'open', 'ka', ?, ?, NULL),"
             "(912, 'services', -100571, 1, 'service', 'Beta', 'open', 'kb', ?, ?, NULL),"
-            "(913, 'services', -100571, 1, 'service', 'Gamma', 'closed', 'kc', ?, ?, ?)",
+            "(913, 'services', -100571, 1, 'service', 'Gamma', 'done', 'kc', ?, ?, ?)",
             (now - 100, now - 100, now - 200, now - 200, now - 300, now - 300, now - 50))
         db.conn.commit()
 

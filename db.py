@@ -258,7 +258,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class DB:
@@ -302,6 +302,8 @@ class DB:
             self._migrate_extract_telemetry()
         if version < 2:
             self._migrate_v2_columns()
+        if version < 3:
+            self._migrate_status_done()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -440,6 +442,9 @@ class DB:
         self.conn.execute(
             "UPDATE entities SET status='closed' "
             "WHERE closed_ts IS NOT NULL AND status <> 'closed'")
+
+    def _migrate_status_done(self) -> None:
+        self.conn.execute("UPDATE entities SET status='done' WHERE status='closed'")
 
     def _migrate_topic_ids(self) -> None:
         """topic_id NOT NULL: старые базы писали NULL для «без темы» — это тот же

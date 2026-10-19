@@ -106,8 +106,8 @@ def collect(db_path: str | Path = DB_PATH, pack: str = "services",
                 vals = [v for v in (prev.get(f), g.get(f)) if v]
                 if vals:
                     prev[f] = agg(vals)
-            if g["status"] == "open":
-                prev["status"] = "open"
+            if prev["status"] == "done" and g["status"] != "done":
+                prev["status"] = g["status"]
             if not prev.get("body") and g.get("body"):
                 prev["body"] = g["body"]
             if not prev.get("evidence") and g.get("evidence"):
@@ -167,7 +167,7 @@ def run(db_path: str | Path = DB_PATH, pack: str = "services",
         hide_closed: bool = False) -> dict:
     summary = collect(db_path, pack=pack, days=days, query=query)
     if hide_closed:
-        summary["by_kind"] = {k: [g for g in v if g["status"] != "closed"]
+        summary["by_kind"] = {k: [g for g in v if g["status"] != "done"]
                               for k, v in summary["by_kind"].items()}
     if top:
         summary["by_kind"] = {k: v[:top] for k, v in summary["by_kind"].items()}

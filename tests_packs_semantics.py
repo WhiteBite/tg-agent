@@ -316,7 +316,7 @@ def test_supersedes(root: Path) -> None:
     with DB(db_path) as db:
         old = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
         new = db.conn.execute("SELECT * FROM entities WHERE id=2").fetchone()
-        check(old["closed_ts"] is not None and old["status"] == "closed",
+        check(old["closed_ts"] is not None and old["status"] == "done",
               "supersedes: старое решение закрыто (closed_ts, status)",
               f"closed_ts={old and old['closed_ts']} status={old and old['status']}")
         check(new["closed_ts"] is None and new["status"] == "open",
@@ -380,7 +380,7 @@ def test_supersedes(root: Path) -> None:
                 entity_id=3, supersedes=4)], 706)
     with DB(db_path) as db:
         e4 = db.conn.execute("SELECT * FROM entities WHERE id=4").fetchone()
-        check(e4["closed_ts"] is not None and e4["status"] == "closed",
+        check(e4["closed_ts"] is not None and e4["status"] == "done",
               "supersedes: update-операция тоже закрывает цель")
         ev = db.conn.execute(
             "SELECT * FROM entity_events WHERE entity_id=4 AND op='supersede'").fetchone()
@@ -803,6 +803,104 @@ def test_yo_quote(root: Path) -> None:
               str(titles))
 
 
+def test_status_transitions(root: Path) -> None:
+    print("=== статусы: start/block/unblock, close→done, update не трогает ===")
+    db_path = root / "status.sqlite"
+    chat, topic = -100952, 3
+    msg_ts = ts_utc(2026, 7, 1)
+    with DB(db_path) as db:
+        db.upsert_chat(chat, "Объект-3", None, "supergroup", True, 6)
+        db.upsert_topic(chat, topic, "Объект-3")
+        db.watch_add(chat, topic, project="стройка")
+        seed_messages(db, chat, topic, {
+            801: "задача: согласовать смету",
+            802: "взяли смету в работу",
+            803: "смета застряла на согласовании",
+            804: "блок снят, продолжаем",
+            805: "смета готова, закрываем",
+            806: "смету переоткрыли",
+            807: "уточнили ответственного по смете",
+        }, msg_ts)
+        set_cursor(db, chat, topic, "construction", 800)
+    pack = PACKS["construction"]
+
+    def op(name, msg, quote, entity_id=None):
+        return {"op": name, "kind": "task", "title": "Смета", "entity_id": entity_id,
+                "body": None, "owner": None, "due_text": None, "due_ts": None,
+                "evidence": [{"chat_id": chat, "msg_id": msg, "quote": quote}]}
+
+    def run_ops(ops, cursor):
+        with DB(db_path) as db:
+            set_cursor(db, chat, topic, "construction", cursor)
+        return extract_mod.run(str(db_path), packs=[pack], workers=1,
+                               provider=lambda prompt, pk: {"ops": ops})
+
+    def state(db):
+        return db.conn.execute(
+            "SELECT status, closed_ts FROM entities WHERE id=1").fetchone()
+
+    def last_rej(db):
+        return db.conn.execute(
+            "SELECT ops_rejected FROM extraction_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()["ops_rejected"]
+
+    run_ops([op("new", 801, "согласовать смету")], 800)
+    with DB(db_path) as db:
+        s = state(db)
+        check(s["status"] == "open" and s["closed_ts"] is None,
+              "статус: new → open", f"{s['status']}/{s['closed_ts']}")
+
+    run_ops([op("start", 802, "в работу", entity_id=1)], 801)
+    with DB(db_path) as db:
+        s = state(db)
+        ev = db.conn.execute(
+            "SELECT * FROM entity_events WHERE entity_id=1 AND op='start'").fetchone()
+        check(s["status"] == "in_progress", "статус: start → in_progress", s["status"])
+        check(ev is not None and ev["field"] == "status" and ev["from_val"] == "open"
+              and ev["to_val"] == "in_progress",
+              "статус: событие start с from/to",
+              f"{ev and ev['from_val']}->{ev and ev['to_val']}")
+
+    run_ops([op("block", 803, "застряла", entity_id=1)], 802)
+    with DB(db_path) as db:
+        check(state(db)["status"] == "blocked", "статус: block → blocked",
+              state(db)["status"])
+
+    run_ops([op("start", 804, "продолжаем", entity_id=1)], 803)
+    with DB(db_path) as db:
+        check(last_rej(db) == 1 and state(db)["status"] == "blocked",
+              "статус: start из blocked отклонён",
+              f"rej={last_rej(db)} status={state(db)['status']}")
+
+    run_ops([op("unblock", 804, "продолжаем", entity_id=1)], 803)
+    with DB(db_path) as db:
+        check(state(db)["status"] == "open", "статус: unblock → open",
+              state(db)["status"])
+
+    run_ops([op("update", 807, "ответственного", entity_id=1)], 806)
+    with DB(db_path) as db:
+        check(state(db)["status"] == "open",
+              "статус: update не трогает статус", state(db)["status"])
+
+    run_ops([op("close", 805, "закрываем", entity_id=1)], 804)
+    with DB(db_path) as db:
+        s = state(db)
+        check(s["status"] == "done" and s["closed_ts"] is not None,
+              "статус: close → done + closed_ts", f"{s['status']}/{s['closed_ts']}")
+
+    run_ops([op("start", 805, "закрываем", entity_id=1)], 804)
+    with DB(db_path) as db:
+        check(last_rej(db) == 1 and state(db)["status"] == "done",
+              "статус: start по закрытой отклонён",
+              f"rej={last_rej(db)} status={state(db)['status']}")
+
+    run_ops([op("reopen", 806, "переоткрыли", entity_id=1)], 805)
+    with DB(db_path) as db:
+        s = state(db)
+        check(s["status"] == "open" and s["closed_ts"] is None,
+              "статус: reopen → open", f"{s['status']}/{s['closed_ts']}")
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="packs_semantics_"))
     test_parse_due_text()
@@ -814,6 +912,7 @@ def main() -> int:
     test_dirty_reprocess(root)
     test_dedup_scope(root)
     test_yo_quote(root)
+    test_status_transitions(root)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

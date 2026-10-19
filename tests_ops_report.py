@@ -292,7 +292,7 @@ def test_aging_questions() -> None:
         d.conn.execute(
             "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
             "created_ts, updated_ts, closed_ts) "
-            "VALUES('tg', -100900, 1, 'question', 'Закрытый старый', 'closed', "
+            "VALUES('tg', -100900, 1, 'question', 'Закрытый старый', 'done', "
             "?, ?, ?)",
             (now - 5 * 86400, now - 5 * 86400, now))
         d.conn.commit()

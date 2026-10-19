@@ -74,7 +74,8 @@ def test_user_version_gate(tmp: Path) -> None:
     spied: list[str] = []
     names = ("_migrate_message_edits", "_migrate_marked_ids", "_migrate_global_dedup",
              "_migrate_watch_project", "_migrate_entity_status", "_migrate_topic_ids",
-             "_migrate_ops_overflow", "_migrate_extract_telemetry", "_migrate_v2_columns")
+             "_migrate_ops_overflow", "_migrate_extract_telemetry", "_migrate_v2_columns",
+             "_migrate_status_done")
     saved = {n: getattr(DB, n) for n in names}
     try:
         for n in names:
@@ -220,6 +221,20 @@ def test_new_columns(tmp: Path) -> None:
         uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
     check("rejects_json" in er and "external_id" in ig, "v1->v2: колонки добавлены")
     check(uv == SCHEMA_VERSION, "v1->v2: user_version поднят", str(uv))
+
+    raw = sqlite3.connect(str(p))
+    raw.execute("INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+                "closed_ts, created_ts, updated_ts) "
+                "VALUES('services', -1006, 1, 'trial', 'Старый закрытый', 'closed', 5, 1, 5)")
+    raw.execute("PRAGMA user_version = 2")
+    raw.commit()
+    raw.close()
+    with DB(p) as db:
+        st = db.conn.execute(
+            "SELECT status FROM entities WHERE title='Старый закрытый'").fetchone()["status"]
+        st_uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check(st == "done" and st_uv == SCHEMA_VERSION, "v2->v3: status closed→done",
+          f"{st}/{st_uv}")
 
     p2 = tmp / "old_v0.sqlite"
     conn = sqlite3.connect(str(p2))

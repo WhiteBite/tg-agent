@@ -54,6 +54,9 @@ DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 MAX_OPS_PER_BATCH = 50
 OPEN_ENTITIES_CAP = 50
 MAX_MESSAGES_PER_RUN = 200
+_STATUS_OPS = {"start": ("open",), "block": ("open", "in_progress"),
+               "unblock": ("blocked",)}
+_STATUS_TARGET = {"start": "in_progress", "block": "blocked", "unblock": "open"}
 
 _LINE_RE = re.compile(r"^\[(\d+)\] (\S+) (.*?): (.*)$")
 _CHAT_RE = re.compile(r"чат (-?\d+)")
@@ -467,6 +470,11 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
         return True, ""
     if row["closed_ts"] is not None:
         return False, f"{name}: сущность закрыта"
+    if name in _STATUS_OPS:
+        cur = db.conn.execute(
+            "SELECT status FROM entities WHERE id=?", (entity_id,)).fetchone()["status"]
+        if cur not in _STATUS_OPS[name]:
+            return False, f"{name}: статус {cur} не допускает переход"
     return True, ""
 
 
@@ -550,7 +558,7 @@ def _apply_supersede(db: DB, pack: dict, op: dict, new_id: int,
     if not isinstance(sup, int):
         return
     cur = db.conn.execute(
-        "UPDATE entities SET closed_ts=?, status='closed', updated_ts=? "
+        "UPDATE entities SET closed_ts=?, status='done', updated_ts=? "
         "WHERE id=? AND pack=? AND closed_ts IS NULL",
         (now, now, sup, pack["id"]))
     if cur.rowcount == 0:
@@ -701,13 +709,29 @@ def _apply_flip(db: DB, w: dict, op: dict, run_id: int, now: int,
             return
     db.conn.execute(
         "UPDATE entities SET closed_ts=?, status=?, updated_ts=? WHERE id=?",
-        (closed_ts, "closed" if name == "close" else "open", now, entity_id))
+        (closed_ts, "done" if name == "close" else "open", now, entity_id))
     _touch_source(db, entity_id, w, now)
     ev = (op.get("evidence") or [{}])[0]
     db.conn.execute(
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
         "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
         (entity_id, run_id, now, name, None,
+         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+
+
+def _apply_status(db: DB, w: dict, op: dict, run_id: int, now: int, name: str) -> None:
+    entity_id = op["entity_id"]
+    prev = db.conn.execute(
+        "SELECT status FROM entities WHERE id=?", (entity_id,)).fetchone()["status"]
+    target = _STATUS_TARGET[name]
+    db.conn.execute("UPDATE entities SET status=?, updated_ts=? WHERE id=?",
+                    (target, now, entity_id))
+    _touch_source(db, entity_id, w, now)
+    ev = (op.get("evidence") or [{}])[0]
+    db.conn.execute(
+        "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, to_val, "
+        "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (entity_id, run_id, now, name, "status", prev, target,
          ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
 
 
@@ -721,6 +745,8 @@ def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int) -> N
             _apply_flip(db, w, op, run_id, now, "close", now)
         elif name == "reopen":
             _apply_flip(db, w, op, run_id, now, "reopen", None)
+        elif name in _STATUS_TARGET:
+            _apply_status(db, w, op, run_id, now, name)
         else:
             _apply_new(db, pack, w, op, run_id, now)
 
