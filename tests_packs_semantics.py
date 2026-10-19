@@ -7,7 +7,8 @@ no-downgrade при update, require_match в scope-фильтре (construction 
 в темы без проекта и проекта «сервисы»), связь supersedes, persist причин
 отклонений (rejects_json), dirty-репроцесс отредактированных сообщений,
 dedup_scope project/global и схему пакетов (minItems evidence, без
-covered_upto_msg_id и confidence).
+covered_upto_msg_id и confidence), авто-закрытие вопросов ответом другого
+отправителя (auto_close).
 """
 
 from __future__ import annotations
@@ -901,6 +902,103 @@ def test_status_transitions(root: Path) -> None:
               "статус: reopen → open", f"{s['status']}/{s['closed_ts']}")
 
 
+def test_autoclose_replied_questions(root: Path) -> None:
+    print("=== auto_close: вопрос закрывается ответом другого отправителя ===")
+    db_path = root / "autoclose.sqlite"
+    chat, topic, other_topic = -100955, 14, 15
+    msg_ts = ts_utc(2026, 6, 15)
+    with DB(db_path) as db:
+        db.upsert_chat(chat, "Объект-6", None, "supergroup", True, 6)
+        db.upsert_topic(chat, topic, "Объект-6")
+        db.watch_add(chat, topic, project="стройка")
+        seed_messages(db, chat, topic, {
+            901: "вопрос: когда привезут блоки",
+            902: "вопрос: кто отвечает за кровлю",
+            903: "вопрос: когда монтаж",
+            904: "задача: подготовить площадку",
+        }, msg_ts)
+
+        def reply(msg_id, text, sender, reply_to, topic_id):
+            db.conn.execute(
+                "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+                "sender_id, sender_name, is_service, text, reply_to) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                (chat, msg_id, topic_id, msg_ts + 60,
+                 datetime.fromtimestamp(msg_ts + 60, timezone.utc).isoformat(),
+                 sender, "Пётр" if sender == 2 else "Иван", text, reply_to))
+
+        reply(911, "блоки привезут в среду", 2, 901, topic)
+        reply(912, "за кровлю отвечаю я", 1, 902, topic)
+        reply(913, "монтаж на следующей неделе", 2, 903, other_topic)
+        reply(914, "площадка готова", 2, 904, topic)
+        db.conn.commit()
+        set_cursor(db, chat, topic, "construction", 900)
+
+    pack = PACKS["construction"]
+
+    def op(kind, title, msg, quote):
+        return {"op": "new", "kind": kind, "title": title, "entity_id": None,
+                "body": None, "owner": None, "due_text": None, "due_ts": None,
+                "supersedes": None,
+                "evidence": [{"chat_id": chat, "msg_id": msg, "quote": quote}]}
+
+    extract_mod.run(str(db_path), packs=[pack], workers=1,
+                    provider=lambda prompt, pk: {"ops": [
+                        op("question", "Когда блоки", 901, "когда привезут блоки"),
+                        op("question", "Кто за кровлю", 902, "кровлю"),
+                        op("question", "Когда монтаж", 903, "монтаж"),
+                        op("task", "Площадка", 904, "площадку"),
+                    ]})
+    with DB(db_path) as db:
+        q1 = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
+        check(q1["status"] == "done" and q1["closed_ts"] is not None,
+              "auto_close: вопрос закрыт ответом другого отправителя",
+              f"{q1['status']}/{q1['closed_ts']}")
+        ev = db.conn.execute(
+            "SELECT * FROM entity_events WHERE entity_id=1 AND op='auto_close'"
+        ).fetchone()
+        check(ev is not None and ev["field"] == "status" and ev["from_val"] == "open"
+              and ev["to_val"] == "done" and ev["chat_id"] == chat
+              and ev["msg_id"] == 911 and ev["quote"] == "блоки привезут в среду",
+              "auto_close: событие auto_close со статусом и evidence ответа",
+              f"ev={dict(ev) if ev else None}")
+        last = db.conn.execute(
+            "SELECT op FROM entity_events WHERE entity_id=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        check(last is not None and last["op"] == "auto_close",
+              "auto_close: последнее событие вопроса — auto_close",
+              str(last and last["op"]))
+        q2 = db.conn.execute("SELECT * FROM entities WHERE id=2").fetchone()
+        check(q2["status"] == "open" and q2["closed_ts"] is None,
+              "auto_close: ответ того же отправителя не закрывает",
+              f"{q2['status']}/{q2['closed_ts']}")
+        q3 = db.conn.execute("SELECT * FROM entities WHERE id=3").fetchone()
+        check(q3["status"] == "open" and q3["closed_ts"] is None,
+              "auto_close: ответ из другой темы не закрывает",
+              f"{q3['status']}/{q3['closed_ts']}")
+        t1 = db.conn.execute("SELECT * FROM entities WHERE id=4").fetchone()
+        check(t1["status"] == "open" and t1["closed_ts"] is None,
+              "auto_close: задача с ответом не тронута",
+              f"{t1['status']}/{t1['closed_ts']}")
+        n = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE op='auto_close'"
+        ).fetchone()["c"]
+        check(n == 1, "auto_close: ровно одно auto_close-событие", str(n))
+
+    with DB(db_path) as db:
+        set_cursor(db, chat, topic, "construction", 910)
+    extract_mod.run(str(db_path), packs=[pack], workers=1,
+                    provider=lambda prompt, pk: {"ops": []})
+    with DB(db_path) as db:
+        q1 = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
+        n = db.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE entity_id=1 "
+            "AND op='auto_close'").fetchone()["c"]
+        check(q1["status"] == "done" and n == 1,
+              "auto_close: повторный прогон не добавляет событий",
+              f"status={q1['status']} events={n}")
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="packs_semantics_"))
     test_parse_due_text()
@@ -913,6 +1011,7 @@ def main() -> int:
     test_dedup_scope(root)
     test_yo_quote(root)
     test_status_transitions(root)
+    test_autoclose_replied_questions(root)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

@@ -751,6 +751,41 @@ def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int) -> N
             _apply_new(db, pack, w, op, run_id, now)
 
 
+def _autoclose_replied_questions(db: DB, pack: dict, w: dict, rows: list[dict],
+                                 run_id: int, now: int) -> None:
+    """Открытый вопрос скоупа закрывается ответом другого отправителя на его
+    evidence-сообщение; ответ ищется только в строках текущего батча."""
+    replies: dict[int, dict] = {}
+    for r in rows:
+        if r["reply_to"]:
+            replies[r["reply_to"]] = {"msg_id": r["msg_id"],
+                                      "sender_id": r["sender_id"],
+                                      "text": r["text"] or ""}
+    if not replies:
+        return
+    for q in db.conn.execute(
+            "SELECT e.id, ev.msg_id AS qmsg, m.sender_id AS qsender "
+            "FROM entities e "
+            "JOIN entity_events ev ON ev.entity_id=e.id AND ev.op='new' "
+            "JOIN messages m ON m.chat_id=ev.chat_id AND m.msg_id=ev.msg_id "
+            "JOIN entity_sources s ON s.entity_id=e.id AND s.chat_id=? AND s.topic_id=? "
+            "WHERE e.pack=? AND e.kind='question' AND e.closed_ts IS NULL",
+            (w["chat_id"], w["topic_id"], pack["id"])).fetchall():
+        reply = replies.get(q["qmsg"])
+        if reply is None or reply["sender_id"] == q["qsender"]:
+            continue
+        cur = db.conn.execute(
+            "UPDATE entities SET status='done', closed_ts=?, updated_ts=? "
+            "WHERE id=? AND closed_ts IS NULL", (now, now, q["id"]))
+        if cur.rowcount == 0:
+            continue
+        db.conn.execute(
+            "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, "
+            "to_val, chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (q["id"], run_id, now, "auto_close", "status", "open", "done",
+             w["chat_id"], reply["msg_id"], reply["text"][:80]))
+
+
 def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
                hi: int | None = None, cursor_key: str | None = None,
                cursor_floor: int | None = None,
@@ -883,6 +918,7 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
                          len(valid), rejected, overflow, status,
                          duration_ms, meta, rejects)
     _apply_ops(db, pack, w, valid, run_id)
+    _autoclose_replied_questions(db, pack, w, rows, run_id, now)
     new_cursor = max(cursor or 0, upto_msg)
     if overflow:
         clamp = dropped_min - 1
