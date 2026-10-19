@@ -6,8 +6,9 @@ integrations по id события (двойное событие в одну �
 идемпотентность, остаток после курсора, ретраи 5xx (три неудачи потом успех,
 исчерпание попыток), 4xx без ретрая и без блокировки остальных сущностей,
 Idempotency-Key, external_id из ответа, file-провайдер на id-курсоре,
-поведение на HTTP 500 и сетевой сбой, отсутствие кредов, EXPORT_101_PATH.
-Живой 101 API не зовётся.
+поведение на HTTP 500 и сетевой сбой, отсутствие кредов, EXPORT_101_PATH,
+сторонний реестр TG_EXTRA_PROVIDERS (merge поверх встроенных, пустой без env,
+битый путь — исключение наружу). Живой 101 API не зовётся.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import time
 from pathlib import Path
 
 os.environ["TG_ENV_FILE"] = ""
+os.environ.pop("TG_EXTRA_PROVIDERS", None)
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -437,6 +439,51 @@ def test_file_id_cursor(db_path: Path, out_path: Path) -> None:
           "file id-курсор: без новых событий файл не растёт", str(res3))
 
 
+def test_extra_providers(tmp: Path) -> None:
+    print("=== TG_EXTRA_PROVIDERS: сторонний реестр поверх встроенных ===")
+    db = str(tmp / "extra.sqlite")
+    marker = tmp / "fake.marker"
+    mod_path = tmp / "extra_providers.py"
+    mod_path.write_text(
+        "from pathlib import Path\n"
+        f"MARKER = Path({str(marker)!r})\n"
+        "def _fake(db, out):\n"
+        "    MARKER.write_text('hit', encoding='utf-8')\n"
+        "    return {'ok': True, 'exported': 0, 'provider': 'fake'}\n"
+        "PROVIDERS = {'fake': _fake, 'file': _fake}\n",
+        encoding="utf-8")
+    os.environ["TG_EXTRA_PROVIDERS"] = str(mod_path)
+    try:
+        res = export_mod.run(db, system="fake")
+        check(res.get("ok") is True and res.get("provider") == "fake"
+              and marker.exists() and marker.read_text(encoding="utf-8") == "hit",
+              "extras: run(system='fake') зовёт сторонний провайдер, маркер записан", str(res))
+        marker.unlink()
+        res_f = export_mod.run(db, system="file")
+        check(res_f.get("provider") == "fake" and marker.exists(),
+              "extras: сторонний 'file' перекрывает встроенный", str(res_f))
+        res_z = export_mod.run(db, system="zzz")
+        check(res_z.get("ok") is False and res_z.get("error") == "неизвестная система: zzz",
+              "extras: неизвестная система — та же строка ошибки при активном реестре",
+              str(res_z))
+        res_n = export_mod.run(db, system="notion")
+        check(res_n.get("ok") is False and "не реализован" in res_n.get("error", ""),
+              "extras: встроенный notion не перекрыт и остаётся стабом", str(res_n))
+    finally:
+        os.environ.pop("TG_EXTRA_PROVIDERS", None)
+    res_n2 = export_mod.run(db, system="notion")
+    check(res_n2.get("ok") is False and "не реализован" in res_n2.get("error", ""),
+          "без TG_EXTRA_PROVIDERS: реестр пуст, встроенные резолвятся", str(res_n2))
+    os.environ["TG_EXTRA_PROVIDERS"] = str(tmp / "no_such_module.py")
+    try:
+        res_bad = export_mod.run(db, system="fake")
+        check(False, "extras: битый путь — FileNotFoundError наружу", str(res_bad))
+    except FileNotFoundError:
+        check(True, "extras: битый путь — FileNotFoundError наружу")
+    finally:
+        os.environ.pop("TG_EXTRA_PROVIDERS", None)
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -461,6 +508,7 @@ def main() -> int:
         test_4xx_no_retry(tmp / "4xx.sqlite", base)
         test_idempotency_external_id(tmp / "idem.sqlite", base)
         test_file_id_cursor(tmp / "file_id.sqlite", tmp / "file_id.jsonl")
+        test_extra_providers(tmp)
     finally:
         srv.shutdown()
         srv.server_close()

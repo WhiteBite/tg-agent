@@ -20,10 +20,13 @@ EXPORT_101_PATH (по умолчанию /entities), таймаут EXPORT_101_T
 (ok=False, failed=[entity_id]), external_id/id из ответа пишется в
 integrations.external_id, курсор двигается только после 2xx. notion не
 реализован — словарь-ошибка, исключений не бросает.
+TG_EXTRA_PROVIDERS=<путь к .py-модулю со словарём PROVIDERS> — сторонний реестр
+мержится поверх встроенных; битый модуль бросает ImportError/FileNotFoundError.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sqlite3
@@ -192,8 +195,20 @@ def _stub(db: DB, out: str | None) -> dict:
 PROVIDERS = {"file": _provider_file, "101": _provider_101, "notion": _stub}
 
 
+def _extra_providers() -> dict[str, Callable[[DB, str | None], dict]]:
+    path = os.environ.get("TG_EXTRA_PROVIDERS")
+    if not path:
+        return {}
+    spec = importlib.util.spec_from_file_location("tg_extra_providers", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"TG_EXTRA_PROVIDERS: не py-модуль: {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return dict(mod.PROVIDERS)
+
+
 def run(db_path: str = DB_PATH, system: str = "file", out: str | None = None) -> dict:
-    prov = PROVIDERS.get(system)
+    prov = {**PROVIDERS, **_extra_providers()}.get(system)
     if prov is None:
         return {"ok": False, "error": f"неизвестная система: {system}"}
     with DB(db_path) as db:
