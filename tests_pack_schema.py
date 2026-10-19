@@ -72,11 +72,11 @@ def test_broken_packs_rejected() -> None:
     empty_kinds["kinds"] = {}
     expect_valueerror(empty_kinds, "kinds пустой -> ValueError с id пакета")
 
-    enum_wider = copy.deepcopy(base)
+    enum_wider = copy.deepcopy(packs.PACKS["services"])
     enum_wider["json_schema"]["properties"]["ops"]["items"]["properties"]["op"]["enum"].append("start")
     expect_valueerror(enum_wider, "enum схемы шире ops -> ValueError с id пакета")
 
-    ops_wider = copy.deepcopy(base)
+    ops_wider = copy.deepcopy(packs.PACKS["services"])
     ops_wider["ops"] = ops_wider["ops"] + ["start"]
     expect_valueerror(ops_wider, "ops шире enum схемы -> ValueError с id пакета")
 

@@ -582,15 +582,19 @@ python3 export.py --system notion                  # структурирова�
 | `login.py` | Логин QR-кодом (или телефон+код), `--export` — строка сессии |
 | `env.py` | Чтение `.env` всеми скриптами (env-переменные приоритетнее) |
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
-| `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов) |
+| `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 761 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс шесть suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 945 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс десять suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
 | `tests_ops_report.py` | операционная автономка: notify в живом loop, бюджет шагов, lock, дедуп сводки, doctor --quality (запускается из `test_offline.py`) |
 | `tests_media_ingest.py` | sweep pending + граница tg_mark_read (запускается из `test_offline.py`) |
 | `tests_db_core.py` | user_version-миграции, read-only, deleted/FTS, dirty, каскад проекта (запускается из `test_offline.py`) |
+| `tests_readers.py` | читалки: изменения с прошлого раза, бриф проекта, пробелы, фильтр owner (запускается из `test_offline.py`) |
+| `tests_pack_schema.py` | валидация схем паков при загрузке (запускается из `test_offline.py`) |
+| `tests_watchdog.py` | свежесть прогона конвейера (`pipeline:last_ok_ts`) (запускается из `test_offline.py`) |
+| `tests_ui_projects.py` | `/api/projects` и курсор визита проекта в UI (запускается из `test_offline.py`) |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -639,10 +643,11 @@ python3 export.py --system notion                  # структурирова�
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **761 проверок: свои проверки плюс шесть suites
+`python3 test_offline.py` — **945 проверок: свои проверки плюс десять suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
-`tests_db_core.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
+`tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
+`tests_watchdog.py`, `tests_ui_projects.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
   `--chat @канал`, `--folder`, `--watched`, `--dry-run`, раскладка по темам
@@ -665,6 +670,20 @@ python3 export.py --system notion                  # структурирова�
   отдаёт новый текст после правки, удалённое скрыто от читалок и из FTS; sync подхватывает `edit_date` в rescan и
   backfill (`edited_messages` в отчёте); `live.handle_edit` /
   `live.handle_delete` на подставных событиях
+- **статусная модель**: `open / in_progress / blocked / done` (терминал — `closed_ts`);
+  ops `start/block/unblock` с проверкой переходов, `close`→`done`; миграция v3
+  (`closed`→`done`); `update` не трогает статус
+- **авто-закрытие вопросов**: ответ другого отправителя (op `auto_close`) и
+  подтверждающие реакции (`autoconfirm`, напр. 👍×2) закрывают открытый вопрос
+- **реакции в индексе**: `live.handle_reactions` + `db.update_reactions` (агрегатные счётчики)
+- **читалки агента**: изменения с прошлого раза, бриф проекта, пробелы (вопросы без
+  ответа, обещания без срока/ответственного), фильтр по ответственному
+- **MCP**: 16 инструментов — `tg_changes` / `tg_project_brief` / `tg_gaps` + `owner` в `tg_entities`
+- **маршрутизация сводок** по проектам (`TG_NOTIFY_ROUTES`, персональные хэш-ключи);
+  `monitor` показывает обещания без срока/ответственного и «застряло» (blocked+просрочка)
+- **наблюдаемость**: `doctor --cost`, штамп `pipeline:last_ok_ts` + `watchdog.py`, UI-панель
+  `/api/projects` с курсором визита проекта
+- **гигиена**: валидация схем паков на импорте, провайдеры экспорта из конфига (`TG_EXTRA_PROVIDERS`)
 - **настоящий `server.py` как подпроцесс по MCP stdio**: `initialize` →
   `tools/list` (16 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
   включая сценарий «прочитал → отметил → непрочитанного нет»; `tg_new` честно

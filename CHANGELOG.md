@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0 — 2026-10-20
+Офлайн-бэклог под PM-кейс: статусная модель, авто-закрытие вопросов, реакции, читалки, маршрутизация сводок, наблюдаемость:
+- `db.py`/`extract.py`/`packs/`/`services_report.py`: статусы `open/in_progress/blocked/done` (терминал — `closed_ts`); ops `start/block/unblock` с проверкой переходов; `close`→`done`; миграция v3 `closed`→`done`; `update` не трогает статус.
+- `extract.py`/`packs/construction.py`: авто-закрытие открытого вопроса ответом другого отправителя (op `auto_close`) и подтверждающими реакциями (`autoconfirm`).
+- `live.py`/`db.py`: захват реакций в индекс (`handle_reactions`/`update_reactions`, агрегатные счётчики).
+- `db.py`: читалки `entity_changes`/`project_brief`/`project_gaps` + фильтр `owner`.
+- `server.py`: read-only инструменты `tg_changes`/`tg_project_brief`/`tg_gaps` (+`owner` в `tg_entities`) — 16 инструментов.
+- `monitor.py`/`notify.py`: обещания без срока/ответственного и «застряло»; маршрутизация сводок по проектам (`TG_NOTIFY_ROUTES`, персональные хэш-ключи).
+- `ui.py`/`ui.html`: панель здоровья проектов `/api/projects` + курсор визита.
+- `doctor.py`: `--cost` (расход токенов по `extraction_runs`).
+- `pipeline.py`/`watchdog.py`: штамп `pipeline:last_ok_ts` и проверка свежести прогона.
+- `packs/__init__.py`: валидация схем паков на импорте; `export.py`: провайдеры из конфига (`TG_EXTRA_PROVIDERS`).
+- Тесты: 6 → 10 suites (`tests_readers`/`tests_pack_schema`/`tests_watchdog`/`tests_ui_projects`), проверки 761 → 945.
+
 ## 0.8.0 — 2026-10-19
 Миграции по user_version, срок понимает русские даты, утренник чинится, тесты срослись:
 - `db.py`: миграции гейтятся `PRAGMA user_version` (DDL больше не повторяется на каждом открытии — штормы `database is locked` уходят); read-only путь `DB(path, readonly=True)` без миграций и с `query_only`; `deleted=0` учитывается во всех читалках, `mark_deleted` вычищает строку из FTS (удалённое не ищется, отредактированное — по новому тексту, триггер `AFTER UPDATE OF text`); `watch_set_project` каскадит открытые сущности; новые колонки `extraction_runs.rejects_json`, `integrations.external_id`; meta-ключ `dirty:{chat}:{topic}` копит id правок/удалений для перепрогона.
