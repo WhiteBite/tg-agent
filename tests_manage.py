@@ -1,22 +1,94 @@
 #!/usr/bin/env python3
 """Управление чатами: миграция v4 (created_by_me / my_role у chats, таблица
 invite_links), совместимость upsert_chat с новыми kwargs, точечные апдейты
-chat_set_manage_fields и инвайт-ссылки."""
+chat_set_manage_fields и инвайт-ссылки; создание групп/супергрупп/каналов/
+форумов через manage.create_chat — гейт TG_ALLOW_MANAGE, фейк-клиент,
+регистрация созданного в индексе."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sqlite3
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ["TG_ENV_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from db import DB, SCHEMA_VERSION  # noqa: E402
+import sync as sync_mod  # noqa: E402
+
+try:
+    import manage as manage_mod  # noqa: E402
+except ImportError:
+    manage_mod = None
+
+
+class FakeChat(SimpleNamespace):
+    pass
+
+
+class FakeChannel(SimpleNamespace):
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+class ChannelForUpdates(SimpleNamespace):
+    pass
+
+
+def _fake_marked_id(ent):
+    eid = getattr(ent, "id", 0)
+    if eid < 0:
+        return eid
+    if isinstance(ent, ChannelForUpdates) or type(ent).__name__ == "Channel":
+        return -1000000000000 - eid
+    return -eid
+
+
+def _fake_kind_of(ent):
+    name = type(ent).__name__
+    if name in ("ChannelForUpdates", "Channel"):
+        return "channel" if getattr(ent, "broadcast", False) else "supergroup"
+    return "group"
+
+
+@dataclass
+class FakeClient:
+    responses: list
+
+    def __post_init__(self):
+        self.requests = []
+
+    async def __call__(self, req):
+        self.requests.append(req)
+        return self.responses.pop(0)
+
+
+def _create(client, title, *, gate=True, **kw):
+    saved = os.environ.get("TG_ALLOW_MANAGE")
+    if gate:
+        os.environ["TG_ALLOW_MANAGE"] = "1"
+    else:
+        os.environ.pop("TG_ALLOW_MANAGE", None)
+    orig = (sync_mod.marked_id, sync_mod.kind_of)
+    sync_mod.marked_id, sync_mod.kind_of = _fake_marked_id, _fake_kind_of
+    try:
+        return asyncio.run(manage_mod.create_chat(client, title, **kw))
+    finally:
+        sync_mod.marked_id, sync_mod.kind_of = orig
+        if saved is None:
+            os.environ.pop("TG_ALLOW_MANAGE", None)
+        else:
+            os.environ["TG_ALLOW_MANAGE"] = saved
+
 
 FAILURES: list[str] = []
 
@@ -230,11 +302,163 @@ def test_invite_links(tmp: Path) -> None:
     check(other == [], "invite_links_list: чужой chat_id -> пусто", str(other))
 
 
+def test_create_group(tmp: Path) -> None:
+    print("=== create: обычная группа ===")
+    p = tmp / "create_group.sqlite"
+    resp = SimpleNamespace(updates=SimpleNamespace(chats=[
+        FakeChat(id=-456, title="TG", username="tg", forum=False,
+                 participants_count=10)]))
+    client = FakeClient([resp])
+    res = _create(client, "TG", kind="group", db_path=str(p))
+    row = None
+    with DB(p) as db:
+        row = db.conn.execute(
+            "SELECT title, username, kind, is_forum, members, created_by_me, my_role "
+            "FROM chats WHERE id = -456").fetchone()
+    check(res.get("ok") is True and res.get("chat_id") == -456
+          and res.get("kind") == "group" and res.get("is_forum") is False
+          and res.get("registered") is True,
+          "create group: ok, chat_id=-456, kind=group", str(res))
+    check(len(client.requests) == 1
+          and type(client.requests[0]).__name__ == "CreateChatRequest"
+          and client.requests[0].title == "TG"
+          and client.requests[0].users == [],
+          "create group: CreateChatRequest(users=[], title)",
+          str([type(r).__name__ for r in client.requests]))
+    check(row is not None and row["title"] == "TG" and row["username"] == "tg"
+          and row["kind"] == "group" and row["is_forum"] == 0
+          and row["members"] == 10 and row["created_by_me"] == 1
+          and row["my_role"] == "owner",
+          "create group: в индексе created_by_me=1, my_role=owner",
+          str(dict(row)) if row is not None else "нет строки")
+
+
+def test_create_supergroup(tmp: Path) -> None:
+    print("=== create: супергруппа ===")
+    p = tmp / "create_sg.sqlite"
+    resp = SimpleNamespace(chats=[
+        ChannelForUpdates(id=-1002000001, title="SG", megagroup=True,
+                          broadcast=False, forum=False, participants_count=7)])
+    client = FakeClient([resp])
+    res = _create(client, "SG", kind="supergroup", db_path=str(p))
+    row = None
+    with DB(p) as db:
+        row = db.conn.execute(
+            "SELECT kind, is_forum, created_by_me, my_role FROM chats "
+            "WHERE id = -1002000001").fetchone()
+    req = client.requests[0] if client.requests else None
+    check(res.get("ok") is True and res.get("chat_id") == -1002000001
+          and res.get("kind") == "supergroup" and res.get("registered") is True,
+          "create supergroup: ok, chat_id=-1002000001, kind=supergroup", str(res))
+    check(req is not None and type(req).__name__ == "CreateChannelRequest"
+          and req.megagroup is True and req.broadcast is None and req.forum is None
+          and req.title == "SG",
+          "create supergroup: CreateChannelRequest(megagroup=True)",
+          str(type(req).__name__) if req is not None else "нет запроса")
+    check(row is not None and row["kind"] == "supergroup" and row["is_forum"] == 0
+          and row["created_by_me"] == 1 and row["my_role"] == "owner",
+          "create supergroup: в индексе created_by_me=1, my_role=owner",
+          str(dict(row)) if row is not None else "нет строки")
+
+
+def test_create_forum(tmp: Path) -> None:
+    print("=== create: форум ===")
+    p = tmp / "create_forum.sqlite"
+    resp = SimpleNamespace(chats=[
+        ChannelForUpdates(id=-1002000001, title="SG", megagroup=True,
+                          broadcast=False, forum=True)])
+    client = FakeClient([resp])
+    res = _create(client, "SG", kind="supergroup", forum=True, db_path=str(p))
+    row = None
+    with DB(p) as db:
+        row = db.conn.execute(
+            "SELECT kind, is_forum, created_by_me, my_role FROM chats "
+            "WHERE id = -1002000001").fetchone()
+    req = client.requests[0] if client.requests else None
+    check(res.get("ok") is True and res.get("is_forum") is True,
+          "create forum: ok, is_forum=True", str(res))
+    check(req is not None and type(req).__name__ == "CreateChannelRequest"
+          and req.forum is True,
+          "create forum: CreateChannelRequest(forum=True)",
+          str(type(req).__name__) if req is not None else "нет запроса")
+    check(row is not None and row["is_forum"] == 1 and row["kind"] == "supergroup"
+          and row["created_by_me"] == 1 and row["my_role"] == "owner",
+          "create forum: в индексе is_forum=1",
+          str(dict(row)) if row is not None else "нет строки")
+
+
+def test_create_channel(tmp: Path) -> None:
+    print("=== create: канал ===")
+    p = tmp / "create_channel.sqlite"
+    resp = SimpleNamespace(chats=[
+        ChannelForUpdates(id=-1002000001, title="CH", broadcast=True,
+                          megagroup=False, forum=False)])
+    client = FakeClient([resp])
+    res = _create(client, "CH", kind="channel", db_path=str(p))
+    row = None
+    with DB(p) as db:
+        row = db.conn.execute(
+            "SELECT kind, created_by_me, my_role FROM chats "
+            "WHERE id = -1002000001").fetchone()
+    req = client.requests[0] if client.requests else None
+    check(res.get("ok") is True and res.get("kind") == "channel",
+          "create channel: ok, kind=channel", str(res))
+    check(req is not None and type(req).__name__ == "CreateChannelRequest"
+          and req.broadcast is True and req.megagroup is None
+          and req.about == "" and req.title == "CH",
+          "create channel: broadcast=True, about пустой",
+          str(type(req).__name__) if req is not None else "нет запроса")
+    check(row is not None and row["kind"] == "channel" and row["created_by_me"] == 1
+          and row["my_role"] == "owner",
+          "create channel: в индексе created_by_me=1, my_role=owner",
+          str(dict(row)) if row is not None else "нет строки")
+
+
+def test_create_gate_off(tmp: Path) -> None:
+    print("=== create: гейт TG_ALLOW_MANAGE выключен ===")
+    client = FakeClient([])
+    res = _create(client, "X", gate=False)
+    check(res == {"ok": False, "error": "manage заблокирован: нужен TG_ALLOW_MANAGE=1"},
+          "gate off: операция заблокирована", str(res))
+    check(client.requests == [], "gate off: к Telegram ни одного запроса",
+          str(client.requests))
+
+
+def test_create_validation(tmp: Path) -> None:
+    print("=== create: валидация входа ===")
+    client = FakeClient([])
+    bad_kind = _create(client, "X", kind="bogus")
+    forum_group = _create(client, "X", kind="group", forum=True)
+    empty_title = _create(client, "   ")
+    check(bad_kind.get("ok") is False and "kind" in bad_kind.get("error", ""),
+          "create: неизвестный kind отклонён", str(bad_kind))
+    check(forum_group.get("ok") is False and "forum" in forum_group.get("error", ""),
+          "create: forum без supergroup отклонён", str(forum_group))
+    check(empty_title.get("ok") is False and "title" in empty_title.get("error", ""),
+          "create: пустой title отклонён", str(empty_title))
+    check(client.requests == [], "create: валидация до запросов к Telegram",
+          str(client.requests))
+
+
+def test_create_no_db(tmp: Path) -> None:
+    print("=== create: без регистрации в индексе ===")
+    resp = SimpleNamespace(chats=[
+        ChannelForUpdates(id=-1002000001, title="SG", megagroup=True)])
+    client = FakeClient([resp])
+    res = _create(client, "SG", kind="supergroup")
+    check(res.get("ok") is True and res.get("registered") is False
+          and res.get("chat_id") == -1002000001,
+          "create no-db: ok, registered=False", str(res))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_manage_"))
     tests = (test_fresh_schema, test_v3_migration, test_second_open,
              test_readonly_no_migrate, test_upsert_compat, test_upsert_new_kwargs,
-             test_manage_fields, test_invite_links)
+             test_manage_fields, test_invite_links,
+             test_create_group, test_create_supergroup, test_create_forum,
+             test_create_channel, test_create_gate_off, test_create_validation,
+             test_create_no_db)
     try:
         for fn in tests:
             try:
