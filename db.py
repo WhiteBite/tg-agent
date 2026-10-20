@@ -258,7 +258,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class DB:
@@ -304,6 +304,8 @@ class DB:
             self._migrate_v2_columns()
         if version < 3:
             self._migrate_status_done()
+        if version < 4:
+            self._migrate_chat_manage()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -478,6 +480,20 @@ class DB:
             except sqlite3.OperationalError:
                 pass
 
+    def _migrate_chat_manage(self) -> None:
+        for ddl in (
+                "ALTER TABLE chats ADD COLUMN created_by_me INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE chats ADD COLUMN my_role TEXT",
+                "CREATE TABLE IF NOT EXISTS invite_links ("
+                "chat_id INTEGER NOT NULL, link TEXT NOT NULL, title TEXT, "
+                "expires_at INTEGER, usage_limit INTEGER, request_needed INTEGER DEFAULT 0, "
+                "revoked INTEGER DEFAULT 0, created_at INTEGER, "
+                "PRIMARY KEY (chat_id, link))"):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
+
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
     def get_cursor(self, chat_id: int, topic_id: int = 0) -> int:
@@ -626,14 +642,21 @@ class DB:
         kind: str,
         is_forum: bool,
         members: Optional[int],
+        created_by_me: Optional[int] = None,
+        my_role: Optional[str] = None,
     ) -> None:
+        # SQLite проверяет NOT NULL на предлагаемом ряду даже в пути ON CONFLICT — NULL не должен доезжать до VALUES
         self.conn.execute(
-            "INSERT INTO chats(id, title, username, kind, is_forum, members, synced_at) "
-            "VALUES(?,?,?,?,?,?,?) "
+            "INSERT INTO chats(id, title, username, kind, is_forum, members, "
+            "created_by_me, my_role, synced_at) "
+            "VALUES(?,?,?,?,?,?,COALESCE(?, 0),?,?) "
             "ON CONFLICT(id) DO UPDATE SET title=excluded.title, username=excluded.username, "
             "kind=excluded.kind, is_forum=excluded.is_forum, members=excluded.members, "
+            "created_by_me=COALESCE(NULLIF(excluded.created_by_me, 0), chats.created_by_me), "
+            "my_role=COALESCE(excluded.my_role, chats.my_role), "
             "synced_at=excluded.synced_at",
-            (chat_id, title, username, kind, int(is_forum), members, int(time.time())),
+            (chat_id, title, username, kind, int(is_forum), members,
+             created_by_me, my_role, int(time.time())),
         )
 
     def upsert_topic(
@@ -654,6 +677,44 @@ class DB:
             "last_ts=COALESCE(excluded.last_ts, topics.last_ts)",
             (chat_id, topic_id, title, int(closed), messages, last_ts),
         )
+
+    def chat_set_manage_fields(self, chat_id: int, created_by_me: Optional[int] = None,
+                               my_role: Optional[str] = None) -> bool:
+        sets = []
+        params: list[Any] = []
+        if created_by_me is not None:
+            sets.append("created_by_me = ?")
+            params.append(created_by_me)
+        if my_role is not None:
+            sets.append("my_role = ?")
+            params.append(my_role)
+        if not sets:
+            return False
+        params.append(chat_id)
+        cur = self.conn.execute(
+            f"UPDATE chats SET {', '.join(sets)} WHERE id = ?", params)
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def invite_link_add(self, chat_id: int, link: str, title: Optional[str] = None,
+                        expires_at: Optional[int] = None, usage_limit: Optional[int] = None,
+                        request_needed: bool = False, revoked: bool = False) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO invite_links(chat_id, link, title, expires_at, "
+            "usage_limit, request_needed, revoked, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (chat_id, link, title, expires_at, usage_limit,
+             int(request_needed), int(revoked), int(time.time())))
+        self.conn.commit()
+
+    def invite_links_list(self, chat_id: Optional[int] = None) -> list[dict]:
+        if chat_id is not None:
+            rows = self.conn.execute(
+                "SELECT * FROM invite_links WHERE chat_id = ? ORDER BY created_at DESC",
+                (chat_id,))
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM invite_links ORDER BY created_at DESC")
+        return [dict(r) for r in rows]
 
     _MSG_COLS = ("chat_id, msg_id, topic_id, ts, date_iso, "
                  "sender_id, sender_name, is_out, is_service, text, media, reply_to, "

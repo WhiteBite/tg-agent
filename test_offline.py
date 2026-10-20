@@ -5210,7 +5210,7 @@ def main() -> int:
     for suite in ("tests_index_media", "tests_packs_semantics", "tests_export_101",
                   "tests_ops_report", "tests_media_ingest", "tests_db_core",
                   "tests_readers", "tests_pack_schema", "tests_watchdog",
-                  "tests_ui_projects"):
+                  "tests_ui_projects", "tests_manage"):
         rc = subprocess.run([sys.executable, "-X", "utf8",
                              str(Path(__file__).parent / f"{suite}.py")],
                             cwd=str(Path(__file__).parent)).returncode
