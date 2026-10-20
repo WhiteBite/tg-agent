@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ядро db.py: user_version-гейт инициализации, read-only open, фильтр
-deleted=0 в читалках, FTS и удаления, колонки v2, каскад проекта, dirty-ключ."""
+deleted=0 в читалках, FTS и удаления, колонки v2, каскад проекта, dirty-ключ,
+таблица posts (v5)."""
 
 from __future__ import annotations
 
@@ -75,7 +76,7 @@ def test_user_version_gate(tmp: Path) -> None:
     names = ("_migrate_message_edits", "_migrate_marked_ids", "_migrate_global_dedup",
              "_migrate_watch_project", "_migrate_entity_status", "_migrate_topic_ids",
              "_migrate_ops_overflow", "_migrate_extract_telemetry", "_migrate_v2_columns",
-             "_migrate_status_done")
+             "_migrate_status_done", "_migrate_posts")
     saved = {n: getattr(DB, n) for n in names}
     try:
         for n in names:
@@ -339,6 +340,63 @@ def test_dirty_recorder(tmp: Path) -> None:
     check(keys == ["dirty:-1008:5"], "dirty: без topic_id в msg ключ не пишется", str(keys))
 
 
+def test_posts_migration(tmp: Path) -> None:
+    print("=== миграция v5: таблица posts ===")
+    p = tmp / "posts.sqlite"
+    with DB(p) as db:
+        db.insert_message(msg(-1010, 1, ts=100, text="до миграции"))
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(posts)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check(SCHEMA_VERSION == 5, "v5: SCHEMA_VERSION = 5", str(SCHEMA_VERSION))
+    check({"chat_id", "msg_id", "topic_id", "kind", "product", "tpl_hash", "ts"} <= cols,
+          "fresh: таблица posts со всеми колонками", str(sorted(cols)))
+    check(uv == 5, "fresh: user_version = 5", str(uv))
+
+    raw = sqlite3.connect(str(p))
+    raw.execute("DROP TABLE IF EXISTS posts")
+    raw.execute("PRAGMA user_version = 4")
+    raw.commit()
+    raw.close()
+    with DB(p) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(posts)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+        kept = db.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE chat_id=-1010").fetchone()[0]
+    check({"chat_id", "msg_id", "topic_id", "kind", "product", "tpl_hash", "ts"} <= cols,
+          "v4->v5: posts создана миграцией", str(sorted(cols)))
+    check(uv == 5, "v4->v5: user_version поднят до 5", str(uv))
+    check(kept == 1, "v4->v5: строки messages не потеряны", str(kept))
+
+
+def test_posts_helpers(tmp: Path) -> None:
+    print("=== posts: post_add / posts_list / post_get ===")
+    p = tmp / "posts_rw.sqlite"
+    with DB(p) as db:
+        db.post_add(-1011, 10, topic_id=7, kind="release", product="Acme", tpl_hash="abc")
+        db.post_add(-1011, 11)
+        db.post_add(-1012, 12)
+        db.conn.execute("UPDATE posts SET ts=200 WHERE chat_id=-1011 AND msg_id=10")
+        db.conn.execute("UPDATE posts SET ts=300 WHERE chat_id=-1011 AND msg_id=11")
+        db.conn.execute("UPDATE posts SET ts=250 WHERE chat_id=-1012 AND msg_id=12")
+        db.conn.commit()
+        got = db.post_get(-1011, 10)
+        missing = db.post_get(-1011, 999)
+        all_ids = [r["msg_id"] for r in db.posts_list()]
+        chat_ids = [r["msg_id"] for r in db.posts_list(chat_id=-1011)]
+        db.post_add(-1011, 10, kind="promo", product="Acme2", tpl_hash="zzz")
+        replaced = db.post_get(-1011, 10)
+    check(got is not None and got["topic_id"] == 7 and got["kind"] == "release"
+          and got["product"] == "Acme" and got["tpl_hash"] == "abc" and got["ts"] == 200,
+          "post_get: все поля на месте", str(dict(got) if got else None))
+    check(missing is None, "post_get: нет строки -> None")
+    check(all_ids == [11, 12, 10], "posts_list: без фильтра, ORDER BY ts DESC", str(all_ids))
+    check(chat_ids == [11, 10], "posts_list: фильтр по chat_id", str(chat_ids))
+    check(replaced is not None and replaced["kind"] == "promo"
+          and replaced["product"] == "Acme2" and replaced["tpl_hash"] == "zzz",
+          "post_add: повтор по (chat_id, msg_id) перезаписывает",
+          str(dict(replaced) if replaced else None))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_db_core_"))
     try:
@@ -349,6 +407,8 @@ def main() -> int:
         test_new_columns(tmp)
         test_project_cascade(tmp)
         test_dirty_recorder(tmp)
+        test_posts_migration(tmp)
+        test_posts_helpers(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

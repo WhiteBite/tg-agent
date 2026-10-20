@@ -207,6 +207,17 @@ CREATE TABLE IF NOT EXISTS media_assets (
     PRIMARY KEY (chat_id, msg_id)
 );
 
+CREATE TABLE IF NOT EXISTS posts (
+    chat_id  INTEGER NOT NULL,
+    msg_id   INTEGER NOT NULL,
+    topic_id INTEGER,
+    kind     TEXT,
+    product  TEXT,
+    tpl_hash TEXT,
+    ts       INTEGER,
+    PRIMARY KEY (chat_id, msg_id)
+);
+
 CREATE TABLE IF NOT EXISTS integrations (
     entity_id   INTEGER NOT NULL,
     system      TEXT NOT NULL,
@@ -258,7 +269,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class DB:
@@ -306,6 +317,8 @@ class DB:
             self._migrate_status_done()
         if version < 4:
             self._migrate_chat_manage()
+        if version < 5:
+            self._migrate_posts()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -493,6 +506,16 @@ class DB:
                 self.conn.execute(ddl)
             except sqlite3.OperationalError:
                 pass
+
+    def _migrate_posts(self) -> None:
+        try:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS posts ("
+                "chat_id INTEGER NOT NULL, msg_id INTEGER NOT NULL, topic_id INTEGER, "
+                "kind TEXT, product TEXT, tpl_hash TEXT, ts INTEGER, "
+                "PRIMARY KEY (chat_id, msg_id))")
+        except sqlite3.OperationalError:
+            pass
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
@@ -715,6 +738,29 @@ class DB:
             rows = self.conn.execute(
                 "SELECT * FROM invite_links ORDER BY created_at DESC")
         return [dict(r) for r in rows]
+
+    def post_add(self, chat_id: int, msg_id: int, topic_id: Optional[int] = None,
+                 kind: Optional[str] = None, product: Optional[str] = None,
+                 tpl_hash: Optional[str] = None) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO posts(chat_id, msg_id, topic_id, kind, product, "
+            "tpl_hash, ts) VALUES(?,?,?,?,?,?,?)",
+            (chat_id, msg_id, topic_id, kind, product, tpl_hash, int(time.time())))
+        self.conn.commit()
+
+    def posts_list(self, chat_id: Optional[int] = None) -> list[dict]:
+        if chat_id is not None:
+            rows = self.conn.execute(
+                "SELECT * FROM posts WHERE chat_id = ? ORDER BY ts DESC", (chat_id,))
+        else:
+            rows = self.conn.execute("SELECT * FROM posts ORDER BY ts DESC")
+        return [dict(r) for r in rows]
+
+    def post_get(self, chat_id: int, msg_id: int) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM posts WHERE chat_id = ? AND msg_id = ?",
+            (chat_id, msg_id)).fetchone()
+        return dict(row) if row else None
 
     _MSG_COLS = ("chat_id, msg_id, topic_id, ts, date_iso, "
                  "sender_id, sender_name, is_out, is_service, text, media, reply_to, "
