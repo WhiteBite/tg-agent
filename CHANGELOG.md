@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0 — 2026-10-21
+Третий пишущий модуль: создание и управление чатами, всё за гейтом `TG_ALLOW_MANAGE=1`:
+- `manage.py`: создание групп/каналов/форумов с регистрацией в индексе (`created_by_me=1`, `my_role=owner`), настройки (title/about/photo/username, тумблеры pre_history/invites/signatures/forum, дефолтные права), темы форума (создание/правка/закрытие), участники (invite/admin/kick/ban) и инвайт-ссылки (expire/usage_limit, хранение в индексе). Без `TG_ALLOW_MANAGE=1` любая операция возвращает ошибку без запросов; контент не трогается.
+- `db.py`: миграция v4 — колонки `created_by_me`/`my_role` у `chats`, таблица `invite_links`.
+- `server.py`: MCP-инструменты `tg_manage_create`/`tg_manage_edit`/`tg_manage_topic`/`tg_manage_members`/`tg_manage_link` регистрируются только при `TG_ALLOW_MANAGE=1`; каждая операция требует явный `confirm=True`, иначе ошибка.
+- Тесты: 10 → 11 suites (`tests_manage.py`), проверки 945 → 1076.
+
 ## 0.9.1 — 2026-10-20
 Экспорт 101 под реальный REST-контракт (сваггер `101 API.yaml`):
 - `export.py`: auth 101 через JWT — `EXPORT_101_TOKEN` либо `EXPORT_101_LOGIN`+`EXPORT_101_PASSWORD` (вход `/api/auth/sign-in/`, refresh пары на 401 через `/api/auth/refresh-token/`); сущности уходят задачами в `/api/tasks/v2/` (create POST, при `integrations.external_id` — PATCH `.../{guid}/`), поля под контракт — `EXPORT_101_MAP`, kinds — `EXPORT_101_KINDS`, комментарий события — `EXPORT_101_COMMENTS=1`, `EXPORT_101_DRY=1` — без отправки. Тело задачи в сваггере не описано — дефолтный маппинг консервативен и настраивается.

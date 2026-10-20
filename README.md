@@ -80,6 +80,15 @@ python3 folders.py add --folder 15 --chat @ai_channel    # доложить ча
 python3 folders.py remove --folder 15 --chat @ai_channel
 ```
 
+Создавать и настраивать сами чаты можно из терминала (реальные операции —
+только при `TG_ALLOW_MANAGE=1`):
+
+```bash
+python3 manage.py create --title "Моя группа"
+python3 manage.py edit --chat -1002000001 --title "Новое"
+python3 manage.py topic-create --chat @forum --title "Тема"
+```
+
 ### Вариант B — точечно темы внутри одной группы
 
 Когда группа одна (твоя `AI`), а тем в ней десятки:
@@ -121,9 +130,12 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_gaps` | Пробелы по проекту или пакету: открытые вопросы без ответа, обещания без срока и без ответственного, с причиной попадания |
 
 Отправки нет вообще: в `server.py` не существует инструмента, который что-то
-пишет в Telegram. Пишущих модуля два, оба вне MCP-сервера: `notify.py`
-(сообщения себе, за гейтом `TG_ALLOW_SEND=1`) и `folders.py` (состав папок —
-`add`/`remove` чатов; контент не пишет). `tg_sql` (произвольный
+пишет в Telegram. Пишущих модуля три, все вне MCP-сервера по умолчанию: `notify.py`
+(сообщения себе, за гейтом `TG_ALLOW_SEND=1`), `folders.py` (состав папок —
+`add`/`remove` чатов; контент не пишет) и `manage.py` (создание и настройка
+чатов, участники, инвайт-ссылки; за гейтом `TG_ALLOW_MANAGE=1`).
+MCP-инструменты управления чатами (`tg_manage_*`) регистрируются только при
+`TG_ALLOW_MANAGE=1` и требуют `confirm=True` для каждой операции. `tg_sql` (произвольный
 read-only SQL) скрыт по умолчанию, включается `TG_EXPOSE_SQL=1`.
 
 ---
@@ -447,7 +459,7 @@ TG_ALLOW_SEND=1 python3 notify.py --send "текст"
 echo "текст" | TG_ALLOW_SEND=1 python3 notify.py --send   # из stdin, построчно
 ```
 
-`notify.py` — единственный модуль репозитория, который умеет писать в Telegram
+`notify.py` — модуль репозитория, который умеет писать сообщения в Telegram
 (в свои Saved Messages). Реальная отправка только при `TG_ALLOW_SEND=1`, по
 умолчанию везде dry-run; `TG_NOTIFY_CAP` (по умолчанию 10) ограничивает число
 сообщений за вызов. Отправка идёт в worker-потоке на собственном event loop,
@@ -517,8 +529,11 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 
 - **Отправить сообщение агент не может** — таких инструментов нет. Пишущие
   модули живут вне MCP-сервера: `notify.py` (сообщения в Saved Messages, гейт
-  `TG_ALLOW_SEND=1`) и `folders.py` (состав папок — только membership, без
-  контента; правка = явный запуск команды).
+  `TG_ALLOW_SEND=1`), `folders.py` (состав папок — только membership, без
+  контента; правка = явный запуск команды) и `manage.py` (создание и настройка
+  чатов, участники, инвайт-ссылки; гейт `TG_ALLOW_MANAGE=1`).
+  MCP-инструменты управления чатами (`tg_manage_*`) регистрируются только при
+  `TG_ALLOW_MANAGE=1` и требуют `confirm=True` для каждой операции.
 - **Сообщения — источник истины, правки подхватываются.** Строка отражает
   последнее состояние текста (`edited_ts`); предыдущие версии правок не
   сохраняются. Удаление — флаг `deleted=1`: строка остаётся в базе, но
@@ -567,7 +582,8 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 |---|---|
 | `sync.py` | Telethon → SQLite: инкрементальная синхронизация, бэкфилл чанками, папки, пины, подхват правок (`edited_ts`) |
 | `search.py` | Глобальный поиск Telegram: публичные каналы/группы/юзеры по ключевому слову |
-| `folders.py` | Правка состава папок Telegram: add/remove чатов (второй пишущий модуль, контент не пишет) |
+| `folders.py` | Правка состава папок Telegram: add/remove чатов (пишущий модуль, контент не пишет) |
+| `manage.py` | Создание и управление чатами: группы, каналы, форумы, настройки, участники (гейт `TG_ALLOW_MANAGE=1`) |
 | `pipeline.py` | Автономный конвейер: sync → media → extract → fuzzy → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
 | `db.py` | Индекс: схема с миграциями по `PRAGMA user_version`, FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
 | `server.py` | MCP-сервер (stdio): 16 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
@@ -576,7 +592,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт, due_text→due_ts fallback (ru-месяцы, относительные, конец дня), supersedes, причины отказа в `rejects_json`, перепрогон dirty |
 | `packs/` | Декларативные пакеты извлечения: `construction` (decision/task/promise/question), `services` (service/trial/promo); scope-фильтры (`require_match`, `exclude_project_regex`) и `dedup_scope` |
 | `monitor.py` | Сводка просроченного и дедлайнов по проектам, зависшие вопросы; `--send` через `notify.py`, дедуп по хэшу отчёта |
-| `notify.py` | Уведомления в Saved Messages; единственный пишущий модуль, гейт `TG_ALLOW_SEND=1` |
+| `notify.py` | Уведомления в Saved Messages; пишущий модуль, гейт `TG_ALLOW_SEND=1` |
 | `media.py` | Очередь транскрипции аудио (voice + audio-документы): гейт `is_transcribable` на инджесте, рефетч и скачивание из Telegram, гейты до скачивания, `--sweep-pending`, qwen3-asr-flash (stub/openai) |
 | `export.py` | Выгрузка сущностей во внешние системы (file / 101 — REST-задачи с JWT sign-in+refresh, id-курсор, ретраи, upsert по guid; notion — заглушка-ошибка) |
 | `services_report.py` | Каталог сервисов из сущностей: rollup по dedup_key, `--days/--query/--top/--hide-closed` |
@@ -589,7 +605,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 945 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс десять suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1076 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс одиннадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -600,6 +616,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `tests_pack_schema.py` | валидация схем паков при загрузке (запускается из `test_offline.py`) |
 | `tests_watchdog.py` | свежесть прогона конвейера (`pipeline:last_ok_ts`) (запускается из `test_offline.py`) |
 | `tests_ui_projects.py` | `/api/projects` и курсор визита проекта в UI (запускается из `test_offline.py`) |
+| `tests_manage.py` | Офлайн-тесты manage.py: создание, настройки, темы, участники, MCP (запускается из `test_offline.py`) |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -648,11 +665,11 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **945 проверок: свои проверки плюс десять suites
+`python3 test_offline.py` — **1076 проверок: свои проверки плюс одиннадцать suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
-`tests_watchdog.py`, `tests_ui_projects.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
+`tests_watchdog.py`, `tests_ui_projects.py`, `tests_manage.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
   `--chat @канал`, `--folder`, `--watched`, `--dry-run`, раскладка по темам
@@ -775,6 +792,12 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
   каскад проекта
 - проект у тем watch (`watch.py --project`, подкоманда `project`) наследуется
   сущностями и фильтруется в `tg_entities`/`tg_overdue`/`monitor`
+- `manage.py` (`tests_manage.py`): создание групп/каналов/форумов на фейк-клиенте
+  с регистрацией в индексе (`created_by_me=1`, `my_role=owner`), настройки
+  (title/about/photo/username, тумблеры, дефолтные права), темы форума,
+  участники и инвайт-ссылки; гейт `TG_ALLOW_MANAGE` (без него все операции
+  заблокированы без запросов); MCP `tg_manage_*` регистрируются только при
+  гейте и требуют `confirm=True`
 
 **Не проверено:** реальные вызовы к Telegram — здесь нет аккаунта. Сигнатура
 `messages.GetForumTopicsRequest` снята с установленного Telethon 1.45, но живой
