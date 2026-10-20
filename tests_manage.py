@@ -10,16 +10,23 @@ toggle_signatures / toggle_forum / set_default_rights — диспетчер б�
 темы форума через manage.topic_create / topic_edit — CreateForumTopicRequest
 с random_id, topic_id из service-сообщения MessageActionTopicCreated,
 EditForumTopicRequest с title/closed, title переживает close-only правку,
-closed в индексе, не-форум и гейт TG_ALLOW_MANAGE отклоняются."""
+closed в индексе, не-форум и гейт TG_ALLOW_MANAGE отклоняются; MCP-слой —
+настоящий server.py по stdio: TG_ALLOW_MANAGE=1 регистрирует пять
+инструментов tg_manage_* (21 всего, 24 с TG_ALLOW_LIVE), без флага их нет,
+confirm=False отклоняется, без кредов confirm=True даёт JSON-ошибку."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import queue
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1184,6 +1191,139 @@ def test_members_gate_off(tmp: Path) -> None:
     check(all_blocked, "gate off: все пять операций заблокированы без запросов")
 
 
+def _rpc(proc: subprocess.Popen, payload: dict) -> None:
+    proc.stdin.write(json.dumps(payload) + "\n")
+    proc.stdin.flush()
+
+
+def _read_msg(proc: subprocess.Popen, timeout: float = 60.0) -> dict:
+    q = getattr(proc, "_lines", None)
+    if q is None:
+        q = queue.Queue()
+
+        def pump() -> None:
+            for line in proc.stdout:
+                q.put(line)
+            q.put(None)
+
+        proc._lines = q
+        threading.Thread(target=pump, daemon=True).start()
+    while True:
+        try:
+            line = q.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError("нет ответа от MCP-сервера")
+        if line is None:
+            raise RuntimeError("сервер закрыл stdout: " + (proc.stderr.read() or ""))
+        if line.strip():
+            return json.loads(line)
+
+
+def _wait_for(proc: subprocess.Popen, pred) -> dict:
+    for _ in range(40):
+        msg = _read_msg(proc)
+        if pred(msg):
+            return msg
+    raise TimeoutError("не дождались нужного сообщения")
+
+
+def _mcp_env(**extra: str) -> dict:
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("TG_DB", "TG_ALLOW_MANAGE", "TG_ALLOW_LIVE", "TG_EXPOSE_SQL",
+                        "TG_STRICT_WATCH", "TELEGRAM_API_ID", "TELEGRAM_API_HASH",
+                        "TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME")}
+    env["TG_ENV_FILE"] = ""
+    env.update(extra)
+    return env
+
+
+def _start(env: dict) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "server.py")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", env=env,
+    )
+
+
+def _init(proc: subprocess.Popen) -> set:
+    _rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2024-11-05", "capabilities": {},
+        "clientInfo": {"name": "manage-test", "version": "0"}}})
+    _wait_for(proc, lambda m: m.get("id") == 1)
+    _rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    _rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    tools = _wait_for(proc, lambda m: m.get("id") == 2)
+    return {t["name"] for t in tools["result"]["tools"]}
+
+
+def _call(proc: subprocess.Popen, tool: str, args: dict, rid: int) -> dict:
+    _rpc(proc, {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                "params": {"name": tool, "arguments": args}})
+    msg = _wait_for(proc, lambda m: m.get("id") == rid)
+    return json.loads(msg["result"]["content"][0]["text"])
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def test_mcp_manage_tools(tmp: Path) -> None:
+    print("=== MCP: tg_manage_* за TG_ALLOW_MANAGE=1 ===")
+    db = tmp / "mcp_manage.sqlite"
+    with DB(db):
+        pass
+    manage_names = {"tg_manage_create", "tg_manage_edit", "tg_manage_topic",
+                    "tg_manage_members", "tg_manage_link"}
+
+    proc = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_MANAGE="1"))
+    try:
+        names = _init(proc)
+        check(manage_names <= names and len(names) == 21,
+              "MCP manage: TG_ALLOW_MANAGE=1 -> 16 базовых + 5 tg_manage_* = 21",
+              str(sorted(names)))
+        check(not any(n.startswith("tg_live_") for n in names),
+              "MCP manage: без TG_ALLOW_LIVE живых инструментов нет")
+
+        no_confirm = _call(proc, "tg_manage_create", {"title": "X"}, 3)
+        check(no_confirm.get("error") and "confirm" in no_confirm["error"],
+              "MCP manage: confirm=False -> JSON-ошибка про confirm",
+              str(no_confirm)[:90])
+
+        no_creds = _call(proc, "tg_manage_create", {"title": "X", "confirm": True}, 4)
+        check(no_creds.get("error", "").startswith("manage:"),
+              "MCP manage: confirm=True без кредов -> JSON-ошибка, не зависание",
+              str(no_creds)[:90])
+
+        _rpc(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
+        alive = _wait_for(proc, lambda m: m.get("id") == 5)
+        check(len(alive.get("result", {}).get("tools", [])) == 21,
+              "MCP manage: сервер жив после ошибок manage-инструмента")
+    finally:
+        _stop(proc)
+
+    proc2 = _start(_mcp_env(TG_DB=str(db)))
+    try:
+        names2 = _init(proc2)
+        check(len(names2) == 16 and not any(n.startswith("tg_manage_") for n in names2),
+              "MCP manage: без флага 16 инструментов, tg_manage_* нет",
+              str(sorted(n for n in names2 if n.startswith("tg_manage_"))))
+    finally:
+        _stop(proc2)
+
+    proc3 = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_LIVE="1", TG_ALLOW_MANAGE="1"))
+    try:
+        names3 = _init(proc3)
+        check(len(names3) == 24,
+              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 24 инструмента",
+              str(sorted(names3)))
+    finally:
+        _stop(proc3)
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_manage_"))
     tests = (test_fresh_schema, test_v3_migration, test_second_open,
@@ -1199,8 +1339,9 @@ def main() -> int:
               test_settings_gate_off,
                test_topic_create, test_topic_create_not_forum,
                test_topic_edit, test_topic_gate_off,
-               test_members_invite, test_members_admin, test_members_kick,
-               test_links, test_chat_info, test_members_gate_off)
+                test_members_invite, test_members_admin, test_members_kick,
+                test_links, test_chat_info, test_members_gate_off,
+                test_mcp_manage_tools)
     try:
         for fn in tests:
             try:
