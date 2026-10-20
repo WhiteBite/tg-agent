@@ -8,7 +8,7 @@ set_about / set_photo / set_username / toggle_pre_history / toggle_invites /
 toggle_signatures / toggle_forum / set_default_rights — диспетчер базовая
 группа vs канал, сохранение флагов ChatBannedRights, is_forum в индексе;
 темы форума через manage.topic_create / topic_edit — CreateForumTopicRequest
-с random_id, topic_id из service-сообщения MessageActionTopicCreated,
+с random_id, topic_id из service-сообщения MessageActionTopicCreate,
 EditForumTopicRequest с title/closed, title переживает close-only правку,
 closed в индексе, не-форум и гейт TG_ALLOW_MANAGE отклоняются; MCP-слой —
 настоящий server.py по stdio: TG_ALLOW_MANAGE=1 регистрирует пять
@@ -151,12 +151,12 @@ def test_fresh_schema(tmp: Path) -> None:
         except sqlite3.OperationalError as e:
             tbl_err = str(e)
         uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
-    check(SCHEMA_VERSION == 4, "fresh: SCHEMA_VERSION = 4", str(SCHEMA_VERSION))
+    check(SCHEMA_VERSION >= 4, "fresh: SCHEMA_VERSION >= 4 (manage-миграции на месте)", str(SCHEMA_VERSION))
     check({"created_by_me", "my_role"} <= cols, "fresh: колонки chats есть",
           str(sorted(cols)))
     check(sel_err is None, "fresh: SELECT created_by_me, my_role работает", str(sel_err))
     check(tbl_err is None, "fresh: таблица invite_links есть", str(tbl_err))
-    check(uv == 4, "fresh: user_version = 4", str(uv))
+    check(uv == SCHEMA_VERSION, "fresh: user_version = SCHEMA_VERSION", str(uv))
 
 
 def test_v3_migration(tmp: Path) -> None:
@@ -192,7 +192,7 @@ def test_v3_migration(tmp: Path) -> None:
     check({"created_by_me", "my_role"} <= cols, "v3->v4: колонки добавлены",
           str(sorted(cols)))
     check(tbl_err is None, "v3->v4: invite_links создана", str(tbl_err))
-    check(uv == 4, "v3->v4: user_version = 4", str(uv))
+    check(uv == SCHEMA_VERSION, "v3->now: user_version = SCHEMA_VERSION", str(uv))
 
 
 def test_second_open(tmp: Path) -> None:
@@ -747,7 +747,7 @@ def test_settings_gate_off(tmp: Path) -> None:
     check(all_blocked, "gate off: все девять операций заблокированы без запросов")
 
 
-class MessageActionTopicCreated:
+class MessageActionTopicCreate:
     pass
 
 
@@ -756,7 +756,7 @@ def test_topic_create(tmp: Path) -> None:
     p = tmp / "topic_create.sqlite"
     resp = SimpleNamespace(updates=[
         SimpleNamespace(message=SimpleNamespace(
-            id=42, action=MessageActionTopicCreated()))])
+            id=42, action=MessageActionTopicCreate()))])
     forum = Channel(id=-1002000001, title="F", broadcast=False, megagroup=True,
                     forum=True)
     client = FakeClientEnt([resp], entity=forum)

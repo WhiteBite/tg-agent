@@ -51,7 +51,7 @@ def handle_message(db: DB, msg, chat_id: int, forum: bool) -> bool:
     if tid is None:
         tid = 1
     action = getattr(msg, "action", None)
-    if action is not None and sync_mod._label(action) == "MessageActionTopicCreated":
+    if action is not None and sync_mod._label(action) == "MessageActionTopicCreate":
         try:  # новая тема — сразу с заголовком, не дожидаясь следующего sync
             db.upsert_topic(chat_id, tid,
                             str(getattr(action, "title", None) or f"тема {tid}"), False)

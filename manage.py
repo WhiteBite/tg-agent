@@ -281,11 +281,11 @@ async def topic_create(client: Any, ref: Any, title: str, *,
     topic_id = 0
     for u in getattr(resp, "updates", None) or []:
         msg = getattr(u, "message", None)
-        if msg is not None and _label(getattr(msg, "action", None)) == "MessageActionTopicCreated":
+        if msg is not None and _label(getattr(msg, "action", None)) == "MessageActionTopicCreate":
             topic_id = msg.id
     if not topic_id:
         for m in getattr(resp, "messages", None) or []:
-            if _label(getattr(m, "action", None)) == "MessageActionTopicCreated":
+            if _label(getattr(m, "action", None)) == "MessageActionTopicCreate":
                 topic_id = m.id
     if not topic_id:
         return {"ok": False, "error": "не удалось извлечь topic_id из ответа"}

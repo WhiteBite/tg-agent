@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from test_offline import (  # noqa: E402
-    Channel, FakeClient, ForumTopicsRes, MessageActionTopicCreated, Reactions,
+    Channel, FakeClient, ForumTopicsRes, MessageActionTopicCreate, Reactions,
     MessageMediaPhoto, MessageReplyHeader, MessageServiceMsg, Msg, Topic, User,
 )
 import sync as sync_mod  # noqa: E402
@@ -99,7 +99,7 @@ def mk_group(cid, title, username, topics, counts, forum=True, days=45):
     if forum:
         for tid, ttitle, closed in topics:
             msgs.append(MessageServiceMsg(tid, NOW - timedelta(days=days), USERS[0],
-                                          MessageActionTopicCreated()))
+                                          MessageActionTopicCreate()))
             tl.append(Topic(tid, ttitle, tid, closed=closed))
         mid = max(t.id for t in tl) + 1
     else:

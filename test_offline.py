@@ -67,7 +67,7 @@ class MessageMediaVoice(FakeMedia):
     document = VoiceDoc()
 
 
-class MessageActionTopicCreated:
+class MessageActionTopicCreate:
     def __init__(self, title: str = "новая тема"):
         self.title = title
 
@@ -321,8 +321,8 @@ def build_fixture() -> FakeClient:
 
     topics = [Topic(1, "General", 102), Topic(5, "Релизы", 101), Topic(6, "Оффтоп", 100, closed=True)]
     forum_msgs = [
-        MessageServiceMsg(5, NOW - timedelta(days=9), users[1], MessageActionTopicCreated()),
-        MessageServiceMsg(6, NOW - timedelta(days=9), users[1], MessageActionTopicCreated()),
+        MessageServiceMsg(5, NOW - timedelta(days=9), users[1], MessageActionTopicCreate()),
+        MessageServiceMsg(6, NOW - timedelta(days=9), users[1], MessageActionTopicCreate()),
         Msg(11, NOW - timedelta(days=5), users[1], "релиз 1.2 выкатили", reply_to=MessageReplyHeader(5, True)),
         Msg(12, NOW - timedelta(days=5), users[2], "проверил, ок", reply_to=MessageReplyHeader(5, True)),
         Msg(13, NOW - timedelta(days=4), users[3], "а когда 1.3?", reply_to=MessageReplyHeader(5, True)),
@@ -2315,7 +2315,7 @@ def test_gates(db_path: Path) -> None:
     live_mod = __import__("live")
     users = {2: User(2, "Боря", "П", "borya")}
     svc = Msg(500, datetime.fromtimestamp(now, timezone.utc), users[2], "тема создана",
-              action=MessageActionTopicCreated(title="Срочное"))
+              action=MessageActionTopicCreate(title="Срочное"))
     gates_db = db_path.parent / "gates.sqlite"
     with DB(str(gates_db)) as db:
         live_mod.handle_message(db, svc, -100333, True)

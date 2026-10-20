@@ -170,7 +170,7 @@ def topic_of_message(msg: Any) -> Optional[int]:
         if tid:
             return int(tid)
     action = getattr(msg, "action", None)
-    if action is not None and _label(action) == "MessageActionTopicCreated":
+    if action is not None and _label(action) == "MessageActionTopicCreate":
         return int(msg.id)
     if reply_to is not None:
         # обычные ответы внутри группы без тем — темы нет
