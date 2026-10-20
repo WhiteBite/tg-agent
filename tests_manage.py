@@ -20,7 +20,8 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -841,6 +842,348 @@ def test_topic_gate_off(tmp: Path) -> None:
           "gate off: topic_create и topic_edit заблокированы без запросов")
 
 
+class User(SimpleNamespace):
+    pass
+
+
+@dataclass
+class FakeClientMap(FakeClient):
+    entities: dict = None
+    me: Any = None
+    me_input: Any = field(default=None, repr=False)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.entities is None:
+            self.entities = {}
+
+    async def get_entity(self, ref):
+        return self.entities[ref]
+
+    async def get_me(self):
+        return self.me
+
+    async def get_input_entity(self, ref):
+        if ref in ("me", "self"):
+            return self.me_input
+        return self.entities[ref]
+
+
+def test_members_invite(tmp: Path) -> None:
+    print("=== members: invite ===")
+    from telethon.tl.types import MissingInvitee
+    from telethon.tl.types.messages import InvitedUsers
+    ch = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    u1, u2 = User(id=1), User(id=2)
+    resp = InvitedUsers(updates=SimpleNamespace(),
+                         missing_invitees=[MissingInvitee(user_id=2)])
+    client = FakeClientMap([resp], entities={"@sg": ch, "@u1": u1, "@u2": u2})
+    res = _run(manage_mod.invite_users, client, "@sg", ["@u1", "@u2"])
+    req = client.requests[0] if client.requests else None
+    check(res.get("ok") is True and res.get("invited") == 1
+          and res.get("missing_invitees") == [2],
+          "invite channel: ok, invited=1, missing_invitees=[2]", str(res))
+    check(req is not None and type(req).__name__ == "InviteToChannelRequest"
+          and req.channel is ch and req.users == [u1, u2],
+          "invite channel: InviteToChannelRequest(channel, [users])",
+          str(type(req).__name__) if req is not None else "нет запроса")
+    chat = Chat(id=-456, title="G", participants_count=3)
+    client2 = FakeClientMap([SimpleNamespace(), SimpleNamespace()],
+                            entities={"@g": chat, "@u1": u1, "@u2": u2})
+    res2 = _run(manage_mod.invite_users, client2, "@g", ["@u1", "@u2"])
+    reqs = client2.requests
+    check(res2.get("ok") is True and res2.get("invited") == 2
+          and res2.get("missing_invitees") == [],
+          "invite chat: ok, invited=2, missing_invitees=[]", str(res2))
+    check(len(reqs) == 2
+          and all(type(r).__name__ == "AddChatUserRequest" for r in reqs)
+          and reqs[0].chat_id == -456 and reqs[0].user_id is u1
+          and reqs[0].fwd_limit == 0 and reqs[1].user_id is u2,
+          "invite chat: AddChatUserRequest(chat_id, user, fwd_limit=0) на каждого",
+          str([type(r).__name__ for r in reqs]))
+
+
+def test_members_admin(tmp: Path) -> None:
+    print("=== members: admin ===")
+    ch = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    u = User(id=7)
+    client = FakeClientMap([SimpleNamespace()],
+                           entities={"@sg": ch, "@u": u})
+    res = _run(manage_mod.set_admin, client, "@sg", "@u",
+               rights={"pin_messages": True, "invite_users": True}, rank="mod")
+    req = client.requests[0] if client.requests else None
+    check(res.get("ok") is True and req is not None
+          and type(req).__name__ == "EditAdminRequest"
+          and req.channel is ch and req.user_id is u
+          and req.admin_rights.pin_messages is True
+          and req.admin_rights.invite_users is True
+          and req.admin_rights.change_info is None
+          and req.rank == "mod",
+          "admin grant: EditAdminRequest с точными правами и rank", str(res))
+    client2 = FakeClientMap([SimpleNamespace()],
+                            entities={"@sg": ch, "@u": u})
+    res2 = _run(manage_mod.set_admin, client2, "@sg", "@u", rights=None)
+    req2 = client2.requests[0] if client2.requests else None
+    check(res2.get("ok") is True and req2 is not None
+          and req2.admin_rights.pin_messages is None
+          and req2.admin_rights.add_admins is None
+          and req2.rank == "",
+          "admin revoke: пустые ChatAdminRights, rank=''", str(res2))
+    chat = Chat(id=-456, title="G")
+    client3 = FakeClientMap([SimpleNamespace(), SimpleNamespace()],
+                            entities={"@g": chat, "@u": u})
+    res3 = _run(manage_mod.set_admin, client3, "@g", "@u",
+                rights={"invite_users": True})
+    res4 = _run(manage_mod.set_admin, client3, "@g", "@u", rights=None)
+    check(res3.get("ok") is True and res4.get("ok") is True
+          and type(client3.requests[0]).__name__ == "EditChatAdminRequest"
+          and client3.requests[0].chat_id == -456
+          and client3.requests[0].user_id is u
+          and client3.requests[0].is_admin is True
+          and client3.requests[1].is_admin is False,
+          "admin chat: EditChatAdminRequest(is_admin=bool(rights))",
+          str((res3, res4)))
+    client4 = FakeClientMap([], entities={"@sg": ch, "@u": u})
+    res5 = _run(manage_mod.set_admin, client4, "@sg", "@u",
+                rights={"bogus_right": True})
+    check(res5.get("ok") is False and client4.requests == [],
+          "admin: неизвестное право -> ошибка без запросов", str(res5))
+    client5 = FakeClientMap([], entities={"@sg": ch, "@u": u})
+    res6 = _run(manage_mod.set_admin, client5, "@sg", "@u",
+                rights={"pin_messages": True}, rank="x" * 17)
+    check(res6.get("ok") is False and client5.requests == [],
+          "admin: rank длиннее 16 -> ошибка без запросов", str(res6))
+
+
+def test_members_kick(tmp: Path) -> None:
+    print("=== members: kick ===")
+    ch = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    u = User(id=7)
+    client = FakeClientMap([SimpleNamespace(), SimpleNamespace()],
+                           entities={"@sg": ch, "@u": u})
+    before = datetime.now(timezone.utc)
+    res = _run(manage_mod.kick_user, client, "@sg", "@u")
+    after = datetime.now(timezone.utc)
+    req = client.requests[0] if client.requests else None
+    check(res.get("ok") is True and req is not None
+          and type(req).__name__ == "EditBannedRequest"
+          and req.channel is ch and req.participant is u
+          and req.banned_rights.view_messages is True
+          and req.banned_rights.until_date is not None
+          and before <= req.banned_rights.until_date <= after,
+          "kick channel: until_date=now, view_messages=True", str(res))
+    client2 = FakeClientMap([SimpleNamespace()],
+                            entities={"@sg": ch, "@u": u})
+    res2 = _run(manage_mod.kick_user, client2, "@sg", "@u", ban=True)
+    req2 = client2.requests[0] if client2.requests else None
+    check(res2.get("ok") is True and req2 is not None
+          and req2.banned_rights.view_messages is True
+          and req2.banned_rights.until_date is None,
+          "ban channel: until_date=None (навсегда)", str(res2))
+    chat = Chat(id=-456, title="G")
+    client3 = FakeClientMap([SimpleNamespace()],
+                            entities={"@g": chat, "@u": u})
+    res3 = _run(manage_mod.kick_user, client3, "@g", "@u")
+    req3 = client3.requests[0] if client3.requests else None
+    check(res3.get("ok") is True and req3 is not None
+          and type(req3).__name__ == "DeleteChatUserRequest"
+          and req3.chat_id == -456 and req3.user_id is u
+          and req3.revoke_history is False,
+          "kick chat: DeleteChatUserRequest(revoke_history=False)", str(res3))
+
+
+def test_links(tmp: Path) -> None:
+    print("=== links: export и список ===")
+    from telethon.tl.types import ChatInviteExported
+    p = tmp / "links.sqlite"
+    ch = Channel(id=-1002000001, title="SG", username="sg", broadcast=False,
+                 megagroup=True)
+    exp = datetime.now(timezone.utc) + timedelta(days=7)
+    resp = ChatInviteExported(link="https://t.me/+abc", admin_id=10,
+                              date=datetime.now(timezone.utc),
+                              expire_date=exp, usage_limit=5, title="T",
+                              request_needed=True)
+    client = FakeClientMap([resp], entities={"@sg": ch})
+    before = datetime.now(timezone.utc)
+    res = _run(manage_mod.export_link, client, "@sg", expire_days=7,
+               usage_limit=5, title="T", request_needed=True, db_path=str(p))
+    req = client.requests[0] if client.requests else None
+    check(res.get("ok") is True and res.get("link") == "https://t.me/+abc",
+          "export link: ok, link из ChatInviteExported", str(res))
+    check(req is not None and type(req).__name__ == "ExportChatInviteRequest"
+          and req.peer is ch and req.usage_limit == 5 and req.title == "T"
+          and req.request_needed is True
+          and req.expire_date is not None
+          and before <= req.expire_date <= datetime.now(timezone.utc)
+          + timedelta(seconds=1) + timedelta(days=7),
+          "export link: ExportChatInviteRequest с аргументами",
+          str(type(req).__name__) if req is not None else "нет запроса")
+    rows = manage_mod.links_list(str(p), -1002000001)
+    check(len(rows) == 1 and rows[0]["link"] == "https://t.me/+abc"
+          and rows[0]["title"] == "T" and rows[0]["usage_limit"] == 5
+          and rows[0]["request_needed"] == 1
+          and rows[0]["expires_at"] == int(exp.timestamp()),
+          "export link: строка в invite_links", str(rows))
+    check(manage_mod.links_list(str(p), -1002099999) == [],
+          "links_list: чужой chat_id -> пусто")
+    perm = ChatInviteExported(link="https://t.me/+perm", admin_id=10,
+                              date=datetime.now(timezone.utc))
+    client2 = FakeClientMap([perm], entities={"@sg": ch})
+    res2 = _run(manage_mod.export_link, client2, "@sg")
+    req2 = client2.requests[0] if client2.requests else None
+    check(res2.get("ok") is True and req2 is not None
+          and req2.expire_date is None and req2.usage_limit is None
+          and req2.title is None and req2.request_needed is None,
+          "export link: без аргументов -> постоянная ссылка", str(res2))
+    client3 = FakeClientMap([SimpleNamespace()], entities={"@sg": ch})
+    res3 = _run(manage_mod.export_link, client3, "@sg")
+    check(res3.get("ok") is False and "ссылку" in res3.get("error", ""),
+          "export link: ответ без link -> ошибка", str(res3))
+
+
+def test_chat_info(tmp: Path) -> None:
+    print("=== info: роль и индекс ===")
+    from telethon.tl.types import (
+        ChannelParticipant,
+        ChannelParticipantAdmin,
+        ChannelParticipantCreator,
+        ChatAdminRights,
+        ChatFull,
+        ChatParticipant,
+        ChatParticipantAdmin,
+        ChatParticipantCreator,
+        ChatParticipants,
+        InputPeerSelf,
+        PeerNotifySettings,
+    )
+    from telethon.tl.types import channels as tl_channels
+    from telethon.tl.types import messages as tl_messages
+    p = tmp / "info.sqlite"
+    with DB(p) as db:
+        db.upsert_chat(-1002000001, "SG", "sg", "supergroup", False, 5,
+                       created_by_me=1)
+    ch = Channel(id=-1002000001, title="SG", username="sg", broadcast=False,
+                 megagroup=True, participants_count=5)
+    me_input = InputPeerSelf()
+    part = tl_channels.ChannelParticipant(
+        participant=ChannelParticipantCreator(user_id=10,
+                                               admin_rights=ChatAdminRights()),
+        chats=[], users=[])
+    client = FakeClientMap([part], entities={"@sg": ch}, me=User(id=10),
+                           me_input=me_input)
+    res = _run(manage_mod.chat_info, client, "@sg", db_path=str(p))
+    req = client.requests[0] if client.requests else None
+    row = None
+    with DB(p) as db:
+        row = db.conn.execute(
+            "SELECT title, kind, members, my_role, created_by_me, is_forum "
+            "FROM chats WHERE id = -1002000001").fetchone()
+    check(res.get("ok") is True and res.get("my_role") == "owner"
+          and res.get("members") == 5 and res.get("chat_id") == -1002000001,
+          "info channel: ChannelParticipantCreator -> my_role=owner", str(res))
+    check(req is not None and type(req).__name__ == "GetParticipantRequest"
+          and req.channel is ch and req.participant is me_input,
+          "info channel: GetParticipantRequest(channel, InputPeerSelf)",
+          str(type(req).__name__) if req is not None else "нет запроса")
+    check(row is not None and row["my_role"] == "owner"
+          and row["created_by_me"] == 1 and row["members"] == 5
+          and row["title"] == "SG" and row["kind"] == "supergroup",
+          "info channel: upsert_chat обновил my_role, created_by_me не тронут",
+          str(dict(row)) if row is not None else "нет строки")
+    part_admin = tl_channels.ChannelParticipant(
+        participant=ChannelParticipantAdmin(
+            user_id=10, promoted_by=1, date=None,
+            admin_rights=ChatAdminRights()),
+        chats=[], users=[])
+    client2 = FakeClientMap([part_admin], entities={"@sg": ch}, me=User(id=10),
+                            me_input=me_input)
+    res2 = _run(manage_mod.chat_info, client2, "@sg")
+    check(res2.get("ok") is True and res2.get("my_role") == "admin",
+          "info channel: ChannelParticipantAdmin -> admin", str(res2))
+    part_member = tl_channels.ChannelParticipant(
+        participant=ChannelParticipant(user_id=10, date=None),
+        chats=[], users=[])
+    client3 = FakeClientMap([part_member], entities={"@sg": ch}, me=User(id=10),
+                            me_input=me_input)
+    res3 = _run(manage_mod.chat_info, client3, "@sg")
+    check(res3.get("ok") is True and res3.get("my_role") == "member",
+          "info channel: обычный участник -> member", str(res3))
+    chat = Chat(id=-456, title="G", participants_count=2)
+    full = tl_messages.ChatFull(
+        full_chat=ChatFull(
+            id=-456, about="", notify_settings=PeerNotifySettings(),
+            participants=ChatParticipants(
+                chat_id=-456, version=1,
+                participants=[ChatParticipantCreator(user_id=10)])),
+        chats=[], users=[])
+    p2 = tmp / "info_chat.sqlite"
+    client4 = FakeClientMap([full], entities={"@g": chat}, me=User(id=10))
+    res4 = _run(manage_mod.chat_info, client4, "@g", db_path=str(p2))
+    req4 = client4.requests[0] if client4.requests else None
+    row4 = None
+    with DB(p2) as db:
+        row4 = db.conn.execute(
+            "SELECT kind, members, my_role, created_by_me FROM chats "
+            "WHERE id = -456").fetchone()
+    check(res4.get("ok") is True and res4.get("my_role") == "owner"
+          and res4.get("members") == 2,
+          "info chat: ChatParticipantCreator -> owner", str(res4))
+    check(req4 is not None and type(req4).__name__ == "GetFullChatRequest"
+          and req4.chat_id == -456,
+          "info chat: GetFullChatRequest(chat_id)",
+          str(type(req4).__name__) if req4 is not None else "нет запроса")
+    check(row4 is not None and row4["my_role"] == "owner"
+          and row4["kind"] == "group" and row4["members"] == 2
+          and row4["created_by_me"] == 0,
+          "info chat: upsert_chat с kind=group, my_role=owner",
+          str(dict(row4)) if row4 is not None else "нет строки")
+    full_admin = tl_messages.ChatFull(
+        full_chat=ChatFull(
+            id=-456, about="", notify_settings=PeerNotifySettings(),
+            participants=ChatParticipants(
+                chat_id=-456, version=1,
+                participants=[ChatParticipantAdmin(user_id=10, inviter_id=1,
+                                                     date=None)])),
+        chats=[], users=[])
+    client5 = FakeClientMap([full_admin], entities={"@g": chat}, me=User(id=10))
+    res5 = _run(manage_mod.chat_info, client5, "@g")
+    check(res5.get("ok") is True and res5.get("my_role") == "admin",
+          "info chat: ChatParticipantAdmin -> admin", str(res5))
+    full_member = tl_messages.ChatFull(
+        full_chat=ChatFull(
+            id=-456, about="", notify_settings=PeerNotifySettings(),
+            participants=ChatParticipants(
+                chat_id=-456, version=1,
+                participants=[ChatParticipant(user_id=10, inviter_id=1,
+                                                date=None)])),
+        chats=[], users=[])
+    client6 = FakeClientMap([full_member], entities={"@g": chat}, me=User(id=10))
+    res6 = _run(manage_mod.chat_info, client6, "@g")
+    check(res6.get("ok") is True and res6.get("my_role") == "member",
+          "info chat: обычный участник -> member", str(res6))
+
+
+def test_members_gate_off(tmp: Path) -> None:
+    print("=== members: гейт TG_ALLOW_MANAGE выключен ===")
+    ch = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    u = User(id=7)
+    blocked = {"ok": False, "error": "manage заблокирован: нужен TG_ALLOW_MANAGE=1"}
+    ops = (
+        (manage_mod.invite_users, ("@sg", ["@u"])),
+        (manage_mod.set_admin, ("@sg", "@u")),
+        (manage_mod.kick_user, ("@sg", "@u")),
+        (manage_mod.export_link, ("@sg",)),
+        (manage_mod.chat_info, ("@sg",)),
+    )
+    all_blocked = True
+    for fn, args in ops:
+        client = FakeClientMap([], entities={"@sg": ch, "@u": u})
+        res = _run(fn, client, *args, gate=False)
+        if res != blocked or client.requests != []:
+            all_blocked = False
+    check(all_blocked, "gate off: все пять операций заблокированы без запросов")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_manage_"))
     tests = (test_fresh_schema, test_v3_migration, test_second_open,
@@ -854,8 +1197,10 @@ def main() -> int:
              test_settings_toggle_invites, test_settings_toggle_forum,
               test_settings_toggle_signatures, test_settings_rights,
               test_settings_gate_off,
-              test_topic_create, test_topic_create_not_forum,
-              test_topic_edit, test_topic_gate_off)
+               test_topic_create, test_topic_create_not_forum,
+               test_topic_edit, test_topic_gate_off,
+               test_members_invite, test_members_admin, test_members_kick,
+               test_links, test_chat_info, test_members_gate_off)
     try:
         for fn in tests:
             try:

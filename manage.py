@@ -10,10 +10,16 @@
     python manage.py rights --chat @mygroup --flag send-messages=off
     python manage.py topic-create --chat @myforum --title "Новая тема"
     python manage.py topic-close --chat @myforum --topic 42
+    python manage.py invite --chat @mygroup --user @alice --user @bob
+    python manage.py admin --chat @mygroup --user @alice --grant pin-messages --rank mod
+    python manage.py kick --chat @mygroup --user @spammer --ban
+    python manage.py link --chat @mygroup --expire-days 7
+    python manage.py info --chat @mygroup
 
 Третий пишущий модуль репозитория (после notify.py и folders.py): создаёт
 чаты и правит их настройки (title/about/photo/username, тумблеры, дефолтные
-права); контент не трогает. Реальные операции только при
+права), управляет участниками (инвайты, админы, кик) и инвайт-ссылками;
+контент не трогает. Реальные операции только при
 TG_ALLOW_MANAGE=1 — без него любая операция возвращает ошибку. Созданный чат
 сразу регистрируется в индексе (created_by_me=1, my_role=owner). MCP-сервер
 этот модуль не импортирует — агент создания не видит.
@@ -25,6 +31,7 @@ import argparse
 import asyncio
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +81,11 @@ RIGHTS_FIELDS = ("view_messages", "send_messages", "send_media", "send_stickers"
                  "send_gifs", "send_games", "send_inline", "embed_links",
                  "send_polls", "change_info", "invite_users", "pin_messages",
                  "manage_topics")
+
+ADMIN_RIGHTS_FIELDS = ("change_info", "post_messages", "edit_messages",
+                       "delete_messages", "ban_users", "invite_users",
+                       "pin_messages", "add_admins", "anonymous",
+                       "manage_call", "manage_topics")
 
 
 async def create_chat(client: Any, title: str, *, kind: str = "supergroup",
@@ -313,6 +325,154 @@ async def topic_edit(client: Any, ref: Any, topic_id: int, *,
     return {"ok": True}
 
 
+async def invite_users(client: Any, ref: Any, users: list[str]) -> dict:
+    if not _allowed():
+        return _blocked()
+    ent = await _resolve(client, ref)
+    resolved = [await _resolve(client, u) for u in users]
+    from telethon.tl import functions
+    if _label(ent) == "Chat":
+        for user in resolved:
+            await client(functions.messages.AddChatUserRequest(
+                ent.id, user, fwd_limit=0))
+        return {"ok": True, "invited": len(resolved), "missing_invitees": []}
+    resp = await client(functions.channels.InviteToChannelRequest(ent, resolved))
+    missing = [m.user_id for m in getattr(resp, "missing_invitees", None) or []]
+    return {"ok": True, "invited": len(resolved) - len(missing),
+            "missing_invitees": missing}
+
+
+async def set_admin(client: Any, ref: Any, user: Any, *,
+                    rights: dict[str, bool] | None = None,
+                    rank: str | None = None,
+                    db_path: str | None = None) -> dict:
+    if not _allowed():
+        return _blocked()
+    if rights:
+        unknown = sorted(set(rights) - set(ADMIN_RIGHTS_FIELDS))
+        if unknown:
+            return {"ok": False, "error": f"неизвестные права: {', '.join(unknown)}"}
+    if rank and len(rank) > 16:
+        return {"ok": False, "error": "rank длиннее 16 символов"}
+    ent = await _resolve(client, ref)
+    user_ent = await _resolve(client, user)
+    from telethon.tl import functions
+    from telethon.tl.types import ChatAdminRights
+    if _label(ent) == "Chat":
+        await client(functions.messages.EditChatAdminRequest(
+            ent.id, user_ent, is_admin=bool(rights)))
+        return {"ok": True}
+    flags = {k: bool(v) for k, v in (rights or {}).items()}
+    await client(functions.channels.EditAdminRequest(
+        ent, user_ent, ChatAdminRights(**flags), rank=rank or ""))
+    return {"ok": True}
+
+
+async def kick_user(client: Any, ref: Any, user: Any, *, ban: bool = False,
+                    db_path: str | None = None) -> dict:
+    if not _allowed():
+        return _blocked()
+    ent = await _resolve(client, ref)
+    user_ent = await _resolve(client, user)
+    from telethon.tl import functions
+    from telethon.tl.types import ChatBannedRights
+    if _label(ent) == "Chat":
+        await client(functions.messages.DeleteChatUserRequest(
+            ent.id, user_ent, revoke_history=False))
+        return {"ok": True}
+    until = None if ban else datetime.now(timezone.utc)
+    await client(functions.channels.EditBannedRequest(
+        ent, user_ent, ChatBannedRights(until, view_messages=True)))
+    return {"ok": True}
+
+
+async def export_link(client: Any, ref: Any, *, expire_days: int | None = None,
+                      usage_limit: int | None = None, title: str | None = None,
+                      request_needed: bool = False,
+                      db_path: str | None = None) -> dict:
+    if not _allowed():
+        return _blocked()
+    ent = await _resolve(client, ref)
+    from telethon.tl import functions
+    expire_date = (datetime.now(timezone.utc) + timedelta(days=expire_days)
+                   if expire_days else None)
+    resp = await client(functions.messages.ExportChatInviteRequest(
+        ent, expire_date=expire_date, usage_limit=usage_limit, title=title,
+        request_needed=request_needed or None))
+    link = getattr(resp, "link", None)
+    if link is None:
+        return {"ok": False, "error": f"сервер не вернул ссылку: {_label(resp)}"}
+    exp = getattr(resp, "expire_date", None)
+    expires_at = int(exp.timestamp()) if exp is not None else None
+    if db_path:
+        import db as db_mod
+        with db_mod.DB(db_path) as db:
+            db.invite_link_add(
+                sync_mod.marked_id(ent), link,
+                title=getattr(resp, "title", None), expires_at=expires_at,
+                usage_limit=getattr(resp, "usage_limit", None),
+                request_needed=bool(getattr(resp, "request_needed", False)))
+    return {"ok": True, "link": link, "title": getattr(resp, "title", None),
+            "expires_at": expires_at,
+            "usage_limit": getattr(resp, "usage_limit", None),
+            "request_needed": bool(getattr(resp, "request_needed", False))}
+
+
+def links_list(db_path: str, chat_id: int | None = None) -> list[dict]:
+    import db as db_mod
+    with db_mod.DB(db_path) as db:
+        return db.invite_links_list(chat_id)
+
+
+async def chat_info(client: Any, ref: Any, *, db_path: str | None = None) -> dict:
+    if not _allowed():
+        return _blocked()
+    ent = await _resolve(client, ref)
+    from telethon.tl import functions
+    if _label(ent) == "Chat":
+        full = await client(functions.messages.GetFullChatRequest(ent.id))
+        fc = getattr(full, "full_chat", None)
+        participants = getattr(
+            getattr(fc, "participants", None), "participants", None) or []
+        me = await client.get_me()
+        me_id = getattr(me, "id", None)
+        role = "member"
+        for p in participants:
+            if getattr(p, "user_id", None) == me_id:
+                if _label(p) == "ChatParticipantCreator":
+                    role = "owner"
+                elif _label(p) == "ChatParticipantAdmin":
+                    role = "admin"
+                break
+    else:
+        me_input = await client.get_input_entity("me")
+        resp = await client(functions.channels.GetParticipantRequest(ent, me_input))
+        part = getattr(resp, "participant", None) or resp
+        if _label(part) == "ChannelParticipantCreator":
+            role = "owner"
+        elif _label(part) == "ChannelParticipantAdmin":
+            role = "admin"
+        else:
+            role = "member"
+    members = getattr(ent, "participants_count", None)
+    chat_id = sync_mod.marked_id(ent)
+    if db_path:
+        import db as db_mod
+        with db_mod.DB(db_path) as db:
+            db.upsert_chat(
+                chat_id=chat_id,
+                title=getattr(ent, "title", None) or "",
+                username=getattr(ent, "username", None),
+                kind=sync_mod.kind_of(ent),
+                is_forum=bool(getattr(ent, "forum", False)),
+                members=members, my_role=role)
+    return {"ok": True, "chat_id": chat_id, "title": getattr(ent, "title", None),
+            "username": getattr(ent, "username", None),
+            "kind": sync_mod.kind_of(ent),
+            "is_forum": bool(getattr(ent, "forum", False)),
+            "members": members, "my_role": role}
+
+
 async def _cmd_edit(client: Any, args: argparse.Namespace) -> dict:
     if args.title is not None:
         res = await set_title(client, args.chat, args.title)
@@ -376,6 +536,15 @@ def _flag_pair(value: str) -> tuple[str, bool]:
     return name, val == "on"
 
 
+def _grant_list(value: str) -> list[str]:
+    names = [n.strip().replace("-", "_") for n in value.split(",") if n.strip()]
+    if not names or any(n not in ADMIN_RIGHTS_FIELDS for n in names):
+        raise argparse.ArgumentTypeError(
+            "нужен список прав через запятую, имена: "
+            + ", ".join(f.replace("_", "-") for f in ADMIN_RIGHTS_FIELDS))
+    return names
+
+
 async def _amain(args: argparse.Namespace) -> int:
     client = sync_mod.make_client()
     await client.start(**sync_mod.start_kwargs())
@@ -401,6 +570,29 @@ async def _amain(args: argparse.Namespace) -> int:
         elif args.cmd == "topic-open":
             res = await topic_edit(client, args.chat, args.topic,
                                    closed=False, db_path=args.db)
+        elif args.cmd == "invite":
+            res = await invite_users(client, args.chat, args.user)
+        elif args.cmd == "admin":
+            rights = {f: True for f in args.grant} if args.grant else None
+            res = await set_admin(client, args.chat, args.user, rights=rights,
+                                  rank=args.rank, db_path=args.db)
+        elif args.cmd == "kick":
+            res = await kick_user(client, args.chat, args.user, ban=args.ban,
+                                  db_path=args.db)
+        elif args.cmd == "link":
+            if args.list:
+                ent = await _resolve(client, args.chat)
+                res = {"ok": True,
+                       "links": links_list(args.db, sync_mod.marked_id(ent))}
+            else:
+                res = await export_link(client, args.chat,
+                                        expire_days=args.expire_days,
+                                        usage_limit=args.usage_limit,
+                                        title=args.title,
+                                        request_needed=args.request_needed,
+                                        db_path=args.db)
+        elif args.cmd == "info":
+            res = await chat_info(client, args.chat, db_path=args.db)
         else:
             res = await _cmd_rights(client, args)
     finally:
@@ -466,6 +658,43 @@ def main() -> None:
     p.add_argument("--topic", type=int, required=True, help="id темы")
     p.add_argument("--db", default=DB_PATH)
 
+    p = sub.add_parser("invite", help="пригласить участников в чат")
+    p.add_argument("--chat", required=True, help="чат: @username / id / ссылка")
+    p.add_argument("--user", action="append", required=True, metavar="USER",
+                   help="участник: @username / id / ссылка, повторяется")
+    p.add_argument("--db", default=DB_PATH)
+
+    p = sub.add_parser("admin", help="выдать или снять права админа")
+    p.add_argument("--chat", required=True, help="чат: @username / id / ссылка")
+    p.add_argument("--user", required=True, help="участник: @username / id / ссылка")
+    p.add_argument("--grant", type=_grant_list, metavar="RIGHTS",
+                   help="права через запятую; имена: "
+                        + ", ".join(f.replace("_", "-")
+                                    for f in ADMIN_RIGHTS_FIELDS))
+    p.add_argument("--revoke", action="store_true", help="снять права админа")
+    p.add_argument("--rank", help="титул админа (до 16 символов)")
+    p.add_argument("--db", default=DB_PATH)
+
+    p = sub.add_parser("kick", help="выгнать участника из чата")
+    p.add_argument("--chat", required=True, help="чат: @username / id / ссылка")
+    p.add_argument("--user", required=True, help="участник: @username / id / ссылка")
+    p.add_argument("--ban", action="store_true",
+                   help="забанить навсегда, а не просто выгнать")
+    p.add_argument("--db", default=DB_PATH)
+
+    p = sub.add_parser("link", help="инвайт-ссылка: создать или показать сохранённые")
+    p.add_argument("--chat", required=True, help="чат: @username / id / ссылка")
+    p.add_argument("--expire-days", type=int, help="срок жизни ссылки в днях")
+    p.add_argument("--usage-limit", type=int, help="лимит присоединений")
+    p.add_argument("--title", help="название ссылки")
+    p.add_argument("--request-needed", action="store_true", help="вступление по заявке")
+    p.add_argument("--list", action="store_true", help="показать сохранённые ссылки")
+    p.add_argument("--db", default=DB_PATH)
+
+    p = sub.add_parser("info", help="инфо о чате и моя роль в нём")
+    p.add_argument("--chat", required=True, help="чат: @username / id / ссылка")
+    p.add_argument("--db", default=DB_PATH)
+
     args = ap.parse_args()
     if args.cmd == "edit" and all(v is None for v in
                                    (args.title, args.about, args.photo, args.username)):
@@ -477,6 +706,8 @@ def main() -> None:
                  "--signatures --forum")
     if args.cmd == "topic-edit" and args.title is None and args.closed is None:
         ap.error("topic-edit: нужен хотя бы один из --title --closed")
+    if args.cmd == "admin" and not args.grant and not args.revoke:
+        ap.error("admin: нужен --grant или --revoke")
     sys.exit(asyncio.run(_amain(args)))
 
 
