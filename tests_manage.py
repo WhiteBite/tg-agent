@@ -3,7 +3,10 @@
 invite_links), совместимость upsert_chat с новыми kwargs, точечные апдейты
 chat_set_manage_fields и инвайт-ссылки; создание групп/супергрупп/каналов/
 форумов через manage.create_chat — гейт TG_ALLOW_MANAGE, фейк-клиент,
-регистрация созданного в индексе."""
+регистрация созданного в индексе; настройки чатов через manage.set_title /
+set_about / set_photo / set_username / toggle_pre_history / toggle_invites /
+toggle_signatures / toggle_forum / set_default_rights — диспетчер базовая
+группа vs канал, сохранение флагов ChatBannedRights, is_forum в индексе."""
 
 from __future__ import annotations
 
@@ -16,6 +19,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 os.environ["TG_ENV_FILE"] = ""
 
@@ -451,6 +455,286 @@ def test_create_no_db(tmp: Path) -> None:
           "create no-db: ok, registered=False", str(res))
 
 
+class Chat(SimpleNamespace):
+    pass
+
+
+class Channel(SimpleNamespace):
+    pass
+
+
+@dataclass
+class FakeClientEnt(FakeClient):
+    entity: Any = None
+
+    async def get_entity(self, ref):
+        return self.entity
+
+    async def upload_file(self, path):
+        self.uploaded_path = str(path)
+        return SimpleNamespace(SUBCLASS_OF_ID=0xE7655F1F)
+
+
+def _run(fn, client, *args, gate=True, **kw):
+    saved = os.environ.get("TG_ALLOW_MANAGE")
+    if gate:
+        os.environ["TG_ALLOW_MANAGE"] = "1"
+    else:
+        os.environ.pop("TG_ALLOW_MANAGE", None)
+    try:
+        return asyncio.run(fn(client, *args, **kw))
+    finally:
+        if saved is None:
+            os.environ.pop("TG_ALLOW_MANAGE", None)
+        else:
+            os.environ["TG_ALLOW_MANAGE"] = saved
+
+
+def test_settings_title(tmp: Path) -> None:
+    print("=== settings: title ===")
+    chat = Chat(id=-456, title="Old")
+    client = FakeClientEnt([SimpleNamespace()], entity=chat)
+    res = _run(manage_mod.set_title, client, "@chat", "New")
+    req = client.requests[0] if client.requests else None
+    check(res == {"ok": True} and req is not None
+          and type(req).__name__ == "EditChatTitleRequest"
+          and req.chat_id == -456 and req.title == "New",
+          "set title: Chat -> EditChatTitleRequest(chat_id, title)", str(res))
+    ch = Channel(id=-1002000001, title="Old", broadcast=False, megagroup=True)
+    client2 = FakeClientEnt([SimpleNamespace()], entity=ch)
+    res2 = _run(manage_mod.set_title, client2, "@ch", "New2")
+    req2 = client2.requests[0] if client2.requests else None
+    check(res2 == {"ok": True} and req2 is not None
+          and type(req2).__name__ == "EditTitleRequest"
+          and req2.channel is ch and req2.title == "New2",
+          "set title: Channel -> channels.EditTitleRequest", str(res2))
+
+
+def test_settings_about(tmp: Path) -> None:
+    print("=== settings: about ===")
+    ch = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    client = FakeClientEnt([SimpleNamespace()], entity=ch)
+    res = _run(manage_mod.set_about, client, "@ch", "новое описание")
+    req = client.requests[0] if client.requests else None
+    check(res == {"ok": True} and req is not None
+          and type(req).__name__ == "EditChatAboutRequest"
+          and req.peer is ch and req.about == "новое описание",
+          "set about: EditChatAboutRequest(peer, about)", str(res))
+    chat = Chat(id=-456, title="G")
+    client2 = FakeClientEnt([], entity=chat)
+    res2 = _run(manage_mod.set_about, client2, "@g", "x")
+    check(res2.get("ok") is False and "about" in res2.get("error", "")
+          and client2.requests == [],
+          "set about: базовая группа -> ошибка", str(res2))
+
+
+def test_settings_photo(tmp: Path) -> None:
+    print("=== settings: photo ===")
+    img = tmp / "photo.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    ch = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    client = FakeClientEnt([SimpleNamespace()], entity=ch)
+    res = _run(manage_mod.set_photo, client, "@ch", str(img))
+    req = client.requests[0] if client.requests else None
+    check(res == {"ok": True} and req is not None
+          and type(req).__name__ == "EditPhotoRequest"
+          and type(req.photo).__name__ == "InputChatUploadedPhoto"
+          and client.uploaded_path == str(img),
+          "set photo: Channel -> EditPhotoRequest(InputChatUploadedPhoto)", str(res))
+    chat = Chat(id=-456, title="G")
+    client2 = FakeClientEnt([SimpleNamespace()], entity=chat)
+    res2 = _run(manage_mod.set_photo, client2, "@g", str(img))
+    req2 = client2.requests[0] if client2.requests else None
+    check(res2 == {"ok": True} and req2 is not None
+          and type(req2).__name__ == "EditChatPhotoRequest"
+          and req2.chat_id == -456
+          and type(req2.photo).__name__ == "InputChatUploadedPhoto",
+          "set photo: Chat -> EditChatPhotoRequest(chat_id, photo)", str(res2))
+    client3 = FakeClientEnt([], entity=ch)
+    res3 = _run(manage_mod.set_photo, client3, "@ch", str(tmp / "missing.png"))
+    check(res3.get("ok") is False and client3.requests == [],
+          "set photo: нет файла -> ошибка без запросов", str(res3))
+
+
+def test_settings_username(tmp: Path) -> None:
+    print("=== settings: username ===")
+    ch = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    client = FakeClientEnt([True, SimpleNamespace()], entity=ch)
+    res = _run(manage_mod.set_username, client, "@ch", "newname")
+    names = [type(r).__name__ for r in client.requests]
+    check(res == {"ok": True}
+          and names == ["CheckUsernameRequest", "UpdateUsernameRequest"]
+          and client.requests[1].username == "newname",
+          "set username: Check + UpdateUsernameRequest", str(res))
+    ch2 = Channel(id=-1002000002, title="SG2", broadcast=False, megagroup=True)
+    client2 = FakeClientEnt([SimpleNamespace()], entity=ch2)
+    res2 = _run(manage_mod.set_username, client2, "@ch", "")
+    req2 = client2.requests[0] if client2.requests else None
+    check(res2 == {"ok": True} and req2 is not None
+          and type(req2).__name__ == "DeactivateAllUsernamesRequest",
+          "set username: пустая строка -> DeactivateAllUsernamesRequest", str(res2))
+    chat = Chat(id=-456, title="G")
+    client3 = FakeClientEnt([], entity=chat)
+    res3 = _run(manage_mod.set_username, client3, "@g", "x")
+    check(res3.get("ok") is False and "username" in res3.get("error", "")
+          and client3.requests == [],
+          "set username: базовая группа -> ошибка", str(res3))
+
+
+def test_settings_toggle_pre_history(tmp: Path) -> None:
+    print("=== settings: pre history ===")
+    sg = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    client = FakeClientEnt([SimpleNamespace(), SimpleNamespace()], entity=sg)
+    res = _run(manage_mod.toggle_pre_history, client, "@sg", True)
+    res2 = _run(manage_mod.toggle_pre_history, client, "@sg", False)
+    reqs = client.requests
+    check(res == {"ok": True} and res2 == {"ok": True} and len(reqs) == 2
+          and all(type(r).__name__ == "TogglePreHistoryHiddenRequest" for r in reqs)
+          and reqs[0].enabled is True and reqs[1].enabled is False,
+          "toggle pre history: TogglePreHistoryHiddenRequest(True/False)", str(res))
+    chat = Chat(id=-456, title="G")
+    client2 = FakeClientEnt([], entity=chat)
+    res3 = _run(manage_mod.toggle_pre_history, client2, "@g", True)
+    check(res3.get("ok") is False and client2.requests == [],
+          "toggle pre history: базовая группа -> ошибка", str(res3))
+    bc = Channel(id=-1002000003, title="BC", broadcast=True, megagroup=False)
+    client3 = FakeClientEnt([], entity=bc)
+    res4 = _run(manage_mod.toggle_pre_history, client3, "@bc", True)
+    check(res4.get("ok") is False and client3.requests == [],
+          "toggle pre history: broadcast-канал -> ошибка", str(res4))
+
+
+def test_settings_toggle_invites(tmp: Path) -> None:
+    print("=== settings: invites ===")
+    from telethon.tl.types import ChatBannedRights
+    cur = ChatBannedRights(None, send_messages=True, change_info=True)
+    sg = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True,
+                 default_banned_rights=cur)
+    client = FakeClientEnt([SimpleNamespace(), SimpleNamespace()], entity=sg)
+    res = _run(manage_mod.toggle_invites, client, "@sg", False)
+    res2 = _run(manage_mod.toggle_invites, client, "@sg", True)
+    r0 = client.requests[0].banned_rights
+    r1 = client.requests[1].banned_rights
+    check(res == {"ok": True} and res2 == {"ok": True}
+          and type(client.requests[0]).__name__ == "EditChatDefaultBannedRightsRequest"
+          and r0.invite_users is True and r0.send_messages is True
+          and r0.change_info is True,
+          "toggle invites off: invite_users=True (запрет), остальные сохранены",
+          str(res))
+    check(r1.invite_users is False and r1.send_messages is True
+          and r1.change_info is True,
+          "toggle invites on: invite_users=False, остальные сохранены")
+    plain = Channel(id=-1002000002, title="SG2", broadcast=False, megagroup=True)
+    client2 = FakeClientEnt([SimpleNamespace()], entity=plain)
+    res3 = _run(manage_mod.toggle_invites, client2, "@sg2", False)
+    r2 = client2.requests[0].banned_rights
+    check(res3 == {"ok": True} and r2.invite_users is True
+          and not any(getattr(r2, f) for f in
+                      ("send_messages", "change_info", "pin_messages")),
+          "toggle invites: default_banned_rights=None -> все разрешены + запрет инвайтов",
+          str(res3))
+
+
+def test_settings_toggle_forum(tmp: Path) -> None:
+    print("=== settings: forum ===")
+    p = tmp / "forum.sqlite"
+    with DB(p) as db:
+        db.upsert_chat(-1002000001, "SG", "sg", "supergroup", False, 5)
+    sg = Channel(id=-1002000001, title="SG", username="sg", broadcast=False,
+                 megagroup=True, participants_count=5)
+    client = FakeClientEnt([SimpleNamespace(), SimpleNamespace()], entity=sg)
+    res = _run(manage_mod.toggle_forum, client, "@sg", True, db_path=str(p))
+    row1 = None
+    with DB(p) as db:
+        row1 = db.conn.execute(
+            "SELECT is_forum FROM chats WHERE id = -1002000001").fetchone()
+    res2 = _run(manage_mod.toggle_forum, client, "@sg", False, db_path=str(p))
+    row2 = None
+    with DB(p) as db:
+        row2 = db.conn.execute(
+            "SELECT is_forum, title, kind FROM chats WHERE id = -1002000001").fetchone()
+    reqs = client.requests
+    check(res == {"ok": True} and res2 == {"ok": True} and len(reqs) == 2
+          and all(type(r).__name__ == "ToggleForumRequest" for r in reqs)
+          and reqs[0].enabled is True and reqs[0].tabs is False
+          and reqs[1].enabled is False,
+          "toggle forum: ToggleForumRequest(enabled, tabs=False)", str(res))
+    check(row1 is not None and row1["is_forum"] == 1,
+          "toggle forum on: is_forum=1 в индексе",
+          str(dict(row1)) if row1 is not None else "нет строки")
+    check(row2 is not None and row2["is_forum"] == 0 and row2["title"] == "SG"
+          and row2["kind"] == "supergroup",
+          "toggle forum off: is_forum=0, строка не побита",
+          str(dict(row2)) if row2 is not None else "нет строки")
+    chat = Chat(id=-456, title="G")
+    client2 = FakeClientEnt([], entity=chat)
+    res3 = _run(manage_mod.toggle_forum, client2, "@g", True)
+    check(res3.get("ok") is False and client2.requests == [],
+          "toggle forum: базовая группа -> ошибка", str(res3))
+
+
+def test_settings_toggle_signatures(tmp: Path) -> None:
+    print("=== settings: signatures ===")
+    ch = Channel(id=-1002000001, title="CH", broadcast=True, megagroup=False)
+    client = FakeClientEnt([SimpleNamespace()], entity=ch)
+    res = _run(manage_mod.toggle_signatures, client, "@ch", True)
+    req = client.requests[0] if client.requests else None
+    check(res == {"ok": True} and req is not None
+          and type(req).__name__ == "ToggleSignaturesRequest"
+          and req.signatures_enabled is True,
+          "toggle signatures: ToggleSignaturesRequest(signatures_enabled)", str(res))
+    chat = Chat(id=-456, title="G")
+    client2 = FakeClientEnt([], entity=chat)
+    res2 = _run(manage_mod.toggle_signatures, client2, "@g", True)
+    check(res2.get("ok") is False and client2.requests == [],
+          "toggle signatures: базовая группа -> ошибка", str(res2))
+
+
+def test_settings_rights(tmp: Path) -> None:
+    print("=== settings: rights ===")
+    sg = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    client = FakeClientEnt([SimpleNamespace()], entity=sg)
+    res = _run(manage_mod.set_default_rights, client, "@sg",
+               {"send_messages": True, "pin_messages": True, "invite_users": False})
+    req = client.requests[0] if client.requests else None
+    check(res == {"ok": True} and req is not None
+          and type(req).__name__ == "EditChatDefaultBannedRightsRequest"
+          and req.banned_rights.send_messages is True
+          and req.banned_rights.pin_messages is True
+          and req.banned_rights.invite_users is False
+          and req.banned_rights.view_messages is None,
+          "rights: заданные флаги в ChatBannedRights, незаданные не тронуты",
+          str(res))
+    client2 = FakeClientEnt([], entity=sg)
+    res2 = _run(manage_mod.set_default_rights, client2, "@sg", {"bogus_flag": True})
+    check(res2.get("ok") is False and client2.requests == [],
+          "rights: неизвестный флаг -> ошибка без запросов", str(res2))
+
+
+def test_settings_gate_off(tmp: Path) -> None:
+    print("=== settings: гейт TG_ALLOW_MANAGE выключен ===")
+    ch = Channel(id=-1002000001, title="SG", broadcast=False, megagroup=True)
+    ops = (
+        (manage_mod.set_title, ("@ch", "T")),
+        (manage_mod.set_about, ("@ch", "A")),
+        (manage_mod.set_photo, ("@ch", "x.png")),
+        (manage_mod.set_username, ("@ch", "u")),
+        (manage_mod.toggle_pre_history, ("@ch", True)),
+        (manage_mod.toggle_invites, ("@ch", True)),
+        (manage_mod.toggle_signatures, ("@ch", True)),
+        (manage_mod.toggle_forum, ("@ch", True)),
+        (manage_mod.set_default_rights, ("@ch", {"send_messages": True})),
+    )
+    blocked = {"ok": False, "error": "manage заблокирован: нужен TG_ALLOW_MANAGE=1"}
+    all_blocked = True
+    for fn, args in ops:
+        client = FakeClientEnt([], entity=ch)
+        res = _run(fn, client, *args, gate=False)
+        if res != blocked or client.requests != []:
+            all_blocked = False
+    check(all_blocked, "gate off: все девять операций заблокированы без запросов")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_manage_"))
     tests = (test_fresh_schema, test_v3_migration, test_second_open,
@@ -458,7 +742,12 @@ def main() -> int:
              test_manage_fields, test_invite_links,
              test_create_group, test_create_supergroup, test_create_forum,
              test_create_channel, test_create_gate_off, test_create_validation,
-             test_create_no_db)
+             test_create_no_db,
+             test_settings_title, test_settings_about, test_settings_photo,
+             test_settings_username, test_settings_toggle_pre_history,
+             test_settings_toggle_invites, test_settings_toggle_forum,
+             test_settings_toggle_signatures, test_settings_rights,
+             test_settings_gate_off)
     try:
         for fn in tests:
             try:
