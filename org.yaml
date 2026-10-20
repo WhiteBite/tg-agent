@@ -1,0 +1,89 @@
+org: WhiteBite
+channel: null
+forum: "@whitebite_devsoft"
+links:
+  chat: https://t.me/whitebite_devsoft
+products:
+  stitch:
+    emoji: "🪡"
+    title: StitchWB
+    repo: https://github.com/StitchWB/Stitch-Manager
+    status: active
+    about: Универсальный менеджер аккаунтов для AI IDE; плагины и провайдеры
+    plugins:
+      repo_org: https://github.com/StitchWB
+  tg-agent:
+    emoji: "🤖"
+    title: tg-agent
+    repo: https://github.com/WhiteBite/tg-agent
+    status: active
+    about: Read-only Telegram-индекс с MCP-сервером для AI-агента
+  stop-ai-slop:
+    emoji: "🛡"
+    title: stop-ai-slop
+    repo: https://github.com/WhiteBite/stop-ai-slop
+    status: active
+    about: Гейт AI-слопа в комментариях; плагин OpenCode и pre-commit
+  dejavu-gates:
+    emoji: "🛡"
+    title: dejavu-gates
+    repo: https://github.com/WhiteBite/dejavu-gates
+    status: active
+    about: Гейт повторяющихся ошибок агентов; remind then hard-block
+  domain-hunter:
+    emoji: "🌐"
+    title: Domain-Hunter
+    repo: https://github.com/WhiteBite/Domain-Hunter
+    status: active
+    about: RDAP-проверка доменов в браузере; 140+ TLD, цены регистраторов
+  rdk-discoverability:
+    emoji: "🌐"
+    title: rdk-discoverability
+    repo: https://github.com/WhiteBite/rdk-discoverability
+    status: active
+    about: "GitHub Action: audit discoverability репозитория в PR"
+  repo-aeo:
+    emoji: "🌐"
+    title: repo-aeo
+    repo: https://github.com/WhiteBite/repo-aeo
+    status: active
+    about: Discoverability и AEO для репозиториев, пакетов и доков
+  harness-kit:
+    emoji: "🧪"
+    title: harness-kit
+    repo: https://github.com/WhiteBite/harness-kit
+    status: active
+    about: "Реестр и примитивы подключения AI-harness (Claude Code, Codex, OpenCode и др.)"
+  remote-devbox-mcp:
+    emoji: "🔧"
+    title: remote-devbox-mcp
+    repo: https://github.com/WhiteBite/remote-devbox-mcp
+    status: active
+    about: MCP-сервер удалённой разработки
+  confluence-to-markdown:
+    emoji: "📄"
+    title: Confluence-To-Markdown
+    repo: https://github.com/WhiteBite/Confluence-To-Markdown
+    status: experiment
+    about: Конвертер страниц Confluence в Markdown
+  localgitmirror:
+    emoji: "📦"
+    title: LocalGitMirror
+    repo: https://github.com/WhiteBite/LocalGitMirror
+    status: active
+    about: Зеркало git-бандлов между машинами через шифрованный постбокс
+topics:
+  releases: "📢 Релизы и новости"
+  stitch_core: "🪡 Stitch · ядро"
+  stitch_plugins: "🔌 Stitch · плагины"
+  agents: "🤖 AI-агенты и MCP"
+  gates: "🛡 Гейты качества"
+  domains: "🌐 Домены и discoverability"
+  flood: "💬 Флудилка"
+  support: "🆘 Support"
+topic_products:
+  "🪡 Stitch · ядро": [stitch]
+  "🔌 Stitch · плагины": [stitch]
+  "🤖 AI-агенты и MCP": [tg-agent, remote-devbox-mcp, harness-kit]
+  "🛡 Гейты качества": [stop-ai-slop, dejavu-gates]
+  "🌐 Домены и discoverability": [domain-hunter, rdk-discoverability, repo-aeo]

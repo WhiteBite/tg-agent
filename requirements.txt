@@ -2,3 +2,4 @@ telethon>=1.45
 mcp>=2,<3
 cryptg
 qrcode
+Pillow>=10.0
