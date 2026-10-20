@@ -8,6 +8,8 @@
     python manage.py edit --chat @mygroup --username "" --photo avatar.png
     python manage.py toggle --chat @mygroup --forum on --invites off
     python manage.py rights --chat @mygroup --flag send-messages=off
+    python manage.py topic-create --chat @myforum --title "Новая тема"
+    python manage.py topic-close --chat @myforum --topic 42
 
 Третий пишущий модуль репозитория (после notify.py и folders.py): создаёт
 чаты и правит их настройки (title/about/photo/username, тумблеры, дефолтные
@@ -250,6 +252,67 @@ async def set_default_rights(client: Any, ref: Any, rights: dict[str, bool],
     return {"ok": True}
 
 
+async def topic_create(client: Any, ref: Any, title: str, *,
+                       icon_color: int | None = None,
+                       db_path: str | None = None) -> dict:
+    if not _allowed():
+        return _blocked()
+    ent = await _resolve(client, ref)
+    if not getattr(ent, "forum", False):
+        return {"ok": False, "error": "темы только у форума"}
+    import random
+    from telethon.tl import functions
+    req = functions.messages.CreateForumTopicRequest(
+        peer=ent, title=title, icon_color=icon_color,
+        random_id=random.getrandbits(63))
+    resp = await client(req)
+    topic_id = 0
+    for u in getattr(resp, "updates", None) or []:
+        msg = getattr(u, "message", None)
+        if msg is not None and _label(getattr(msg, "action", None)) == "MessageActionTopicCreated":
+            topic_id = msg.id
+    if not topic_id:
+        for m in getattr(resp, "messages", None) or []:
+            if _label(getattr(m, "action", None)) == "MessageActionTopicCreated":
+                topic_id = m.id
+    if not topic_id:
+        return {"ok": False, "error": "не удалось извлечь topic_id из ответа"}
+    chat_id = sync_mod.marked_id(ent)
+    if db_path:
+        import db as db_mod
+        with db_mod.DB(db_path) as db:
+            db.upsert_topic(chat_id, topic_id, title, closed=False)
+            db.conn.commit()
+    return {"ok": True, "chat_id": chat_id, "topic_id": topic_id, "title": title}
+
+
+async def topic_edit(client: Any, ref: Any, topic_id: int, *,
+                     title: str | None = None, closed: bool | None = None,
+                     db_path: str | None = None) -> dict:
+    if not _allowed():
+        return _blocked()
+    if title is None and closed is None:
+        return {"ok": False, "error": "нужен title или closed"}
+    ent = await _resolve(client, ref)
+    if not getattr(ent, "forum", False):
+        return {"ok": False, "error": "темы только у форума"}
+    from telethon.tl import functions
+    await client(functions.messages.EditForumTopicRequest(
+        peer=ent, topic_id=topic_id, title=title, closed=closed))
+    if db_path:
+        import db as db_mod
+        chat_id = sync_mod.marked_id(ent)
+        with db_mod.DB(db_path) as db:
+            row = db.conn.execute(
+                "SELECT title, closed FROM topics WHERE chat_id = ? AND topic_id = ?",
+                (chat_id, topic_id)).fetchone()
+            new_title = title if title is not None else (row["title"] if row else "")
+            new_closed = closed if closed is not None else (bool(row["closed"]) if row else False)
+            db.upsert_topic(chat_id, topic_id, new_title, closed=new_closed)
+            db.conn.commit()
+    return {"ok": True}
+
+
 async def _cmd_edit(client: Any, args: argparse.Namespace) -> dict:
     if args.title is not None:
         res = await set_title(client, args.chat, args.title)
@@ -325,6 +388,19 @@ async def _amain(args: argparse.Namespace) -> int:
             res = await _cmd_edit(client, args)
         elif args.cmd == "toggle":
             res = await _cmd_toggle(client, args)
+        elif args.cmd == "topic-create":
+            res = await topic_create(client, args.chat, args.title,
+                                     icon_color=args.icon_color, db_path=args.db)
+        elif args.cmd == "topic-edit":
+            res = await topic_edit(client, args.chat, args.topic,
+                                   title=args.title, closed=args.closed,
+                                   db_path=args.db)
+        elif args.cmd == "topic-close":
+            res = await topic_edit(client, args.chat, args.topic,
+                                   closed=True, db_path=args.db)
+        elif args.cmd == "topic-open":
+            res = await topic_edit(client, args.chat, args.topic,
+                                   closed=False, db_path=args.db)
         else:
             res = await _cmd_rights(client, args)
     finally:
@@ -367,15 +443,40 @@ def main() -> None:
                         + ", ".join(f.replace("_", "-") for f in RIGHTS_FIELDS))
     p.add_argument("--db", default=DB_PATH)
 
+    p = sub.add_parser("topic-create", help="новая тема форума")
+    p.add_argument("--chat", required=True, help="форум: @username / id / ссылка")
+    p.add_argument("--title", required=True, help="название темы")
+    p.add_argument("--icon-color", type=int, help="цвет иконки темы")
+    p.add_argument("--db", default=DB_PATH)
+
+    p = sub.add_parser("topic-edit", help="правка темы форума")
+    p.add_argument("--chat", required=True, help="форум: @username / id / ссылка")
+    p.add_argument("--topic", type=int, required=True, help="id темы")
+    p.add_argument("--title", help="новое название темы")
+    p.add_argument("--closed", type=_on_off, help="закрыть/открыть тему")
+    p.add_argument("--db", default=DB_PATH)
+
+    p = sub.add_parser("topic-close", help="закрыть тему форума")
+    p.add_argument("--chat", required=True, help="форум: @username / id / ссылка")
+    p.add_argument("--topic", type=int, required=True, help="id темы")
+    p.add_argument("--db", default=DB_PATH)
+
+    p = sub.add_parser("topic-open", help="открыть тему форума")
+    p.add_argument("--chat", required=True, help="форум: @username / id / ссылка")
+    p.add_argument("--topic", type=int, required=True, help="id темы")
+    p.add_argument("--db", default=DB_PATH)
+
     args = ap.parse_args()
     if args.cmd == "edit" and all(v is None for v in
-                                  (args.title, args.about, args.photo, args.username)):
+                                   (args.title, args.about, args.photo, args.username)):
         ap.error("edit: нужен хотя бы один из --title --about --photo --username")
     if args.cmd == "toggle" and all(v is None for v in
                                     (args.pre_history, args.invites,
                                      args.signatures, args.forum)):
         ap.error("toggle: нужен хотя бы один из --pre-history --invites "
                  "--signatures --forum")
+    if args.cmd == "topic-edit" and args.title is None and args.closed is None:
+        ap.error("topic-edit: нужен хотя бы один из --title --closed")
     sys.exit(asyncio.run(_amain(args)))
 
 

@@ -6,7 +6,11 @@ chat_set_manage_fields и инвайт-ссылки; создание групп
 регистрация созданного в индексе; настройки чатов через manage.set_title /
 set_about / set_photo / set_username / toggle_pre_history / toggle_invites /
 toggle_signatures / toggle_forum / set_default_rights — диспетчер базовая
-группа vs канал, сохранение флагов ChatBannedRights, is_forum в индексе."""
+группа vs канал, сохранение флагов ChatBannedRights, is_forum в индексе;
+темы форума через manage.topic_create / topic_edit — CreateForumTopicRequest
+с random_id, topic_id из service-сообщения MessageActionTopicCreated,
+EditForumTopicRequest с title/closed, title переживает close-only правку,
+closed в индексе, не-форум и гейт TG_ALLOW_MANAGE отклоняются."""
 
 from __future__ import annotations
 
@@ -735,6 +739,108 @@ def test_settings_gate_off(tmp: Path) -> None:
     check(all_blocked, "gate off: все девять операций заблокированы без запросов")
 
 
+class MessageActionTopicCreated:
+    pass
+
+
+def test_topic_create(tmp: Path) -> None:
+    print("=== topics: создание ===")
+    p = tmp / "topic_create.sqlite"
+    resp = SimpleNamespace(updates=[
+        SimpleNamespace(message=SimpleNamespace(
+            id=42, action=MessageActionTopicCreated()))])
+    forum = Channel(id=-1002000001, title="F", broadcast=False, megagroup=True,
+                    forum=True)
+    client = FakeClientEnt([resp], entity=forum)
+    res = _run(manage_mod.topic_create, client, "@f", "Тема", db_path=str(p))
+    req = client.requests[0] if client.requests else None
+    row = None
+    with DB(p) as db:
+        row = db.conn.execute(
+            "SELECT title, closed FROM topics WHERE chat_id = -1002000001 "
+            "AND topic_id = 42").fetchone()
+    check(res.get("ok") is True and res.get("chat_id") == -1002000001
+          and res.get("topic_id") == 42 and res.get("title") == "Тема",
+          "topic create: ok, topic_id=42 из service-сообщения", str(res))
+    check(req is not None and type(req).__name__ == "CreateForumTopicRequest"
+          and req.peer is forum and req.title == "Тема"
+          and req.icon_color is None and req.random_id > 0,
+          "topic create: CreateForumTopicRequest(peer, title, random_id)",
+          str(type(req).__name__) if req is not None else "нет запроса")
+    check(row is not None and row["title"] == "Тема" and row["closed"] == 0,
+          "topic create: в индексе title и closed=0",
+          str(dict(row)) if row is not None else "нет строки")
+
+
+def test_topic_create_not_forum(tmp: Path) -> None:
+    print("=== topics: создание не в форуме ===")
+    sg = Channel(id=-1002000002, title="SG", broadcast=False, megagroup=True,
+                 forum=False)
+    client = FakeClientEnt([], entity=sg)
+    res = _run(manage_mod.topic_create, client, "@sg", "Тема")
+    check(res.get("ok") is False and client.requests == [],
+          "topic create: не-форум -> ошибка без запросов", str(res))
+
+
+def test_topic_edit(tmp: Path) -> None:
+    print("=== topics: правка и закрытие ===")
+    p = tmp / "topic_edit.sqlite"
+    forum = Channel(id=-1002000001, title="F", broadcast=False, megagroup=True,
+                    forum=True)
+    client = FakeClientEnt([SimpleNamespace(), SimpleNamespace()], entity=forum)
+    res = _run(manage_mod.topic_edit, client, "@f", 42,
+               title="Новое имя", closed=True, db_path=str(p))
+    req = client.requests[0] if client.requests else None
+    row1 = None
+    with DB(p) as db:
+        row1 = db.conn.execute(
+            "SELECT title, closed FROM topics WHERE chat_id = -1002000001 "
+            "AND topic_id = 42").fetchone()
+    res2 = _run(manage_mod.topic_edit, client, "@f", 42,
+                closed=False, db_path=str(p))
+    req2 = client.requests[1] if len(client.requests) > 1 else None
+    row2 = None
+    with DB(p) as db:
+        row2 = db.conn.execute(
+            "SELECT title, closed FROM topics WHERE chat_id = -1002000001 "
+            "AND topic_id = 42").fetchone()
+    client2 = FakeClientEnt([], entity=forum)
+    res3 = _run(manage_mod.topic_edit, client2, "@f", 42)
+    check(res == {"ok": True} and req is not None
+          and type(req).__name__ == "EditForumTopicRequest"
+          and req.peer is forum and req.topic_id == 42
+          and req.title == "Новое имя" and req.closed is True,
+          "topic edit: EditForumTopicRequest(peer, topic_id, title, closed)",
+          str(res))
+    check(row1 is not None and row1["title"] == "Новое имя"
+          and row1["closed"] == 1,
+          "topic edit: в индексе title и closed=1",
+          str(dict(row1)) if row1 is not None else "нет строки")
+    check(res2 == {"ok": True} and req2 is not None
+          and req2.title is None and req2.closed is False,
+          "topic close: EditForumTopicRequest(closed=False) без title", str(res2))
+    check(row2 is not None and row2["title"] == "Новое имя"
+          and row2["closed"] == 0,
+          "topic close: title пережил close-only правку, closed=0",
+          str(dict(row2)) if row2 is not None else "нет строки")
+    check(res3.get("ok") is False and client2.requests == [],
+          "topic edit: без title и closed -> ошибка без запросов", str(res3))
+
+
+def test_topic_gate_off(tmp: Path) -> None:
+    print("=== topics: гейт TG_ALLOW_MANAGE выключен ===")
+    forum = Channel(id=-1002000001, title="F", broadcast=False, megagroup=True,
+                    forum=True)
+    blocked = {"ok": False, "error": "manage заблокирован: нужен TG_ALLOW_MANAGE=1"}
+    client = FakeClientEnt([], entity=forum)
+    res = _run(manage_mod.topic_create, client, "@f", "Т", gate=False)
+    client2 = FakeClientEnt([], entity=forum)
+    res2 = _run(manage_mod.topic_edit, client2, "@f", 42, title="Т", gate=False)
+    check(res == blocked and res2 == blocked
+          and client.requests == [] and client2.requests == [],
+          "gate off: topic_create и topic_edit заблокированы без запросов")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_manage_"))
     tests = (test_fresh_schema, test_v3_migration, test_second_open,
@@ -746,8 +852,10 @@ def main() -> int:
              test_settings_title, test_settings_about, test_settings_photo,
              test_settings_username, test_settings_toggle_pre_history,
              test_settings_toggle_invites, test_settings_toggle_forum,
-             test_settings_toggle_signatures, test_settings_rights,
-             test_settings_gate_off)
+              test_settings_toggle_signatures, test_settings_rights,
+              test_settings_gate_off,
+              test_topic_create, test_topic_create_not_forum,
+              test_topic_edit, test_topic_gate_off)
     try:
         for fn in tests:
             try:
