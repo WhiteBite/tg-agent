@@ -85,7 +85,10 @@ class FakeClient:
 
     async def __call__(self, req):
         self.requests.append(req)
-        return self.responses.pop(0)
+        res = self.responses.pop(0)
+        if isinstance(res, Exception):
+            raise res
+        return res
 
 
 def _create(client, title, *, gate=True, **kw):
@@ -833,6 +836,13 @@ def test_topic_edit(tmp: Path) -> None:
           str(dict(row2)) if row2 is not None else "нет строки")
     check(res3.get("ok") is False and client2.requests == [],
           "topic edit: без title и closed -> ошибка без запросов", str(res3))
+    from telethon.errors import BadRequestError
+    client3 = FakeClientEnt(
+        [BadRequestError(None, "TOPIC_NOT_MODIFIED (caused by EditForumTopicRequest)")],
+        entity=forum)
+    res4 = _run(manage_mod.topic_edit, client3, "@f", 42, closed=True)
+    check(res4.get("ok") is True,
+          "topic edit: TOPIC_NOT_MODIFIED -> ok без падения", str(res4))
 
 
 def test_topic_gate_off(tmp: Path) -> None:

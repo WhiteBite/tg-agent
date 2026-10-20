@@ -309,8 +309,13 @@ async def topic_edit(client: Any, ref: Any, topic_id: int, *,
     if not getattr(ent, "forum", False):
         return {"ok": False, "error": "темы только у форума"}
     from telethon.tl import functions
-    await client(functions.messages.EditForumTopicRequest(
-        peer=ent, topic_id=topic_id, title=title, closed=closed))
+    from telethon.errors import BadRequestError
+    try:
+        await client(functions.messages.EditForumTopicRequest(
+            peer=ent, topic_id=topic_id, title=title, closed=closed))
+    except BadRequestError as exc:
+        if "TOPIC_NOT_MODIFIED" not in str(exc):
+            raise
     if db_path:
         import db as db_mod
         chat_id = sync_mod.marked_id(ent)
