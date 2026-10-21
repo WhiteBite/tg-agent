@@ -89,6 +89,22 @@ python3 manage.py edit --chat -1002000001 --title "Новое"
 python3 manage.py topic-create --chat @forum --title "Тема"
 ```
 
+## Релиз-посты и readme тем
+
+```bash
+python3 announce.py draft --repo ../tg-agent --tag v0.10.0 --product tg-agent --tpl-out post.yaml
+python3 announce.py post --tpl post.yaml --chat @whitebite_devsoft --topic 323 --send --react 🔥 --pin
+python3 announce.py readme --topic-title "🪡 Stitch · ядро" --chat @whitebite_devsoft --topic 325 --send
+```
+
+Пост собирается из YAML-шаблона: `badge`, `title`, `what`, `inside` (список),
+`ps`, `warning`, `links`, `banner`. Баннер рендерится PIL в 1080x720, если в
+шаблоне задан. Без `--send` любой режим — dry-run: печатает текст и сохраняет
+баннер, к Telegram не обращается. Реальная отправка (кросспост `--also`,
+реакция `--react`, пин `--pin`) только при `TG_ALLOW_MANAGE=1`. У MCP-сервера
+есть зерцало для агента — инструмент `tg_manage_post`, регистрируется за тем же
+гейтом и требует `confirm=True`.
+
 ### Вариант B — точечно темы внутри одной группы
 
 Когда группа одна (твоя `AI`), а тем в ней десятки:
@@ -584,6 +600,8 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `search.py` | Глобальный поиск Telegram: публичные каналы/группы/юзеры по ключевому слову |
 | `folders.py` | Правка состава папок Telegram: add/remove чатов (пишущий модуль, контент не пишет) |
 | `manage.py` | Создание и управление чатами: группы, каналы, форумы, настройки, участники (гейт `TG_ALLOW_MANAGE=1`) |
+| `announce.py` | Релиз-посты: баннер PIL, шаблон YAML, readme тем из org.yaml, черновик из CHANGELOG; гейт `TG_ALLOW_MANAGE=1` |
+| `org.yaml` | Реестр продуктов WhiteBite: репо, ссылки, эмодзи, разметка тем |
 | `pipeline.py` | Автономный конвейер: sync → media → extract → fuzzy → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
 | `db.py` | Индекс: схема с миграциями по `PRAGMA user_version`, FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
 | `server.py` | MCP-сервер (stdio): 16 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
@@ -605,7 +623,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 1076 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс одиннадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1113 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс двенадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -617,6 +635,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `tests_watchdog.py` | свежесть прогона конвейера (`pipeline:last_ok_ts`) (запускается из `test_offline.py`) |
 | `tests_ui_projects.py` | `/api/projects` и курсор визита проекта в UI (запускается из `test_offline.py`) |
 | `tests_manage.py` | Офлайн-тесты manage.py: создание, настройки, темы, участники, MCP (запускается из `test_offline.py`) |
+| `tests_announce.py` | Офлайн-тесты announce.py: рендер баннера, сборка текста, post с отправкой на фейк-клиенте, readme из org.yaml, draft из CHANGELOG, гейт (запускается из `test_offline.py`) |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -665,11 +684,12 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **1076 проверок: свои проверки плюс одиннадцать suites
+`python3 test_offline.py` — **1113 проверок: свои проверки плюс двенадцать suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
-`tests_watchdog.py`, `tests_ui_projects.py`, `tests_manage.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
+`tests_watchdog.py`, `tests_ui_projects.py`, `tests_manage.py`,
+`tests_announce.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
   `--chat @канал`, `--folder`, `--watched`, `--dry-run`, раскладка по темам
@@ -798,6 +818,12 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
   участники и инвайт-ссылки; гейт `TG_ALLOW_MANAGE` (без него все операции
   заблокированы без запросов); MCP `tg_manage_*` регистрируются только при
   гейте и требуют `confirm=True`
+- `announce.py` (`tests_announce.py`): рендер баннера PIL (1080x720), сборка
+  текста из YAML-шаблона, post с кросспостом/реакцией/пином на фейк-клиенте и
+  запись в таблицу `posts` (миграция v5), readme темы из org.yaml, черновик
+  из CHANGELOG репозитория; гейт `TG_ALLOW_MANAGE` — без него отправка
+  блокируется без запросов; MCP `tg_manage_post` требует `confirm=True`.
+  Живые посты в Telegram не проверены
 
 **Не проверено:** реальные вызовы к Telegram — здесь нет аккаунта. Сигнатура
 `messages.GetForumTopicsRequest` снята с установленного Telethon 1.45, но живой

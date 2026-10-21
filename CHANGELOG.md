@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.2 — 2026-10-21
+Релиз-посты: четвёртый пишущий сценарий поверх manage-гейта:
+- `announce.py`: пост по YAML-шаблону (badge/title/what/inside/ps/warning/links/banner) с баннером PIL 1080x720, кросспост `--also`, реакция `--react`, пин `--pin`; readme темы или продукта из `org.yaml`; черновик шаблона из CHANGELOG репозитория (`draft`); правка отправленного поста (`update`). Без `--send` — dry-run; отправка за `TG_ALLOW_MANAGE=1`.
+- `org.yaml`: реестр продуктов WhiteBite — репо, ссылки, эмодзи, разметка тем.
+- `db.py`: миграция v5 — таблица `posts` (что уходило, в какой чат/тему, kind, хэш).
+- `server.py`: MCP-инструмент `tg_manage_post` — регистрируется только при `TG_ALLOW_MANAGE=1`, требует `confirm=True`.
+- Тесты: 11 → 12 suites (`tests_announce.py`), проверки 1076 → 1113.
+
 ## 0.10.0 — 2026-10-21
 Третий пишущий модуль: создание и управление чатами, всё за гейтом `TG_ALLOW_MANAGE=1`:
 - `manage.py`: создание групп/каналов/форумов с регистрацией в индексе (`created_by_me=1`, `my_role=owner`), настройки (title/about/photo/username, тумблеры pre_history/invites/signatures/forum, дефолтные права), темы форума (создание/правка/закрытие), участники (invite/admin/kick/ban) и инвайт-ссылки (expire/usage_limit, хранение в индексе). Без `TG_ALLOW_MANAGE=1` любая операция возвращает ошибку без запросов; контент не трогается.
