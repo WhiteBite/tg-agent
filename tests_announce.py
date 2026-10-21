@@ -5,10 +5,14 @@ readme тем из org.yaml, черновик из CHANGELOG, правка по�
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import queue
 import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -240,6 +244,120 @@ def test_gate(tmp: Path) -> None:
         _gate(False)
 
 
+def _rpc(proc: subprocess.Popen, payload: dict) -> None:
+    proc.stdin.write(json.dumps(payload) + "\n")
+    proc.stdin.flush()
+
+
+def _read_msg(proc: subprocess.Popen, timeout: float = 60.0) -> dict:
+    q = getattr(proc, "_lines", None)
+    if q is None:
+        q = queue.Queue()
+
+        def pump() -> None:
+            for line in proc.stdout:
+                q.put(line)
+            q.put(None)
+
+        proc._lines = q
+        threading.Thread(target=pump, daemon=True).start()
+    while True:
+        try:
+            line = q.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError("нет ответа от MCP-сервера")
+        if line is None:
+            raise RuntimeError("сервер закрыл stdout: " + (proc.stderr.read() or ""))
+        if line.strip():
+            return json.loads(line)
+
+
+def _wait_for(proc: subprocess.Popen, pred) -> dict:
+    for _ in range(40):
+        msg = _read_msg(proc)
+        if pred(msg):
+            return msg
+    raise TimeoutError("не дождались нужного сообщения")
+
+
+def _mcp_env(**extra: str) -> dict:
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("TG_DB", "TG_ALLOW_MANAGE", "TG_ALLOW_LIVE", "TG_EXPOSE_SQL",
+                        "TG_STRICT_WATCH", "TELEGRAM_API_ID", "TELEGRAM_API_HASH",
+                        "TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME")}
+    env["TG_ENV_FILE"] = ""
+    env.update(extra)
+    return env
+
+
+def _spawn(env: dict) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "server.py")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", env=env,
+    )
+
+
+def _init(proc: subprocess.Popen) -> set:
+    _rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2024-11-05", "capabilities": {},
+        "clientInfo": {"name": "announce-test", "version": "0"}}})
+    _wait_for(proc, lambda m: m.get("id") == 1)
+    _rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    _rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    tools = _wait_for(proc, lambda m: m.get("id") == 2)
+    return {t["name"] for t in tools["result"]["tools"]}
+
+
+def _call(proc: subprocess.Popen, tool: str, args: dict, rid: int) -> dict:
+    _rpc(proc, {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                "params": {"name": tool, "arguments": args}})
+    msg = _wait_for(proc, lambda m: m.get("id") == rid)
+    return json.loads(msg["result"]["content"][0]["text"])
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def test_mcp_post(tmp: Path) -> None:
+    print("=== MCP: tg_manage_post за TG_ALLOW_MANAGE=1 ===")
+    db = tmp / "mcp_post.sqlite"
+    with DB(db):
+        pass
+
+    proc = _spawn(_mcp_env(TG_DB=str(db), TG_ALLOW_MANAGE="1"))
+    try:
+        names = _init(proc)
+        check("tg_manage_post" in names and len(names) == 22,
+              "MCP post: TG_ALLOW_MANAGE=1 -> 16 базовых + 6 tg_manage_* = 22",
+              str(sorted(names)))
+
+        no_confirm = _call(proc, "tg_manage_post",
+                           {"template": "title: T", "chat_id": -1002000001}, 3)
+        check(no_confirm.get("error") and "confirm" in no_confirm["error"],
+              "MCP post: confirm=False -> JSON-ошибка про confirm",
+              str(no_confirm)[:90])
+
+        no_creds = _call(proc, "tg_manage_post",
+                         {"template": "title: T", "chat_id": -1002000001,
+                          "confirm": True}, 4)
+        check(no_creds.get("error", "").startswith("manage:"),
+              "MCP post: confirm=True без кредов -> JSON-ошибка, не зависание",
+              str(no_creds)[:90])
+
+        _rpc(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
+        alive = _wait_for(proc, lambda m: m.get("id") == 5)
+        check(len(alive.get("result", {}).get("tools", [])) == 22,
+              "MCP post: сервер жив после ошибок tg_manage_post")
+    finally:
+        _stop(proc)
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -255,6 +373,7 @@ def main() -> int:
         test_draft(tmp)
         test_update(tmp)
         test_gate(tmp)
+        test_mcp_post(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

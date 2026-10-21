@@ -1287,13 +1287,13 @@ def test_mcp_manage_tools(tmp: Path) -> None:
     with DB(db):
         pass
     manage_names = {"tg_manage_create", "tg_manage_edit", "tg_manage_topic",
-                    "tg_manage_members", "tg_manage_link"}
+                    "tg_manage_members", "tg_manage_link", "tg_manage_post"}
 
     proc = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_MANAGE="1"))
     try:
         names = _init(proc)
-        check(manage_names <= names and len(names) == 21,
-              "MCP manage: TG_ALLOW_MANAGE=1 -> 16 базовых + 5 tg_manage_* = 21",
+        check(manage_names <= names and len(names) == 22,
+              "MCP manage: TG_ALLOW_MANAGE=1 -> 16 базовых + 6 tg_manage_* = 22",
               str(sorted(names)))
         check(not any(n.startswith("tg_live_") for n in names),
               "MCP manage: без TG_ALLOW_LIVE живых инструментов нет")
@@ -1310,7 +1310,7 @@ def test_mcp_manage_tools(tmp: Path) -> None:
 
         _rpc(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
         alive = _wait_for(proc, lambda m: m.get("id") == 5)
-        check(len(alive.get("result", {}).get("tools", [])) == 21,
+        check(len(alive.get("result", {}).get("tools", [])) == 22,
               "MCP manage: сервер жив после ошибок manage-инструмента")
     finally:
         _stop(proc)
@@ -1327,8 +1327,8 @@ def test_mcp_manage_tools(tmp: Path) -> None:
     proc3 = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_LIVE="1", TG_ALLOW_MANAGE="1"))
     try:
         names3 = _init(proc3)
-        check(len(names3) == 24,
-              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 24 инструмента",
+        check(len(names3) == 25,
+              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 25 инструмента",
               str(sorted(names3)))
     finally:
         _stop(proc3)

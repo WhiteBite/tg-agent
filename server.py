@@ -651,6 +651,7 @@ if ALLOW_LIVE:
 
 if ALLOW_MANAGE:
     import manage as manage_mod
+    import announce as announce_mod
 
     _CONFIRM_ERR = _j({"error": "confirm=False: операция записи требует явного confirm=True"})
 
@@ -797,6 +798,33 @@ if ALLOW_MANAGE:
                 title=title, request_needed=request_needed, db_path=INDEX))
         except Exception as exc:
             return _j({"error": f"manage: {exc}"})
+
+    @mcp.tool(
+        name="tg_manage_post",
+        description=(
+            "Релиз-пост/анонс в чат: template — YAML шаблона (badge, title, what, "
+            "inside, ps, warning, links, banner{title,stats,badges,handle}, kind). "
+            "Баннер рендерится автоматически, пост идёт в тему topic_id. "
+            "links_product — ключ продукта из org.yaml для ссылочной строки. "
+            "react — эмодзи реакции, pin — закрепить. Операция записи: без "
+            "confirm=True возвращает ошибку и ничего не делает."
+        ),
+    )
+    async def tg_manage_post(template: str, chat_id: int, topic_id: int = 0,
+                             links_product: Optional[str] = None,
+                             react: Optional[str] = None, pin: bool = False,
+                             confirm: bool = False) -> str:
+        if not confirm:
+            return _CONFIRM_ERR
+        try:
+            import yaml
+            tpl = yaml.safe_load(template) or {}
+            cl = await _live()
+            return _j(await announce_mod.post(
+                cl, tpl, chat_id, topic_id=topic_id or None, react=react, pin=pin,
+                links_product=links_product, db_path=INDEX))
+        except Exception as e:
+            return _j({"error": f"manage: {e}"})
 
 
 def _tool_list() -> list:
