@@ -80,7 +80,9 @@ def render_banner(spec: dict, out: Path) -> Path:
     from PIL import Image, ImageDraw, ImageFont
 
     def font(size: int) -> Any:
-        for p in ("C:/Windows/Fonts/consolas.ttf",
+        for p in ("C:/Windows/Fonts/consola.ttf",
+                  "C:/Windows/Fonts/CascadiaMono.ttf",
+                  "C:/Windows/Fonts/lucon.ttf",
                   "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"):
             if Path(p).is_file():
                 return ImageFont.truetype(p, size)
@@ -205,6 +207,16 @@ async def post_file(tpl_path: str, chat: Any, *, topic_id: Optional[int] = None,
 async def readme(client: Any, ref: str, org: dict, chat: Any, *,
                  topic_id: Optional[int] = None, send: bool = False,
                  db_path: Optional[str] = None) -> dict:
+    tpl = readme_tpl(ref, org)
+    if tpl is None:
+        return {"ok": False, "error": f"нет в org.yaml продукта или темы: {ref!r}"}
+    if not send:
+        return {"ok": True, "dry_run": True, "text": compose_text(tpl, org)}
+    return await post(client, tpl, chat, topic_id=topic_id, pin=True,
+                      db_path=db_path, org=org)
+
+
+def readme_tpl(ref: str, org: dict) -> Optional[dict]:
     products = org.get("products") or {}
     topic_products = org.get("topic_products") or {}
     if ref in products:
@@ -219,15 +231,11 @@ async def readme(client: Any, ref: str, org: dict, chat: Any, *,
                   f"{products[k].get('about', '')}" for k in keys]
         links = {products[k]["title"]: products[k]["repo"] for k in keys}
     else:
-        return {"ok": False, "error": f"нет в org.yaml продукта или темы: {ref!r}"}
-    tpl = {"badge": "📌", "title": title, "what": what, "inside": inside,
-           "links": links, "kind": "readme",
-           "banner": {"title": title, "stats": "WHITEBITE · README ТЕМЫ",
-                      "handle": org.get("forum")}}
-    if not send:
-        return {"ok": True, "dry_run": True, "text": compose_text(tpl, org)}
-    return await post(client, tpl, chat, topic_id=topic_id, pin=True,
-                      db_path=db_path, org=org)
+        return None
+    return {"badge": "📌", "title": title, "what": what, "inside": inside,
+            "links": links, "kind": "readme",
+            "banner": {"title": title, "stats": "WHITEBITE · README ТЕМЫ",
+                       "handle": org.get("forum")}}
 
 
 def draft(repo_path: Path, tag: Optional[str], org: dict,
