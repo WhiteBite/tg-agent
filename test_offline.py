@@ -23,13 +23,14 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 # тесты герметичны: пользовательский .env (реальные ключи) не читается ни здесь, ни в подпроцессах
 os.environ["TG_ENV_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from db import DB, run_sql  # noqa: E402
+from db import DB, SCHEMA_VERSION, run_sql  # noqa: E402
 import sync as sync_mod  # noqa: E402
 
 NOW = datetime.now(timezone.utc)
@@ -2567,7 +2568,8 @@ def test_live_tools_flag(db_path: Path) -> None:
         rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = wait_for(proc, lambda m: m.get("id") == 2)
         names = {t["name"] for t in tools["result"]["tools"]}
-        check({"tg_live_topics", "tg_live_history", "tg_live_search"} <= names,
+        check({"tg_live_topics", "tg_live_history", "tg_live_search",
+               "tg_live_check_invites"} <= names,
               "MCP: TG_ALLOW_LIVE=1 добавляет tg_live_* инструменты",
               str(sorted(names)))
 
@@ -2588,6 +2590,14 @@ def test_live_tools_flag(db_path: Path) -> None:
         check("error" in body4,
               "MCP: tg_live_search без кредов — JSON-ошибка, не зависание",
               str(body4.get("error", ""))[:80])
+        rpc(proc, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                   "params": {"name": "tg_live_check_invites",
+                              "arguments": {"links": ["https://t.me/+AbCdEf"]}}})
+        resp6 = wait_for(proc, lambda m: m.get("id") == 6)
+        body6 = json.loads(resp6["result"]["content"][0]["text"])
+        check("error" in body6,
+              "MCP: tg_live_check_invites без кредов — JSON-ошибка, не зависание",
+              str(body6.get("error", ""))[:80])
         rpc(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
         alive = wait_for(proc, lambda m: m.get("id") == 5)
         check(alive.get("id") == 5, "MCP: сервер жив после ошибки live-инструмента")
@@ -3400,6 +3410,170 @@ def test_search_global(db_path: Path) -> None:
         check(False, "search: неизвестный тип поднимает ValueError")
     except ValueError:
         check(True, "search: неизвестный тип поднимает ValueError")
+
+
+class ChatInvite(SimpleNamespace):
+    pass
+
+
+class FakeCheckClient:
+
+    def __init__(self, responses: list):
+        self.responses = list(responses)
+        self.requests = []
+
+    async def __call__(self, req):
+        self.requests.append(req)
+        res = self.responses.pop(0)
+        if isinstance(res, Exception):
+            raise res
+        return res
+
+
+def test_checklinks(db_path: Path) -> None:
+    print("=== checklinks: статус инвайт-ссылок через checkChatInvite ===")
+    import checklinks as chk
+    from telethon.errors import (FloodWaitError, InviteHashExpiredError,
+                                 InviteHashInvalidError)
+
+    check(chk.invite_hash("https://t.me/+AbCdEf") == "AbCdEf"
+          and chk.invite_hash("t.me/joinchat/QwErTy") == "QwErTy"
+          and chk.invite_hash("+AbCdEf") == "AbCdEf"
+          and chk.invite_hash("joinchat/QwErTy") == "QwErTy"
+          and chk.invite_hash("rawhash123") == "rawhash123",
+          "checklinks: hash из +/joinchat/ссылки с https и сырого хэша")
+    check(chk.invite_hash("заходи в https://t.me/+AbCdEf?x=1 скорее") == "AbCdEf",
+          "checklinks: hash выцепляется из произвольного текста")
+    check(chk.invite_hash("https://t.me/durov") is None
+          and chk.invite_hash("не ссылка") is None and chk.invite_hash("") is None,
+          "checklinks: публичные t.me и мусор не считаются инвайтом")
+
+    ck_db = db_path.parent / "checklinks.sqlite"
+    if ck_db.exists():
+        ck_db.unlink()
+    with DB(ck_db) as db:
+        db.upsert_chat(-100777, "Группа", None, "supergroup", False, 100)
+        db.insert_message({"chat_id": -100777, "msg_id": 1, "topic_id": 1,
+                           "ts": 1000, "sender_id": 1, "sender_name": "A",
+                           "text": "https://t.me/+live1 t.me/+dead1",
+                           "is_out": 0, "is_service": 0})
+        db.insert_message({"chat_id": -100777, "msg_id": 2, "topic_id": 1,
+                           "ts": 2000, "sender_id": 1, "sender_name": "A",
+                           "text": "ещё https://t.me/+live1", "is_out": 0, "is_service": 0})
+        db.insert_message({"chat_id": -100777, "msg_id": 3, "topic_id": 1,
+                           "ts": 1500, "sender_id": 1, "sender_name": "A",
+                           "text": "t.me/joinchat/live2", "is_out": 0, "is_service": 0})
+        db.insert_refs(-100777, 1, [("invite", "+live1"), ("invite", "+dead1")])
+        db.insert_refs(-100777, 2, [("invite", "+live1")])
+        db.insert_refs(-100777, 3, [("invite", "joinchat/live2")])
+        rows = db.invite_refs(limit=10)
+        check([r["value"] for r in rows] == ["+live1", "joinchat/live2", "+dead1"]
+              and rows[0]["n"] == 2,
+              "checklinks: invite_refs — различает и дедупит, свежесть по last_ts",
+              str(rows))
+
+    expired = InviteHashExpiredError(None)
+    invalid = InviteHashInvalidError(None)
+    flood = FloodWaitError(None, 0)
+    flood.seconds = 0
+    preview = ChatInvite(title="Живой чат", participants_count=42,
+                         broadcast=True, request_needed=True)
+    member_chat = SimpleNamespace(title="Уже состою")
+
+    client = FakeCheckClient([preview, expired, invalid, flood, preview, member_chat])
+    rep = asyncio.run(chk.check_invites(
+        client, ["https://t.me/+live1", "+dead1", "joinchat/invalid1",
+                 "+flood1", "+member1", "https://t.me/+live1"],
+        DB(ck_db), max_age_days=7, delay=0))
+    by_val = {r["value"]: r for r in rep["results"]}
+    check(len(by_val) == 5 and len(client.requests) == 6,
+          "checklinks: дубли ссылок склеиваются, flood-повтор не считается новой",
+          str(len(client.requests)))
+    check(by_val["live1"]["status"] == "ok" and by_val["live1"]["title"] == "Живой чат"
+          and by_val["live1"]["participants"] == 42 and by_val["live1"]["is_channel"]
+          and by_val["live1"]["request_needed"],
+          "checklinks: превью ChatInvite -> ok с title/участниками/каналом/заявкой",
+          str(by_val.get("live1")))
+    check(by_val["dead1"]["status"] == "expired"
+          and by_val["invalid1"]["status"] == "invalid",
+          "checklinks: истекший и невалидный хэш -> терминальные статусы")
+    check(by_val["flood1"]["status"] == "ok",
+          "checklinks: FloodWait переживается повтором той же проверки",
+          str(by_val.get("flood1")))
+    check(by_val["member1"]["status"] == "member"
+          and by_val["member1"]["title"] == "Уже состою",
+          "checklinks: чат-объект вместо превью -> уже участник",
+          str(by_val.get("member1")))
+
+    rep2 = asyncio.run(chk.check_invites(
+        FakeCheckClient([]), ["https://t.me/+live1", "+dead1", "+flood1"],
+        DB(ck_db), delay=0))
+    check(all(r.get("from_cache") for r in rep2["results"])
+          and rep2["live_checks"] == 0,
+          "checklinks: свежие статусы из кэша, живых запросов нет",
+          str([r.get("from_cache") for r in rep2["results"]]))
+
+    with DB(ck_db) as db:
+        old = int(time.time()) - 30 * 86400
+        db.invite_status_set("live1", "ok", checked_ts=old)
+    client3 = FakeCheckClient([ChatInvite(
+        title="Обновлён", participants_count=50, broadcast=False, request_needed=False)])
+    rep3 = asyncio.run(chk.check_invites(
+        client3, ["+live1", "+dead1"], DB(ck_db), max_age_days=7, delay=0))
+    by3 = {r["value"]: r for r in rep3["results"]}
+    check(len(client3.requests) == 1 and by3["live1"]["from_cache"] is False
+          and by3["dead1"]["from_cache"] is True,
+          "checklinks: протухший ok перепроверяется, expired не трогается",
+          str([r["value"] for r in rep3["results"]]))
+    rep3f = asyncio.run(chk.check_invites(
+        FakeCheckClient([ChatInvite(title="Обновлён", participants_count=51,
+                                    broadcast=False, request_needed=False)]),
+        ["+live1", "+dead1"], DB(ck_db), force=True, delay=0))
+    byf = {r["value"]: r for r in rep3f["results"]}
+    check(rep3f["live_checks"] == 1 and byf["dead1"]["from_cache"] is True
+          and byf["live1"]["from_cache"] is False,
+          "checklinks: force перепроверяет живые, терминальные остаются в кэше",
+          str(rep3f["live_checks"]))
+
+    rep4 = asyncio.run(chk.check_invites(
+        FakeCheckClient([ChatInvite(title="A", participants_count=1,
+                                           broadcast=False, request_needed=False)]),
+        ["+a1", "+a2", "+a3"], DB(ck_db), delay=0, live_cap=1))
+    by4 = {r["value"]: r for r in rep4["results"]}
+    check(by4["a1"]["status"] == "ok" and by4["a2"]["status"] == "unchecked"
+          and rep4["skipped_cap"] == ["a2", "a3"],
+          "checklinks: live_cap ограничивает живые запросы, хвост в skipped_cap",
+          str(by4.get("a2")))
+
+    err_client = FakeCheckClient([RuntimeError("boom")])
+    rep5 = asyncio.run(chk.check_invites(err_client, ["+err1"], DB(ck_db), delay=0))
+    check(rep5["results"][0]["status"] == "error"
+          and "boom" in rep5["results"][0]["error"],
+          "checklinks: сбой сети/клиента -> error, прогон не падает",
+          str(rep5["results"][0]))
+
+    with DB(ck_db) as db:
+        summ = db.refs_summary(chat_id=-100777)
+        by_val2 = {r["value"]: r for r in summ["invite"]}
+        check(by_val2["+live1"]["status"] == "ok"
+              and by_val2["+dead1"]["status"] == "expired",
+              "checklinks: refs_summary джойнит статус инвайта",
+              str({k: v.get("status") for k, v in by_val2.items()}))
+        check(summ["invite_status"]["checked"].get("expired") == 1
+              and "ok" in summ["invite_status"]["checked"],
+              "checklinks: сводка invite_status в refs_summary",
+              str(summ.get("invite_status")))
+
+    with DB(ck_db) as db:
+        db.conn.execute("DROP TABLE invite_status")
+        db.conn.execute("PRAGMA user_version = 5")
+    with DB(ck_db) as db:
+        tabs = {r[0] for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check("invite_status" in tabs and uv == SCHEMA_VERSION,
+          "checklinks: миграция v5->v6 создаёт invite_status",
+          f"table={'invite_status' in tabs} uv={uv}")
 
 
 def test_services_pack(db_path: Path) -> None:
@@ -5183,6 +5357,7 @@ def main() -> int:
     test_server_db_cache(db_path)
     test_extract_all_indexed(db_path)
     test_search_global(db_path)
+    test_checklinks(db_path)
     test_services_pack(db_path)
     test_pipeline(db_path)
     test_extract_until_done(db_path)

@@ -102,6 +102,18 @@ CREATE TABLE IF NOT EXISTS refs (
 );
 CREATE INDEX IF NOT EXISTS ix_refs_chat ON refs (chat_id, kind);
 
+-- статус проверенных инвайтов (checkChatInvite; пишет checklinks.py)
+CREATE TABLE IF NOT EXISTS invite_status (
+    value          TEXT PRIMARY KEY,   -- нормализованный хэш без +/joinchat/
+    status         TEXT NOT NULL,      -- ok | member | expired | invalid | error
+    title          TEXT,
+    participants   INTEGER,
+    is_channel     INTEGER,
+    request_needed INTEGER,
+    error          TEXT,
+    checked_ts     INTEGER NOT NULL
+);
+
 -- папки Telegram (состав лежит прямо в объекте папки)
 CREATE TABLE IF NOT EXISTS folders (
     folder_id INTEGER PRIMARY KEY,
@@ -269,7 +281,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class DB:
@@ -319,6 +331,8 @@ class DB:
             self._migrate_chat_manage()
         if version < 5:
             self._migrate_posts()
+        if version < 6:
+            self._migrate_invite_status()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -517,6 +531,16 @@ class DB:
         except sqlite3.OperationalError:
             pass
 
+    def _migrate_invite_status(self) -> None:
+        try:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS invite_status ("
+                "value TEXT PRIMARY KEY, status TEXT NOT NULL, title TEXT, "
+                "participants INTEGER, is_channel INTEGER, request_needed INTEGER, "
+                "error TEXT, checked_ts INTEGER NOT NULL)")
+        except sqlite3.OperationalError:
+            pass
+
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
     def get_cursor(self, chat_id: int, topic_id: int = 0) -> int:
@@ -592,11 +616,21 @@ class DB:
         chat_ids: Optional[list[int]] = None,
         since_ts: Optional[int] = None,
         limit: int = 25,
-    ) -> dict[str, list[dict]]:
-        """Топ ссылок/упоминаний по чату или набору чатов (для watch-листа)."""
+    ) -> dict[str, Any]:
+        """Топ ссылок/упоминаний по чату или набору чатов (для watch-листа).
+
+        У invite-строк добавляются status/checked_ts из invite_status (кэш
+        checklinks.py); в ключ invite_status — сводка живых/истекших по всем
+        инвайтам фильтра, до обрезки лимитом.
+        """
         sql = """
-            SELECT r.kind, r.value, COUNT(*) n, MAX(m.ts) last_ts
+            SELECT r.kind, r.value, COUNT(*) n, MAX(m.ts) last_ts,
+                   s.status AS invite_status, s.title AS invite_title,
+                   s.checked_ts AS invite_checked_ts
             FROM refs r LEFT JOIN messages m ON m.chat_id = r.chat_id AND m.msg_id = r.msg_id
+            LEFT JOIN invite_status s
+              ON r.kind = 'invite'
+             AND s.value = replace(replace(r.value, 'joinchat/', ''), '+', '')
             WHERE 1=1
         """
         args: list[Any] = []
@@ -612,11 +646,84 @@ class DB:
         sql += " GROUP BY r.kind, r.value ORDER BY n DESC"
         rows = [dict(r) for r in self.conn.execute(sql, args)]
         out: dict[str, list[dict]] = {}
+        tally: dict[str, int] = {"ok": 0, "member": 0, "expired": 0,
+                                 "invalid": 0, "error": 0, "unknown": 0}
         for r in rows:
+            if r["kind"] == "invite":
+                st = r.pop("invite_status") or "unknown"
+                r["status"] = st
+                r["checked_ts"] = r.pop("invite_checked_ts")
+                r.pop("invite_title", None)
+                if st in tally:
+                    tally[st] += 1
+            else:
+                r.pop("invite_status", None)
+                r.pop("invite_title", None)
+                r.pop("invite_checked_ts", None)
             out.setdefault(r["kind"], [])
             if len(out[r["kind"]]) < limit:
                 out[r["kind"]].append(r)
+        if any(tally.values()):
+            checked = {k: v for k, v in tally.items() if k != "unknown"}
+            out["invite_status"] = {"unknown": tally["unknown"], "checked": checked}
         return out
+
+    def invite_refs(
+        self,
+        limit: int = 50,
+        chat_id: Optional[int] = None,
+        chat_ids: Optional[list[int]] = None,
+        since_ts: Optional[int] = None,
+    ) -> list[dict]:
+        """Различные инвайты из refs, свежие первыми: value, n, last_ts."""
+        sql = """
+            SELECT r.value, COUNT(*) n, MAX(m.ts) last_ts
+            FROM refs r LEFT JOIN messages m ON m.chat_id = r.chat_id AND m.msg_id = r.msg_id
+            WHERE r.kind = 'invite'
+        """
+        args: list[Any] = []
+        if chat_id is not None:
+            sql += " AND r.chat_id = ?"
+            args.append(chat_id)
+        elif chat_ids:
+            sql += f" AND r.chat_id IN ({','.join('?' * len(chat_ids))})"
+            args.extend(chat_ids)
+        if since_ts:
+            sql += " AND m.ts >= ?"
+            args.append(since_ts)
+        sql += " GROUP BY r.value ORDER BY last_ts DESC LIMIT ?"
+        args.append(int(limit))
+        return [dict(r) for r in self.conn.execute(sql, args)]
+
+    def invite_status_map(self, values: list[str]) -> dict[str, dict]:
+        """Кэш статусов по нормализованным хэшам: value -> строка invite_status."""
+        if not values:
+            return {}
+        marks = ",".join("?" * len(values))
+        rows = self.conn.execute(
+            f"SELECT * FROM invite_status WHERE value IN ({marks})", values)
+        return {r["value"]: dict(r) for r in rows}
+
+    def invite_status_set(
+        self,
+        value: str,
+        status: str,
+        title: Optional[str] = None,
+        participants: Optional[int] = None,
+        is_channel: Optional[bool] = None,
+        request_needed: Optional[bool] = None,
+        error: Optional[str] = None,
+        checked_ts: Optional[int] = None,
+    ) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO invite_status(value, status, title, participants, "
+            "is_channel, request_needed, error, checked_ts) VALUES(?,?,?,?,?,?,?,?)",
+            (value, status, title, participants,
+             None if is_channel is None else int(is_channel),
+             None if request_needed is None else int(request_needed),
+             error, checked_ts or int(time.time())),
+        )
+        self.conn.commit()
 
     def digests_list(self, chat_id: Optional[int] = None,
                      topic_id: Optional[int] = None, limit: int = 10) -> list[dict]:

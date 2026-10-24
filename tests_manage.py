@@ -11,8 +11,8 @@ toggle_signatures / toggle_forum / set_default_rights — диспетчер б�
 с random_id, topic_id из service-сообщения MessageActionTopicCreate,
 EditForumTopicRequest с title/closed, title переживает close-only правку,
 closed в индексе, не-форум и гейт TG_ALLOW_MANAGE отклоняются; MCP-слой —
-настоящий server.py по stdio: TG_ALLOW_MANAGE=1 регистрирует пять
-инструментов tg_manage_* (21 всего, 24 с TG_ALLOW_LIVE), без флага их нет,
+настоящий server.py по stdio: TG_ALLOW_MANAGE=1 регистрирует шесть
+инструментов tg_manage_* (22 всего, 26 с TG_ALLOW_LIVE), без флага их нет,
 confirm=False отклоняется, без кредов confirm=True даёт JSON-ошибку."""
 
 from __future__ import annotations
@@ -1327,8 +1327,8 @@ def test_mcp_manage_tools(tmp: Path) -> None:
     proc3 = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_LIVE="1", TG_ALLOW_MANAGE="1"))
     try:
         names3 = _init(proc3)
-        check(len(names3) == 25,
-              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 25 инструмента",
+        check(len(names3) == 26,
+              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 26 инструмента",
               str(sorted(names3)))
     finally:
         _stop(proc3)
