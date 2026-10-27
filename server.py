@@ -11,6 +11,8 @@ TG_EXPOSE_SQL=1  — добавить инструмент произвольн�
 TG_ALLOW_LIVE=1  — добавить чтение напрямую из Telegram (тоже только чтение)
 TG_ALLOW_MANAGE=1 — добавить управление чатами (manage.py: создание, настройки,
                     темы, участники, инвайт-ссылки; каждая операция требует confirm=True)
+TG_ALLOW_DOWNLOADS=1 — добавить инструменты скачивания медиа (downloads-модуль;
+                    запуск задания требует confirm=True)
 
 Запуск:   python3 server.py          (stdio, дёргает opencode)
 Проверка: python3 server.py --list
@@ -43,6 +45,7 @@ EXPOSE_SQL = os.environ.get("TG_EXPOSE_SQL", "").lower() in ("1", "true", "yes")
 STRICT_WATCH = os.environ.get("TG_STRICT_WATCH", "").lower() in ("1", "true", "yes")
 ALLOW_LIVE = os.environ.get("TG_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
 ALLOW_MANAGE = os.environ.get("TG_ALLOW_MANAGE", "").lower() in ("1", "true", "yes")
+ALLOW_DOWNLOADS = os.environ.get("TG_ALLOW_DOWNLOADS", "").lower() in ("1", "true", "yes")
 
 mcp = _Server(
     name="telegram",
@@ -849,6 +852,13 @@ if ALLOW_MANAGE:
                 links_product=links_product, db_path=INDEX))
         except Exception as e:
             return _j({"error": f"manage: {e}"})
+
+
+if ALLOW_DOWNLOADS:
+    import modules as modules_reg
+
+    for _spec in modules_reg.mcp_specs():
+        mcp.tool(name=_spec["name"], description=_spec["description"])(_spec["fn"])
 
 
 def _tool_list() -> list:

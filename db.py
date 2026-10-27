@@ -256,6 +256,45 @@ CREATE TABLE IF NOT EXISTS entity_aliases (
     merged_ts     INTEGER,
     reason        TEXT
 );
+
+-- долгие задания модулей: снимок параметров и плановых пунктов (jobs.py)
+CREATE TABLE IF NOT EXISTS jobs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind          TEXT NOT NULL,
+    params_json   TEXT NOT NULL,
+    state         TEXT NOT NULL DEFAULT 'planned',
+    created_ts    INTEGER,
+    started_ts    INTEGER,
+    updated_ts    INTEGER,
+    finished_ts   INTEGER,
+    progress_json TEXT,
+    result_json   TEXT,
+    error         TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_jobs_state ON jobs (kind, state);
+
+CREATE TABLE IF NOT EXISTS job_items (
+    job_id  INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    msg_id  INTEGER NOT NULL,
+    state   TEXT NOT NULL DEFAULT 'planned',
+    detail  TEXT,
+    ts      INTEGER,
+    PRIMARY KEY (job_id, chat_id, msg_id)
+);
+CREATE INDEX IF NOT EXISTS ix_job_items_state ON job_items (job_id, state);
+
+-- подборки каналов для повторяемых заданий (sources.py)
+CREATE TABLE IF NOT EXISTS collections (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    created_ts  INTEGER
+);
+CREATE TABLE IF NOT EXISTS collection_chats (
+    collection_id INTEGER NOT NULL,
+    chat_id       INTEGER NOT NULL,
+    PRIMARY KEY (collection_id, chat_id)
+);
 """
 
 # Полнотекстовый поиск по истории (года переписки через LIKE искать долго).
@@ -281,7 +320,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class DB:
@@ -333,6 +372,8 @@ class DB:
             self._migrate_posts()
         if version < 6:
             self._migrate_invite_status()
+        if version < 7:
+            self._migrate_v7()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -540,6 +581,11 @@ class DB:
                 "error TEXT, checked_ts INTEGER NOT NULL)")
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_v7(self) -> None:
+        # схемы функциональных модулей живут в самих модулях, выполняются отсюда
+        from modules import ensure_schema
+        ensure_schema(self.conn)
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 

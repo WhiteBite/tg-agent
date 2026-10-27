@@ -9,6 +9,9 @@
 *.lock
 *.log
 
+# скачанная медиа-библиотека
+downloads/
+
 # python
 __pycache__/
 *.pyc

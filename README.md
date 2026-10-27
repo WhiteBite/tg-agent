@@ -146,12 +146,16 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_gaps` | Пробелы по проекту или пакету: открытые вопросы без ответа, обещания без срока и без ответственного, с причиной попадания |
 
 Отправки нет вообще: в `server.py` не существует инструмента, который что-то
-пишет в Telegram. Пишущих модуля три, все вне MCP-сервера по умолчанию: `notify.py`
-(сообщения себе, за гейтом `TG_ALLOW_SEND=1`), `folders.py` (состав папок —
-`add`/`remove` чатов; контент не пишет) и `manage.py` (создание и настройка
-чатов, участники, инвайт-ссылки; за гейтом `TG_ALLOW_MANAGE=1`).
+пишет в Telegram. Пишущих модуля четыре, все вне MCP-сервера по умолчанию:
+`notify.py` (сообщения себе, за гейтом `TG_ALLOW_SEND=1`), `folders.py`
+(состав папок — `add`/`remove` чатов; контент не пишет), `manage.py`
+(создание и настройку чатов, участники, инвайт-ссылки; за гейтом
+`TG_ALLOW_MANAGE=1`) и `modules/downloads.py` (скачивание медиа на диск; за
+гейтом `TG_ALLOW_DOWNLOADS=1`).
 MCP-инструменты управления чатами (`tg_manage_*`) регистрируются только при
-`TG_ALLOW_MANAGE=1` и требуют `confirm=True` для каждой операции. `tg_sql` (произвольный
+`TG_ALLOW_MANAGE=1` и требуют `confirm=True` для каждой операции;
+инструменты скачивания (`tg_downloads_*`) — при `TG_ALLOW_DOWNLOADS=1`,
+запуск задания требует `confirm=True`. `tg_sql` (произвольный
 read-only SQL) скрыт по умолчанию, включается `TG_EXPOSE_SQL=1`.
 
 ---
@@ -534,6 +538,55 @@ openai-провайдер отвечает `ValueError`. Готовые тран
 дренаж строк `pending`, накопившихся до гейта `is_transcribable`: одним UPDATE
 они помечаются `skipped` и не скачиваются.
 
+## Скачивание видео и медиа-библиотека
+
+```bash
+python3 downloads.py plan --sources watch --days 90   # задание без запуска
+python3 downloads.py run --sources watch              # создать и выполнить
+python3 downloads.py run --job 3 --retry --force      # продолжить/дожать
+python3 downloads.py status [--job 3]                 # задания и библиотека
+python3 downloads.py files [--chat -100123]           # файлы с числом источников
+python3 downloads.py collections save Видео --chats -100111,-100222
+python3 downloads.py job pause|resume|cancel 3
+```
+
+Скачивает видео (по желанию videonote и photo) из отмеченных каналов, папки,
+подборки, всех чатов индекса или точечного чата. Источники — спека через
+запятую: `watch | all | folder:<id> | collection:<имя> | chat:<id|@username>`.
+Подборка (`collections`) — сохранённая группа каналов для повторяемых заданий;
+watch-лист и доступ агента она не меняет.
+
+**Дедупликация точных дублей — два слоя.** До скачивания — по id файла
+Telegram: пересланный в другой чат ролик не качается повторно. После
+скачивания — по sha256 содержимого: тот же ролик, залитый заново, остаётся
+одной копией, а второй id файла алиасится на уже скачанный файл. Хранение
+контентно-адресное: `downloads/files/<sha[:2]>/<sha><ext>` — одна строка
+`media_files` на уникальное содержимое, у файла накапливаются все
+сообщения-источники (`media_file_sources`). Повторное задание по умолчанию
+не включает уже скачанные сообщения.
+
+Задание — снимок списка сообщений на момент создания (таблицы `jobs` /
+`job_items`), поэтому прерванный прогон продолжается с места остановки, а не
+начинается заново; `--retry` дожимает упавшие пункты, `pause`/`resume`/
+`cancel` управляют ходом. Один пункт не обрывает пакет: причины пропуска
+(`duplicate`, `duplicate-content`, `too-big`, `missing`, `kind`,
+`chat-unavailable`) и падения — в отчёте задания. Лимит размера —
+`TG_DOWNLOADS_MAX_MB` (дефолт 2000, 0 — без лимита), каталог библиотеки —
+`TG_DOWNLOADS_DIR` (дефолт `downloads/` рядом с репо).
+
+Это первый модуль нового контракта: явный реестр `modules/` (dict: id,
+version, schema, workspace-маршруты, MCP-спеки, runner). Ядро подключает
+модуль в трёх точках — `db.py` (миграция v7 создаёт таблицы модуля),
+`workspace_api.py` (маршруты `downloads/*` в UI API) и `server.py`
+(MCP-инструменты за гейтом). Общая инфраструктура — `jobs.py` (сохраняемые
+задания) и `sources.py` (выбор источников + подборки): следующий модуль
+переиспользует их без правки ядра. `TG_MODULES_OFF="downloads"` убирает
+модуль целиком — ни маршрутов, ни инструментов, ни таблиц.
+
+Похожие, но не идентичные ролики (пережатые, обрезанные, с вотермаркой) —
+кандидаты на слияние для человеческого решения: автоматически не удаляются и
+не сливаются, это следующий шаг модуля.
+
 ## Экспорт
 
 ```bash
@@ -569,10 +622,12 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 - **Отправить сообщение агент не может** — таких инструментов нет. Пишущие
   модули живут вне MCP-сервера: `notify.py` (сообщения в Saved Messages, гейт
   `TG_ALLOW_SEND=1`), `folders.py` (состав папок — только membership, без
-  контента; правка = явный запуск команды) и `manage.py` (создание и настройка
-  чатов, участники, инвайт-ссылки; гейт `TG_ALLOW_MANAGE=1`).
+  контента; правка = явный запуск команды), `manage.py` (создание и настройка
+  чатов, участники, инвайт-ссылки; гейт `TG_ALLOW_MANAGE=1`) и downloads-модуль
+  (скачивание медиа на диск; гейт `TG_ALLOW_DOWNLOADS=1`).
   MCP-инструменты управления чатами (`tg_manage_*`) регистрируются только при
-  `TG_ALLOW_MANAGE=1` и требуют `confirm=True` для каждой операции.
+  `TG_ALLOW_MANAGE=1` и требуют `confirm=True` для каждой операции;
+  `tg_downloads_*` — при `TG_ALLOW_DOWNLOADS=1`, запуск задания — `confirm=True`.
 - **Сообщения — источник истины, правки подхватываются.** Строка отражает
   последнее состояние текста (`edited_ts`); предыдущие версии правок не
   сохраняются. Удаление — флаг `deleted=1`: строка остаётся в базе, но
@@ -636,6 +691,10 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `monitor.py` | Сводка просроченного и дедлайнов по проектам, зависшие вопросы; `--send` через `notify.py`, дедуп по хэшу отчёта |
 | `notify.py` | Уведомления в Saved Messages; пишущий модуль, гейт `TG_ALLOW_SEND=1` |
 | `media.py` | Очередь транскрипции аудио (voice + audio-документы): гейт `is_transcribable` на инджесте, рефетч и скачивание из Telegram, гейты до скачивания, `--sweep-pending`, qwen3-asr-flash (stub/openai) |
+| `modules/` | Реестр функциональных модулей (контракт: id, version, schema, workspace-маршруты, MCP-спеки, runner; `TG_MODULES_OFF`); `modules/downloads.py` — скачивание медиа с дедупом |
+| `downloads.py` | CLI модуля скачивания: план, прогон, статус, файлы, подборки, управление заданием |
+| `jobs.py` | Сохраняемые задания: `jobs`/`job_items`, claim с защитой от гонок, pause/resume/cancel, retry упавших, отчёт по пунктам |
+| `sources.py` | Выбор источников: `watch`/`all`/`folder:`/`collection:`/`chat:` (объединение через запятую) и подборки каналов |
 | `export.py` | Выгрузка сущностей во внешние системы (file / 101 — REST-задачи с JWT sign-in+refresh, id-курсор, ретраи, upsert по guid; notion — заглушка-ошибка) |
 | `services_report.py` | Каталог сервисов из сущностей: rollup по dedup_key, `--days/--query/--top/--hide-closed` |
 | `fuzzy_dedup.py` | Maintenance-проход: слияние дублей сущностей по нормализованному title (richer-keeper, cap, идемпотентный) |
@@ -647,7 +706,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 1113 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс двенадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1240 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс пятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -660,6 +719,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `tests_ui_projects.py` | `/api/projects` и курсор визита проекта в UI (запускается из `test_offline.py`) |
 | `tests_manage.py` | Офлайн-тесты manage.py: создание, настройки, темы, участники, MCP (запускается из `test_offline.py`) |
 | `tests_announce.py` | Офлайн-тесты announce.py: рендер баннера, сборка текста, post с отправкой на фейк-клиенте, readme из org.yaml, draft из CHANGELOG, гейт (запускается из `test_offline.py`) |
+| `tests_downloads.py` | Офлайн-тесты downloads-модуля: дедуп doc-id/sha256 + алиасы, resume, пауза/отмена, подборки, реестр и `TG_MODULES_OFF`, MCP-гейт `TG_ALLOW_DOWNLOADS`, фоновый загрузчик (запускается из `test_offline.py`) |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -708,12 +768,13 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **1113 проверок: свои проверки плюс двенадцать suites
+`python3 test_offline.py` — **1240 проверок: свои проверки плюс пятнадцать suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
 `tests_watchdog.py`, `tests_ui_projects.py`, `tests_manage.py`,
-`tests_announce.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
+`tests_announce.py`, `tests_workspace_api.py`, `tests_question_signals.py`,
+`tests_downloads.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
   `--chat @канал`, `--folder`, `--watched`, `--dry-run`, раскладка по темам
@@ -757,6 +818,13 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
   индекса темы; отдельный прогон с `TG_ALLOW_LIVE=1` —
   live-инструменты регистрируются, без кредов отвечают JSON-ошибкой, а не
   зависают
+- **downloads-модуль**: дедуп по id файла Telegram до скачивания и по sha256
+  после (повторная загрузка алиасится на файл), у файла все
+  сообщения-источники, контентно-адресное хранение; resume упавших пунктов
+  (`--retry --force`), пауза/отмена задания, подборки каналов, реестр модулей
+  и `TG_MODULES_OFF`, миграция v6→v7; MCP-гейт `TG_ALLOW_DOWNLOADS=1`
+  (16+3 инструмента, confirm), фоновый загрузчик без кредов помечает задание
+  failed и не зависает
 - папки: `GetDialogFiltersRequest` на фейках → состав папок в индексе
 - топ по реакциям (`stats.top_reactions`)
 - `live.handle_message`: вставка + идемпотентность + refs; `collect_ids`
