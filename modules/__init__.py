@@ -6,8 +6,11 @@
   schema    — fn(conn) с идемпотентным DDL; вызывается из миграции db.py (v7+)
   workspace — {(method, path): fn(db, params|body)} поверх workspace-API;
               GET-функции получают (db, params), POST — (db, body)
-  mcp       — [{name, description, fn}] — MCP-инструменты; гейт и confirm
-              живут в самой функции модуля
+  mcp       — [{name, description, fn, gate?}] — MCP-инструменты; confirm
+               живёт в самой функции модуля; gate (необяз.) — какой env-гейт
+               сервера регистрирует инструмент: "downloads" (умолчание,
+               TG_ALLOW_DOWNLOADS), "forwards" (TG_ALLOW_FORWARDS), "any"
+               (любой из них)
   runner    — fn(job_id) -> dict, запуск фонового исполнителя задания
 
 Отключение: TG_MODULES_OFF="downloads,..." убирает модуль из реестра —
@@ -56,6 +59,7 @@ def _validate(module: dict) -> None:
                 or not spec["name"].startswith("tg_")
                 or not isinstance(spec.get("description"), str)
                 or not spec.get("description")
+                or spec.get("gate") not in (None, "downloads", "forwards", "any")
                 or not callable(spec.get("fn"))):
             fail(f"неверный mcp-спека: {spec.get('name')!r}")
 

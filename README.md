@@ -145,17 +145,20 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_project_brief` | Сводка по проекту: counts по статусам, open, overdue, next_due, открытые вопросы, обещания без срока/ответственного, топ владельцев |
 | `tg_gaps` | Пробелы по проекту или пакету: открытые вопросы без ответа, обещания без срока и без ответственного, с причиной попадания |
 
-Отправки нет вообще: в `server.py` не существует инструмента, который что-то
-пишет в Telegram. Пишущих модуля четыре, все вне MCP-сервера по умолчанию:
-`notify.py` (сообщения себе, за гейтом `TG_ALLOW_SEND=1`), `folders.py`
-(состав папок — `add`/`remove` чатов; контент не пишет), `manage.py`
-(создание и настройку чатов, участники, инвайт-ссылки; за гейтом
-`TG_ALLOW_MANAGE=1`) и `modules/downloads.py` (скачивание медиа на диск; за
-гейтом `TG_ALLOW_DOWNLOADS=1`).
+Отправки нет вообще — пока не включён гейт: по умолчанию в `server.py` нет
+инструмента, который что-то пишет в Telegram. Пишущих модуля четыре, все вне
+MCP-сервера по умолчанию: `notify.py` (сообщения себе, за гейтом
+`TG_ALLOW_SEND=1`), `folders.py` (состав папок — `add`/`remove` чатов;
+контент не пишет), `manage.py` (создание и настройку чатов, участники,
+инвайт-ссылки; за гейтом `TG_ALLOW_MANAGE=1`) и `modules/downloads.py`
+(скачивание медиа на диск — гейт `TG_ALLOW_DOWNLOADS=1`; пересылка медиа в
+явно указанный чат — гейт `TG_ALLOW_FORWARDS=1`).
 MCP-инструменты управления чатами (`tg_manage_*`) регистрируются только при
 `TG_ALLOW_MANAGE=1` и требуют `confirm=True` для каждой операции;
-инструменты скачивания (`tg_downloads_*`) — при `TG_ALLOW_DOWNLOADS=1`,
-запуск задания требует `confirm=True`. `tg_sql` (произвольный
+`tg_downloads_run/status/collections` — при `TG_ALLOW_DOWNLOADS=1`,
+`tg_downloads_forward` — при `TG_ALLOW_FORWARDS=1` (статус и подборки
+регистрируются при любом из двух гейтов), запуск задания и пересылка требуют
+`confirm=True`. `tg_sql` (произвольный
 read-only SQL) скрыт по умолчанию, включается `TG_EXPOSE_SQL=1`.
 
 ---
@@ -544,8 +547,10 @@ openai-провайдер отвечает `ValueError`. Готовые тран
 python3 downloads.py plan --sources watch --days 90   # задание без запуска
 python3 downloads.py run --sources watch              # создать и выполнить
 python3 downloads.py run --job 3 --retry --force      # продолжить/дожать
+python3 downloads.py run --sources watch --mode forward --to saved
 python3 downloads.py status [--job 3]                 # задания и библиотека
 python3 downloads.py files [--chat -100123]           # файлы с числом источников
+python3 downloads.py forwards [--chat -100123]        # пересланные медиа
 python3 downloads.py collections save Видео --chats -100111,-100222
 python3 downloads.py job pause|resume|cancel 3
 ```
@@ -574,14 +579,30 @@ Telegram: пересланный в другой чат ролик не кача
 `TG_DOWNLOADS_MAX_MB` (дефолт 2000, 0 — без лимита), каталог библиотеки —
 `TG_DOWNLOADS_DIR` (дефолт `downloads/` рядом с репо).
 
+**Режим `forward` — пересылка без скачивания.** `--mode forward --to saved`
+(или `@username` / числовой id своего чата) пересылает сообщения серверно:
+байты медиа через клиент не идут, одна пересылка — один API-вызов. Дедуп
+остаётся однослойным, по id файла Telegram и адресу (`forward_files` /
+`forward_sources`): тот же файл из любого канала повторно не пересылается,
+у записи накапливаются все сообщения-источники. Контентный sha256-дедуп здесь
+невозможен — перезалитая копия с другим id пройдёт как новое видео. Ключ
+реестра `(doc_id, адресат)`: смена адресата — свои пересылки заново (в план
+берутся через `--all-messages`). Длинный FloodWait (>120 с) уводит задание в
+`pause`, короткий пережидается молча; каналы с запретом пересылки
+пропускаются (`forwards-restricted`). Пересылка — операция записи в Telegram,
+поэтому MCP-инструмент `tg_downloads_forward` живёт за отдельным гейтом
+`TG_ALLOW_FORWARDS=1` и требует `confirm=True`; HTTP-маршрут —
+`POST downloads/forward`, список — `GET downloads/forwards`.
+
 Это первый модуль нового контракта: явный реестр `modules/` (dict: id,
 version, schema, workspace-маршруты, MCP-спеки, runner). Ядро подключает
-модуль в трёх точках — `db.py` (миграция v7 создаёт таблицы модуля),
+модуль в трёх точках — `db.py` (миграции v7/v8 создают таблицы модуля),
 `workspace_api.py` (маршруты `downloads/*` в UI API) и `server.py`
-(MCP-инструменты за гейтом). Общая инфраструктура — `jobs.py` (сохраняемые
-задания) и `sources.py` (выбор источников + подборки): следующий модуль
-переиспользует их без правки ядра. `TG_MODULES_OFF="downloads"` убирает
-модуль целиком — ни маршрутов, ни инструментов, ни таблиц.
+(MCP-инструменты за гейтом; у каждой спеки опциональный `gate`:
+`downloads`, `forwards`, `any`). Общая инфраструктура — `jobs.py`
+(сохраняемые задания) и `sources.py` (выбор источников + подборки): следующий
+модуль переиспользует их без правки ядра. `TG_MODULES_OFF="downloads"`
+убирает модуль целиком — ни маршрутов, ни инструментов, ни таблиц.
 
 Похожие, но не идентичные ролики (пережатые, обрезанные, с вотермаркой) —
 кандидаты на слияние для человеческого решения: автоматически не удаляются и
@@ -619,15 +640,19 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 
 ## Безопасность
 
-- **Отправить сообщение агент не может** — таких инструментов нет. Пишущие
+- **Отправить сообщение агент не может** — по умолчанию таких инструментов
+  нет. Пишущие
   модули живут вне MCP-сервера: `notify.py` (сообщения в Saved Messages, гейт
   `TG_ALLOW_SEND=1`), `folders.py` (состав папок — только membership, без
   контента; правка = явный запуск команды), `manage.py` (создание и настройка
   чатов, участники, инвайт-ссылки; гейт `TG_ALLOW_MANAGE=1`) и downloads-модуль
-  (скачивание медиа на диск; гейт `TG_ALLOW_DOWNLOADS=1`).
+  (скачивание медиа на диск — гейт `TG_ALLOW_DOWNLOADS=1`; пересылка медиа в
+  явно указанный чат — гейт `TG_ALLOW_FORWARDS=1`).
   MCP-инструменты управления чатами (`tg_manage_*`) регистрируются только при
   `TG_ALLOW_MANAGE=1` и требуют `confirm=True` для каждой операции;
-  `tg_downloads_*` — при `TG_ALLOW_DOWNLOADS=1`, запуск задания — `confirm=True`.
+  `tg_downloads_run/status/collections` — при `TG_ALLOW_DOWNLOADS=1`,
+  `tg_downloads_forward` — при `TG_ALLOW_FORWARDS=1`; запуск задания и
+  пересылка требуют `confirm=True`.
 - **Сообщения — источник истины, правки подхватываются.** Строка отражает
   последнее состояние текста (`edited_ts`); предыдущие версии правок не
   сохраняются. Удаление — флаг `deleted=1`: строка остаётся в базе, но
@@ -706,7 +731,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 1240 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс пятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1275 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс пятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -719,7 +744,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `tests_ui_projects.py` | `/api/projects` и курсор визита проекта в UI (запускается из `test_offline.py`) |
 | `tests_manage.py` | Офлайн-тесты manage.py: создание, настройки, темы, участники, MCP (запускается из `test_offline.py`) |
 | `tests_announce.py` | Офлайн-тесты announce.py: рендер баннера, сборка текста, post с отправкой на фейк-клиенте, readme из org.yaml, draft из CHANGELOG, гейт (запускается из `test_offline.py`) |
-| `tests_downloads.py` | Офлайн-тесты downloads-модуля: дедуп doc-id/sha256 + алиасы, resume, пауза/отмена, подборки, реестр и `TG_MODULES_OFF`, MCP-гейт `TG_ALLOW_DOWNLOADS`, фоновый загрузчик (запускается из `test_offline.py`) |
+| `tests_downloads.py` | Офлайн-тесты downloads-модуля: дедуп doc-id/sha256 + алиасы, forward-режим (дедуп по файлу и адресату, FloodWait-пауза, запрет пересылки), resume, пауза/отмена, подборки, реестр и `TG_MODULES_OFF`, MCP-гейты `TG_ALLOW_DOWNLOADS`/`TG_ALLOW_FORWARDS`, фоновый загрузчик (запускается из `test_offline.py`) |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -768,7 +793,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **1240 проверок: свои проверки плюс пятнадцать suites
+`python3 test_offline.py` — **1275 проверок: свои проверки плюс пятнадцать suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
@@ -820,10 +845,15 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
   зависают
 - **downloads-модуль**: дедуп по id файла Telegram до скачивания и по sha256
   после (повторная загрузка алиасится на файл), у файла все
-  сообщения-источники, контентно-адресное хранение; resume упавших пунктов
+  сообщения-источники, контентно-адресное хранение; forward-режим — пересылка
+  без скачивания: дедуп по `(id файла, адресат)`, длинный FloodWait уводит
+  задание в `pause`, короткий пережидается, запрет пересылки — skip;
+  resume упавших пунктов
   (`--retry --force`), пауза/отмена задания, подборки каналов, реестр модулей
-  и `TG_MODULES_OFF`, миграция v6→v7; MCP-гейт `TG_ALLOW_DOWNLOADS=1`
-  (16+3 инструмента, confirm), фоновый загрузчик без кредов помечает задание
+  и `TG_MODULES_OFF`, миграции v6→v8 и v7→v8 (таблицы пересылок довариваются
+  в существующую базу); MCP-гейты `TG_ALLOW_DOWNLOADS=1` (16+3) и
+  `TG_ALLOW_FORWARDS=1` (16+3), оба — 16+4; запуск и пересылка —
+  `confirm=True`; фоновый загрузчик без кредов помечает задание
   failed и не зависает
 - папки: `GetDialogFiltersRequest` на фейках → состав папок в индексе
 - топ по реакциям (`stats.top_reactions`)

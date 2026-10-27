@@ -23,6 +23,7 @@ import jobs  # noqa: E402
 import modules  # noqa: E402
 import modules.downloads as dl  # noqa: E402
 import sources  # noqa: E402
+from telethon.errors import ChatForwardsRestrictedError, FloodWaitError  # noqa: E402
 from workspace_api import dispatch  # noqa: E402
 
 HERE = Path(__file__).parent
@@ -82,12 +83,23 @@ class FakeMessage:
         self.message = None
 
 
+class FakeEntity:
+    def __init__(self, id: int):
+        self.id = id
+
+
 class FakeClient:
-    def __init__(self, messages: dict, content, fail_downloads: int = 0):
+    def __init__(self, messages: dict, content, fail_downloads: int = 0,
+                 restricted: frozenset = frozenset(), floods: list | None = None,
+                 entity_map: dict | None = None):
         self.messages = messages
         self.content = content
         self.download_calls = 0
+        self.forward_calls = []
         self._fail_left = fail_downloads
+        self._restricted = set(restricted)
+        self._floods = list(floods or [])
+        self._entity_map = dict(entity_map or {})
 
     async def get_messages(self, chat_id, ids=None):
         return [self.messages.get(chat_id, {}).get(i) for i in (ids or [])]
@@ -99,6 +111,23 @@ class FakeClient:
             raise RuntimeError("скачивание сорвалось")
         Path(file).write_bytes(self.content(msg))
         return file
+
+    async def get_entity(self, peer):
+        if isinstance(peer, str) and peer.lower() in ("me", "saved", "self"):
+            return FakeEntity(777)
+        if peer in self._entity_map:
+            return self._entity_map[peer]
+        if isinstance(peer, int):
+            return FakeEntity(peer)
+        raise ValueError(f"Could not find the input entity for {peer!r}")
+
+    async def forward_messages(self, target, msg_id, from_peer=None):
+        if self._floods:
+            raise self._floods.pop(0)
+        if from_peer in self._restricted:
+            raise ChatForwardsRestrictedError(None)
+        self.forward_calls.append((target, msg_id, from_peer))
+        return FakeMessage(5000 + len(self.forward_calls), None)
 
     async def connect(self):
         pass
@@ -485,6 +514,194 @@ def test_skip_reasons() -> None:
           str(rep["counts"]))
 
 
+def test_forward_run() -> None:
+    print("=== forward: пересылка без скачивания ===")
+    db_path = TMP / "fwd_run.sqlite"
+    _seed(db_path)
+    now = int(time.time())
+    with DB(db_path) as db:
+        _seed_messages(db, [
+            (-100111, 1, "document", 0, now),
+            (-100111, 2, "photo", 0, now),
+        ])
+    messages = {
+        -100111: {
+            1: FakeMessage(1, FakeMediaDocument(FakeDocument(501))),
+            2: FakeMessage(2, FakeMediaPhoto(FakePhoto(502))),
+        },
+    }
+    content = _doc_content({501: b"F1", 502: b"F2"})
+    root = TMP / "fwd_run_root"
+    with DB(db_path) as db:
+        res = dl.plan_job(db, "watch", kinds="video,photo", mode="forward", to="saved")
+        check(res["items"] == 2 and res["params"]["mode"] == "forward"
+              and res["params"]["to"] == "saved",
+              "forward: план с mode/to", str(res["params"]))
+        try:
+            dl.plan_job(db, "watch", mode="forward")
+            check(False, "forward: без to план отклонён", "не упал")
+        except ValueError:
+            check(True, "forward: без to план отклонён")
+    client = FakeClient(messages, content)
+    rep = asyncio.run(dl.run_async(str(db_path), job_id=res["job_id"], root=root,
+                                   client=client))
+    check(rep["mode"] == "forward" and rep["counts"] == {"total": 2, "done": 2},
+          "forward: оба пункта пересланы", str(rep["counts"]))
+    check(client.download_calls == 0, "forward: скачивания нет — байты не идут")
+    check(len(client.forward_calls) == 2, "forward: по одной пересылке на сообщение",
+          str(len(client.forward_calls)))
+    check(not (root / "files").exists(), "forward: файловой библиотеки не появилось")
+    with DB(db_path) as db:
+        rows = dl.forwards(db)
+        check(len(rows) == 2 and all(r["target_chat_id"] == 777 for r in rows),
+              "forward: реестр пересылок с адресатом saved", str(rows)[:140])
+        check(all(r["sources"] == 1 for r in rows), "forward: у каждого по 1 источнику")
+        check(dl.plan_job(db, "watch", kinds="video,photo", mode="forward",
+                          to="saved")["items"] == 0,
+              "forward: повторный план исключает пересланные сообщения")
+
+
+def test_forward_dedup() -> None:
+    print("=== forward: дедуп по id файла и адресату ===")
+    db_path = TMP / "fwd_dedup.sqlite"
+    _seed(db_path)
+    now = int(time.time())
+    with DB(db_path) as db:
+        _seed_messages(db, [
+            (-100111, 1, "document", 0, now),
+            (-100111, 2, "document", 0, now),
+            (-100222, 8, "document", 0, now),
+        ])
+    messages = {
+        -100111: {
+            1: FakeMessage(1, FakeMediaDocument(FakeDocument(601))),
+            2: FakeMessage(2, FakeMediaDocument(FakeDocument(602))),
+        },
+        -100222: {
+            8: FakeMessage(8, FakeMediaDocument(FakeDocument(602))),
+        },
+    }
+    content = _doc_content({601: b"D1", 602: b"D2"})
+    root = TMP / "fwd_dedup_root"
+    client = FakeClient(messages, content)
+    rep = asyncio.run(dl.run_async(str(db_path), sources_spec="all", kinds="video",
+                                   mode="forward", to="saved", root=root,
+                                   client=client))
+    check(rep["counts"] == {"total": 3, "done": 2, "skipped": 1},
+          "forward: дубль по doc-id пропущен", str(rep["counts"]))
+    check(rep["skipped"] == {"duplicate": 1}, "forward: причина пропуска duplicate",
+          str(rep["skipped"]))
+    check(len(client.forward_calls) == 2, "forward: пересылок ровно 2")
+    with DB(db_path) as db:
+        rows = dl.forwards(db)
+        check(len(rows) == 2, "forward: в реестре 2 медиа", str(len(rows)))
+        dup = next(r for r in rows if r["doc_id"] == "doc:602")
+        check(dup["sources"] == 2, "forward: у дубля 2 источника-сообщения", str(dup))
+        jid = dl.plan_job(db, "all", kinds="video", mode="forward", to="saved",
+                          include_downloaded=True)["job_id"]
+    client2 = FakeClient(messages, content)
+    rep2 = asyncio.run(dl.run_async(str(db_path), job_id=jid, force=True, root=root,
+                                    client=client2))
+    check(rep2["counts"].get("skipped", 0) == 3 and len(client2.forward_calls) == 0,
+          "forward: повторный прогон того же адресата ничего не пересылает",
+          str(rep2["counts"]))
+    client3 = FakeClient(messages, content,
+                         entity_map={"@chan_b": FakeEntity(-100222)})
+    rep3 = asyncio.run(dl.run_async(str(db_path), sources_spec="all", kinds="video",
+                                    mode="forward", to="@chan_b",
+                                    include_downloaded=True, root=root,
+                                    client=client3))
+    check(rep3["counts"] == {"total": 3, "done": 2, "skipped": 1}
+          and len(client3.forward_calls) == 2,
+          "forward: другой адресат — свои пересылки (ключ doc_id+target)",
+          str(rep3["counts"]))
+    with DB(db_path) as db:
+        rows = dl.forwards(db)
+        check(len(rows) == 4 and {r["target_chat_id"] for r in rows} == {777, -100222},
+              "forward: реестр по обоим адресатам", str(len(rows)))
+
+
+def test_forward_skip() -> None:
+    print("=== forward: причины пропуска и ошибки адресата ===")
+    db_path = TMP / "fwd_skip.sqlite"
+    _seed(db_path)
+    now = int(time.time())
+    with DB(db_path) as db:
+        _seed_messages(db, [
+            (-100111, 1, "document", 0, now),
+            (-100111, 2, "document", 0, now),
+            (-100111, 3, "document", 0, now),
+            (-100222, 4, "document", 0, now),
+        ])
+    messages = {
+        -100111: {
+            1: FakeMessage(1, FakeMediaDocument(FakeDocument(701, size=3_000_000))),
+            2: FakeMessage(2, FakeMediaDocument(FakeDocument(
+                702, attributes=[DocumentAttributeAudio(voice=True)]))),
+            3: FakeMessage(3, FakeMediaDocument(FakeDocument(703))),
+        },
+        -100222: {
+            4: FakeMessage(4, FakeMediaDocument(FakeDocument(704))),
+        },
+    }
+    content = _doc_content({701: b"S1", 702: b"S2", 703: b"S3", 704: b"S4"})
+    client = FakeClient(messages, content, restricted={-100222})
+    rep = asyncio.run(dl.run_async(str(db_path), sources_spec="all", kinds="video",
+                                   max_mb=1, mode="forward", to="saved",
+                                   root=TMP / "fwd_skip_root", client=client))
+    check(rep["skipped"] == {"forwards-restricted": 1, "kind": 1, "too-big": 1},
+          "forward: запрет пересылки, kinds и лимит", str(rep["skipped"]))
+    check(rep["counts"]["done"] == 1 and len(client.forward_calls) == 1,
+          "forward: годное видео переслано", str(rep["counts"]))
+    with DB(db_path) as db:
+        jid = dl.plan_job(db, "watch", kinds="video", mode="forward", to="@nope",
+                          include_downloaded=True)["job_id"]
+    try:
+        asyncio.run(dl.run_async(str(db_path), job_id=jid, force=True,
+                                 root=TMP / "fwd_skip_root",
+                                 client=FakeClient(messages, content)))
+        check(False, "forward: неизвестный адресат валит задание", "не упал")
+    except ValueError:
+        check(True, "forward: неизвестный адресат валит задание")
+    with DB(db_path) as db:
+        job = jobs.job_get(db, jid)
+        check(job["state"] == "failed" and job.get("error"),
+              "forward: ошибка адресата записана в задание",
+              str(job.get("error"))[:80])
+
+
+def test_forward_flood() -> None:
+    print("=== forward: FloodWait — длинный паузит, короткий пережидается ===")
+    db_path = TMP / "fwd_flood.sqlite"
+    _seed(db_path)
+    now = int(time.time())
+    with DB(db_path) as db:
+        _seed_messages(db, [
+            (-100111, 1, "document", 0, now),
+            (-100111, 2, "document", 0, now),
+        ])
+    messages = {-100111: {i: FakeMessage(i, FakeMediaDocument(FakeDocument(800 + i)))
+                          for i in (1, 2)}}
+    content = _doc_content({801: b"W1", 802: b"W2"})
+    root = TMP / "fwd_flood_root"
+
+    flooded = FakeClient(messages, content, floods=[FloodWaitError(None, 3600)])
+    rep = asyncio.run(dl.run_async(str(db_path), sources_spec="watch", kinds="video",
+                                   mode="forward", to="saved", root=root,
+                                   client=flooded))
+    check(rep["counts"].get("planned", 0) == 2 and rep["counts"].get("done", 0) == 0,
+          "flood: длинный FloodWait оставляет пункты planned", str(rep["counts"]))
+    with DB(db_path) as db:
+        check(jobs.job_get(db, rep["job_id"])["state"] == "paused",
+              "flood: задание ушло в pause")
+    short = FakeClient(messages, content, floods=[FloodWaitError(None, 1)])
+    rep2 = asyncio.run(dl.run_async(str(db_path), job_id=rep["job_id"], force=True,
+                                    root=root, client=short))
+    check(rep2["counts"] == {"total": 2, "done": 2} and len(short.forward_calls) == 2,
+          "flood: короткий FloodWait пережидается, пункты доходят",
+          str(rep2["counts"]))
+
+
 def test_ws_routes() -> None:
     print("=== workspace API: маршруты модуля ===")
     db_path = TMP / "ws.sqlite"
@@ -543,10 +760,33 @@ def test_ws_routes() -> None:
         check(code == 404, "ws: повторное удаление 404", str(code))
         res, code = dispatch(db, "GET", "downloads/files", {})
         check(code == 200 and res["files"] == [], "ws: список файлов")
+        res, code = dispatch(db, "GET", "downloads/forwards", {})
+        check(code == 200 and res["forwards"] == [], "ws: список пересылок")
+        res, code = dispatch(db, "POST", "downloads/forward", {"sources": "watch"})
+        check(code == 400, "ws: forward без to -> 400", str(code))
+        res, code = dispatch(db, "POST", "downloads/forward",
+                             {"to": "saved", "kinds": "bogus"})
+        check(code == 400, "ws: forward с плохими kinds -> 400", str(code))
+        saved_runner = dl._runner
+        dl._runner = lambda j: {"ok": True, "pid": -1}
+        try:
+            res, code = dispatch(db, "POST", "downloads/forward",
+                                 {"sources": "watch", "to": "saved"})
+            check(code == 200 and res["ok"] is True and res["items"] == 1
+                  and res["pid"] == -1,
+                  "ws: forward создаёт задание и запускает исполнителя",
+                  str(res)[:120])
+            fwd_job = res["job_id"]
+            job = jobs.job_get(db, fwd_job)
+            check(job["params"]["mode"] == "forward"
+                  and job["params"]["to"] == "saved",
+                  "ws: параметры пересылки в задании", str(job["params"]))
+        finally:
+            dl._runner = saved_runner
 
 
 def test_migration() -> None:
-    print("=== миграция v6 -> v7: задания и таблицы модуля ===")
+    print("=== миграции v6/v7 -> v8: задания, таблицы модуля, пересылки ===")
     p = TMP / "v6.sqlite"
     raw = sqlite3.connect(str(p))
     raw.execute("PRAGMA user_version = 6")
@@ -556,13 +796,27 @@ def test_migration() -> None:
             "SELECT name FROM sqlite_master WHERE type='table'")}
         uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
     need = {"jobs", "job_items", "collections", "collection_chats",
-            "media_files", "media_doc_alias", "media_file_sources"}
-    check(need <= tables, "v6->v7: таблицы заданий и модуля созданы",
+            "media_files", "media_doc_alias", "media_file_sources",
+            "forward_files", "forward_sources"}
+    check(need <= tables, "v6->v8: таблицы заданий и модуля созданы",
           str(sorted(need - tables)))
-    check(uv == SCHEMA_VERSION == 7, "v6->v7: user_version поднят", str(uv))
+    check(uv == SCHEMA_VERSION == 8, "v6->v8: user_version поднят", str(uv))
     with DB(p) as db:
         uv2 = db.conn.execute("PRAGMA user_version").fetchone()[0]
-    check(uv2 == 7, "v7: повторное открытие без миграций", str(uv2))
+    check(uv2 == 8, "v8: повторное открытие без миграций", str(uv2))
+
+    p7 = TMP / "v7.sqlite"
+    raw = sqlite3.connect(str(p7))
+    raw.execute("PRAGMA user_version = 7")
+    raw.close()
+    with DB(p7) as db:
+        t7 = {r[0] for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        uv7 = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check({"forward_files", "forward_sources"} <= t7,
+          "v7->v8: таблицы пересылок добавлены в существующую базу",
+          str(sorted({"forward_files", "forward_sources"} - t7)))
+    check(uv7 == 8, "v7->v8: user_version поднят", str(uv7))
 
 
 def test_registry() -> None:
@@ -590,12 +844,12 @@ def test_registry() -> None:
         [sys.executable, "-c",
          "import modules\n"
          "assert set(modules.MODULES) == {'downloads'}\n"
-         "assert len(modules.mcp_specs()) == 3\n"
-         "assert len(modules.workspace_routes()) == 11\n"
+         "assert len(modules.mcp_specs()) == 4\n"
+         "assert len(modules.workspace_routes()) == 13\n"
          "print('OK')"],
         capture_output=True, text=True, env=base_env, cwd=str(HERE), timeout=60)
     check(res.returncode == 0 and "OK" in res.stdout,
-          "registry: по умолчанию модуль зарегистрирован (3 MCP, 11 маршрутов)",
+          "registry: по умолчанию модуль зарегистрирован (4 MCP, 13 маршрутов)",
           (res.stderr or res.stdout)[-200:])
 
     env = {**base_env, "TG_MODULES_OFF": "downloads"}
@@ -645,7 +899,8 @@ def _wait_for(proc, pred, timeout: float = 30.0):
 def _mcp_env(**extra: str) -> dict:
     env = {k: v for k, v in os.environ.items()
            if k not in ("TG_DB", "TG_ALLOW_MANAGE", "TG_ALLOW_LIVE", "TG_EXPOSE_SQL",
-                        "TG_STRICT_WATCH", "TG_ALLOW_DOWNLOADS", "TG_MODULES_OFF",
+                        "TG_STRICT_WATCH", "TG_ALLOW_DOWNLOADS", "TG_ALLOW_FORWARDS",
+                        "TG_MODULES_OFF",
                         "TELEGRAM_API_ID", "TELEGRAM_API_HASH",
                         "TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME")}
     env["TG_ENV_FILE"] = ""
@@ -688,7 +943,7 @@ def _stop(proc) -> None:
 
 
 def test_mcp_gate() -> None:
-    print("=== MCP: tg_downloads_* за TG_ALLOW_DOWNLOADS=1 ===")
+    print("=== MCP: tg_downloads_* за TG_ALLOW_DOWNLOADS / TG_ALLOW_FORWARDS ===")
     db_path = TMP / "mcp.sqlite"
     _seed(db_path)
     now = int(time.time())
@@ -746,6 +1001,47 @@ def test_mcp_gate() -> None:
     finally:
         _stop(proc3)
 
+    proc4 = _start(_mcp_env(TG_DB=str(db_path), TG_ALLOW_FORWARDS="1"))
+    try:
+        names4 = _init(proc4)
+        fwd_names = {"tg_downloads_forward", "tg_downloads_status",
+                     "tg_downloads_collections"}
+        check(fwd_names <= names4 and len(names4) == 19
+              and "tg_downloads_run" not in names4,
+              "MCP forwards: TG_ALLOW_FORWARDS=1 -> 16 + forward/status/collections",
+              str(sorted(n for n in names4 if n.startswith("tg_downloads_"))))
+        no_confirm = _call(proc4, "tg_downloads_forward",
+                           {"sources": "watch", "to": "saved"}, 9)
+        check(no_confirm.get("error") and "confirm" in no_confirm["error"],
+              "MCP forwards: confirm=False -> JSON-ошибка", str(no_confirm)[:90])
+        created = _call(proc4, "tg_downloads_forward",
+                        {"sources": "watch", "to": "saved", "confirm": True,
+                         "spawn": False}, 10)
+        check(created.get("job_id", 0) > 0
+              and created.get("params", {}).get("mode") == "forward"
+              and created.get("params", {}).get("to") == "saved",
+              "MCP forwards: задание пересылки создано", str(created)[:150])
+        st = _call(proc4, "tg_downloads_status", {"job_id": created["job_id"]}, 11)
+        check(st.get("job", {}).get("params", {}).get("to") == "saved",
+              "MCP forwards: статус видит параметры пересылки", str(st)[:150])
+        bad = _call(proc4, "tg_downloads_forward",
+                    {"sources": "watch", "to": "nope", "confirm": True,
+                     "spawn": False}, 12)
+        check(bad.get("error", "").startswith("downloads:"),
+              "MCP forwards: плохой адресат -> JSON-ошибка", str(bad)[:90])
+    finally:
+        _stop(proc4)
+
+    proc5 = _start(_mcp_env(TG_DB=str(db_path), TG_ALLOW_FORWARDS="1",
+                            TG_ALLOW_DOWNLOADS="1"))
+    try:
+        names5 = _init(proc5)
+        check(len(names5) == 20,
+              "MCP: оба гейта -> 16 базовых + 4 tg_downloads_* = 20",
+              str(len(names5)))
+    finally:
+        _stop(proc5)
+
 
 def test_runner_spawn() -> None:
     print("=== runner: фоновый загрузчик и отказ без кредов ===")
@@ -800,6 +1096,10 @@ def main() -> int:
     test_run_resume()
     test_pause_cancel()
     test_skip_reasons()
+    test_forward_run()
+    test_forward_dedup()
+    test_forward_skip()
+    test_forward_flood()
     test_ws_routes()
     test_migration()
     test_registry()

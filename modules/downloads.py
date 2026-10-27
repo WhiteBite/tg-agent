@@ -12,12 +12,20 @@
 прогон идемпотентен: прерванный запуск продолжается с места остановки,
 повторное задание по умолчанию не включает уже скачанные сообщения.
 
-Гейт: TG_ALLOW_DOWNLOADS=1 (MCP-инструменты); каталог — TG_DOWNLOADS_DIR;
-лимит размера — TG_DOWNLOADS_MAX_MB (0 — без лимита).
+Режим forward (mode="forward", to=<адресат>) вместо скачивания пересылает
+сообщения серверно: байты медиа через клиента не идут. Дедуп — только слой 1,
+по id файла и адресу (forward_files/forward_sources); контентный sha256-дедуп
+здесь невозможен. FloodWait до 120 с пережидается молча, дольше — задание
+уходит в pause. Каналы с запретом пересылки пропускаются (forwards-restricted).
+
+Гейт: TG_ALLOW_DOWNLOADS=1 (MCP-инструменты скачивания),
+TG_ALLOW_FORWARDS=1 (пересылка — операция записи в Telegram);
+каталог — TG_DOWNLOADS_DIR; лимит размера — TG_DOWNLOADS_MAX_MB (0 — без лимита).
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -26,6 +34,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+
+from telethon.errors import ChatForwardsRestrictedError, FloodWaitError
 
 from env import load_env  # noqa: E402
 
@@ -41,7 +51,10 @@ DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 ROOT = Path(os.environ.get("TG_DOWNLOADS_DIR") or HERE / "downloads")
 
 KNOWN_KINDS = ("video", "videonote", "photo")
+KNOWN_MODES = ("download", "forward")
 _KIND_MEDIA = {"video": "document", "videonote": "document", "photo": "photo"}
+_TARGET_ALIASES = ("saved", "me", "self")
+_FLOOD_INLINE_MAX = 120
 
 _MIME_EXT = {"video/mp4": ".mp4", "video/quicktime": ".mov",
              "video/x-matroska": ".mkv", "video/webm": ".webm",
@@ -74,6 +87,25 @@ CREATE TABLE IF NOT EXISTS media_file_sources (
     PRIMARY KEY (file_id, chat_id, msg_id)
 );
 CREATE INDEX IF NOT EXISTS ix_mfs_chat ON media_file_sources (chat_id, msg_id);
+
+CREATE TABLE IF NOT EXISTS forward_files (
+    doc_id         TEXT NOT NULL,
+    target_chat_id INTEGER NOT NULL,
+    target_msg_id  INTEGER NOT NULL,
+    kind           TEXT,
+    size           INTEGER,
+    created_ts     INTEGER,
+    PRIMARY KEY (doc_id, target_chat_id)
+);
+CREATE INDEX IF NOT EXISTS ix_forward_files_target ON forward_files (target_chat_id);
+
+CREATE TABLE IF NOT EXISTS forward_sources (
+    doc_id  TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    msg_id  INTEGER NOT NULL,
+    PRIMARY KEY (doc_id, chat_id, msg_id)
+);
+CREATE INDEX IF NOT EXISTS ix_fs_chat ON forward_sources (chat_id, msg_id);
 """
 
 
@@ -104,9 +136,15 @@ def _parse_kinds(kinds) -> tuple[str, ...]:
 
 def plan_job(db: DB, sources_spec: str = "watch", kinds: str = "video",
              days: int = 0, max_mb: Optional[int] = None,
-             include_downloaded: bool = False) -> dict:
+             include_downloaded: bool = False, mode: str = "download",
+             to: str = "") -> dict:
     """Создать задание: выбрать сообщения по источникам/kinds/окну и снять snapshot."""
     kind_list = _parse_kinds(kinds)
+    if mode not in KNOWN_MODES:
+        raise ValueError(f"неизвестный mode: {mode!r} (доступны: download, forward)")
+    to = (to or "").strip()
+    if mode == "forward":
+        _parse_to(to)
     chats = sources.resolve(db, sources_spec)
     chat_ids = [c["chat_id"] for c in chats]
     labels = sorted({_KIND_MEDIA[k] for k in kind_list})
@@ -120,12 +158,14 @@ def plan_job(db: DB, sources_spec: str = "watch", kinds: str = "video",
         sql += " AND m.ts >= ?"
         args.append(int(time.time()) - int(days) * 86400)
     if not include_downloaded:
-        sql += (" AND NOT EXISTS (SELECT 1 FROM media_file_sources s "
-                "WHERE s.chat_id=m.chat_id AND s.msg_id=m.msg_id)")
+        done_tbl = "forward_sources" if mode == "forward" else "media_file_sources"
+        sql += (f" AND NOT EXISTS (SELECT 1 FROM {done_tbl} s "
+                f"WHERE s.chat_id=m.chat_id AND s.msg_id=m.msg_id)")
     sql += " ORDER BY m.chat_id, m.msg_id"
     items = [dict(r) for r in db.conn.execute(sql, args)]
     params = {"sources": sources_spec, "kinds": list(kind_list), "days": int(days),
-              "max_mb": _max_mb(max_mb), "include_downloaded": bool(include_downloaded)}
+              "max_mb": _max_mb(max_mb), "include_downloaded": bool(include_downloaded),
+              "mode": mode, "to": to or None}
     job_id = jobs.create_job(db, "downloads", params, items)
     return {"job_id": job_id, "items": len(items), "chats": chats, "params": params}
 
@@ -133,7 +173,8 @@ def plan_job(db: DB, sources_spec: str = "watch", kinds: str = "video",
 async def run_async(db_path: str = DB_PATH, job_id: Optional[int] = None, *,
                     sources_spec: str = "watch", kinds: str = "video",
                     days: int = 0, max_mb: Optional[int] = None,
-                    include_downloaded: bool = False,
+                    include_downloaded: bool = False, mode: str = "download",
+                    to: str = "",
                     root: Optional[Path] = None, client=None,
                     force: bool = False, retry: bool = False) -> dict:
     """Исполнить задание: claim -> пункты по одному -> отчёт. Идемпотентно."""
@@ -143,7 +184,8 @@ async def run_async(db_path: str = DB_PATH, job_id: Optional[int] = None, *,
             if job_id is None:
                 job_id = plan_job(db, sources_spec, kinds=kinds, days=days,
                                   max_mb=max_mb,
-                                  include_downloaded=include_downloaded)["job_id"]
+                                  include_downloaded=include_downloaded,
+                                  mode=mode, to=to)["job_id"]
             else:
                 existing = jobs.job_get(db, job_id)
                 if existing is None or existing["kind"] != "downloads":
@@ -158,6 +200,7 @@ async def run_async(db_path: str = DB_PATH, job_id: Optional[int] = None, *,
             params = jobs.job_get(db, job_id)["params"]
             kind_set = set(_parse_kinds(params.get("kinds") or ("video",)))
             limit_mb = int(params.get("max_mb") or 0)
+            run_mode = params.get("mode") or "download"
             dst_root = Path(root) if root is not None else ROOT
             own = client is None
             if own:
@@ -165,12 +208,25 @@ async def run_async(db_path: str = DB_PATH, job_id: Optional[int] = None, *,
                 client = sync_mod.make_client()
                 await client.connect()
             try:
+                fwd = None
+                if run_mode == "forward":
+                    entity, target_id = await _resolve_target(
+                        client, params.get("to") or "")
+                    fwd = (entity, target_id)
                 while jobs.is_active(db, job_id):
                     item = jobs.item_next(db, job_id)
                     if item is None:
                         break
-                    await _process(db, client, job_id, item, kind_set,
-                                   limit_mb, dst_root)
+                    try:
+                        await _process(db, client, job_id, item, kind_set,
+                                       limit_mb, dst_root, fwd)
+                    except FloodWaitError as fw:
+                        seconds = int(getattr(fw, "seconds", 0) or 0)
+                        if seconds <= _FLOOD_INLINE_MAX:
+                            await asyncio.sleep(seconds)
+                            continue
+                        jobs.pause(db, job_id)
+                        break
             finally:
                 if own:
                     await client.disconnect()
@@ -178,11 +234,34 @@ async def run_async(db_path: str = DB_PATH, job_id: Optional[int] = None, *,
             rep = jobs.report(db, job_id)
             jobs.finish(db, job_id, "done" if state == "running" else state,
                         result=rep)
-            return {"job_id": job_id, **rep}
+            return {"job_id": job_id, "mode": run_mode, **rep}
         except BaseException as exc:
             if claimed:
                 jobs.finish(db, job_id, "failed", error=str(exc)[:500])
             raise
+
+
+def _parse_to(to: str):
+    peer = (to or "").strip()
+    if not peer:
+        raise ValueError("forward: не указан адресат (to: saved | @username | id)")
+    if peer.lower() in _TARGET_ALIASES:
+        return "me"
+    if peer.startswith("@"):
+        return peer
+    if peer.lstrip("-").isdigit():
+        return int(peer)
+    raise ValueError(
+        f"forward: непонятный адресат {to!r} (saved | @username | числовой id)")
+
+
+async def _resolve_target(client, to: str):
+    peer = _parse_to(to)
+    entity = await client.get_entity(peer)
+    target_id = getattr(entity, "id", None)
+    if target_id is None:
+        raise ValueError(f"forward: адресат без id: {to!r}")
+    return entity, int(target_id)
 
 
 def _file_info(msg) -> Optional[dict]:
@@ -215,7 +294,8 @@ def _file_info(msg) -> Optional[dict]:
 
 
 async def _process(db: DB, client, job_id: int, item: dict,
-                   kind_set: set, limit_mb: int, root: Path) -> None:
+                   kind_set: set, limit_mb: int, root: Path,
+                   fwd: Optional[tuple] = None) -> None:
     chat_id, msg_id = int(item["chat_id"]), int(item["msg_id"])
 
     def mark(state: str, detail: Optional[str] = None) -> None:
@@ -226,6 +306,8 @@ async def _process(db: DB, client, job_id: int, item: dict,
     except ValueError:
         mark("skipped", "chat-unavailable")
         return
+    except FloodWaitError:
+        raise
     except Exception as exc:
         mark("failed", str(exc)[:200])
         return
@@ -239,6 +321,9 @@ async def _process(db: DB, client, job_id: int, item: dict,
         return
     if limit_mb and (info["size"] or 0) > limit_mb * 1024 * 1024:
         mark("skipped", "too-big")
+        return
+    if fwd is not None:
+        await _process_forward(db, client, chat_id, msg_id, info, fwd, mark)
         return
     fid = _known_file(db, info["doc_id"])
     if fid is not None:
@@ -268,8 +353,35 @@ async def _process(db: DB, client, job_id: int, item: dict,
                            final.relative_to(root).as_posix())
         _add_source(db, fid, chat_id, msg_id)
         mark("done")
+    except FloodWaitError:
+        raise
     except Exception as exc:
         mark("failed", str(exc)[:200])
+
+
+async def _process_forward(db: DB, client, chat_id: int, msg_id: int,
+                           info: dict, fwd: tuple, mark) -> None:
+    entity, target_id = fwd
+    if _known_forward(db, info["doc_id"], target_id) is not None:
+        _add_forward_source(db, info["doc_id"], chat_id, msg_id)
+        mark("skipped", "duplicate")
+        return
+    try:
+        sent = await client.forward_messages(entity, msg_id, from_peer=chat_id)
+    except ChatForwardsRestrictedError:
+        mark("skipped", "forwards-restricted")
+        return
+    except FloodWaitError:
+        raise
+    except Exception as exc:
+        mark("failed", str(exc)[:200])
+        return
+    new_id = getattr(sent, "id", None)
+    if new_id is None and isinstance(sent, list) and sent:
+        new_id = getattr(sent[0], "id", None)
+    _insert_forward(db, info["doc_id"], target_id, int(new_id or 0), info)
+    _add_forward_source(db, info["doc_id"], chat_id, msg_id)
+    mark("done")
 
 
 def _known_file(db: DB, doc_id: str) -> Optional[int]:
@@ -310,6 +422,30 @@ def _insert_file(db: DB, sha: str, info: dict, rel_path: str) -> int:
     return int(cur.lastrowid)
 
 
+def _known_forward(db: DB, doc_id: str, target_chat_id: int) -> Optional[int]:
+    row = db.conn.execute(
+        "SELECT target_msg_id FROM forward_files "
+        "WHERE doc_id=? AND target_chat_id=?", (doc_id, target_chat_id)).fetchone()
+    return row["target_msg_id"] if row is not None else None
+
+
+def _insert_forward(db: DB, doc_id: str, target_chat_id: int, target_msg_id: int,
+                    info: dict) -> None:
+    db.conn.execute(
+        "INSERT OR IGNORE INTO forward_files(doc_id, target_chat_id, "
+        "target_msg_id, kind, size, created_ts) VALUES(?,?,?,?,?,?)",
+        (doc_id, target_chat_id, target_msg_id, info["kind"], info.get("size"),
+         int(time.time())))
+    db.conn.commit()
+
+
+def _add_forward_source(db: DB, doc_id: str, chat_id: int, msg_id: int) -> None:
+    db.conn.execute(
+        "INSERT OR IGNORE INTO forward_sources(doc_id, chat_id, msg_id) "
+        "VALUES(?,?,?)", (doc_id, chat_id, msg_id))
+    db.conn.commit()
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -335,7 +471,8 @@ def status(db: DB, job_id: int = 0) -> dict:
             return {"error": f"задание не найдено: {job_id}"}
         return {"job": job, "report": jobs.report(db, job_id)}
     return {"jobs": jobs.job_list(db, kind="downloads"),
-            "files": _files_summary(db)}
+            "files": _files_summary(db),
+            "forwards": _forwards_summary(db)}
 
 
 def _files_summary(db: DB) -> dict:
@@ -346,6 +483,14 @@ def _files_summary(db: DB) -> dict:
         "SELECT kind, COUNT(*) AS n, COALESCE(SUM(size),0) AS bytes "
         "FROM media_files GROUP BY kind ORDER BY n DESC")]
     return {"count": row["n"], "bytes": row["bytes"], "by_kind": by_kind}
+
+
+def _forwards_summary(db: DB) -> dict:
+    row = db.conn.execute("SELECT COUNT(*) AS n FROM forward_files").fetchone()
+    by_target = [dict(r) for r in db.conn.execute(
+        "SELECT target_chat_id, COUNT(*) AS n, COALESCE(SUM(size),0) AS bytes "
+        "FROM forward_files GROUP BY target_chat_id ORDER BY n DESC")]
+    return {"count": row["n"], "by_target": by_target}
 
 
 def files(db: DB, chat_id: Optional[int] = None, limit: int = 100) -> list[dict]:
@@ -359,6 +504,21 @@ def files(db: DB, chat_id: Optional[int] = None, limit: int = 100) -> list[dict]
                 "WHERE s.file_id=f.id AND s.chat_id=?)")
         args.append(chat_id)
     sql += " ORDER BY f.id DESC LIMIT ?"
+    args.append(min(int(limit), 500))
+    return [dict(r) for r in db.conn.execute(sql, args)]
+
+
+def forwards(db: DB, chat_id: Optional[int] = None, limit: int = 100) -> list[dict]:
+    sql = ("SELECT f.doc_id, f.target_chat_id, f.target_msg_id, f.kind, f.size, "
+           "f.created_ts, "
+           "(SELECT COUNT(*) FROM forward_sources s WHERE s.doc_id=f.doc_id) "
+           "AS sources FROM forward_files f")
+    args: list = []
+    if chat_id:
+        sql += (" WHERE EXISTS (SELECT 1 FROM forward_sources s "
+                "WHERE s.doc_id=f.doc_id AND s.chat_id=?)")
+        args.append(chat_id)
+    sql += " ORDER BY f.created_ts DESC, f.doc_id LIMIT ?"
     args.append(min(int(limit), 500))
     return [dict(r) for r in db.conn.execute(sql, args)]
 
@@ -433,6 +593,26 @@ def ws_run(db, body) -> dict:
     return {"ok": True, "job_id": jid, "pid": res.get("pid")}
 
 
+def ws_forward(db, body) -> dict:
+    try:
+        res = plan_job(db,
+                       sources_spec=str(body.get("sources") or "watch"),
+                       kinds=str(body.get("kinds") or "video"),
+                       days=int(body.get("days") or 0),
+                       max_mb=_optional_int(body.get("max_mb")),
+                       include_downloaded=bool(body.get("include_downloaded")),
+                       mode="forward",
+                       to=str(body.get("to") or ""))
+    except (ValueError, TypeError) as exc:
+        raise WorkspaceError(str(exc)) from None
+    jid = res["job_id"]
+    run = _runner(jid)
+    if not run.get("ok"):
+        raise WorkspaceError(run.get("error") or "загрузчик не запущен", 500)
+    return {"ok": True, "job_id": jid, "items": res["items"],
+            "pid": run.get("pid")}
+
+
 def ws_job_pause(db, body) -> dict:
     return {"ok": jobs.pause(db, _int_or(body, "job_id"))}
 
@@ -448,6 +628,12 @@ def ws_job_cancel(db, body) -> dict:
 def ws_files(db, params) -> dict:
     chat = _int_or(params, "chat_id") or None
     return {"files": files(db, chat_id=chat, limit=_int_or(params, "limit") or 100)}
+
+
+def ws_forwards(db, params) -> dict:
+    chat = _int_or(params, "chat_id") or None
+    return {"forwards": forwards(db, chat_id=chat,
+                                 limit=_int_or(params, "limit") or 100)}
 
 
 def ws_collections(db, params) -> dict:
@@ -493,6 +679,26 @@ def mcp_run(sources: str = "watch", days: int = 0, kinds: str = "video",
         return _json({"error": f"downloads: {exc}"})
 
 
+def mcp_forward(sources: str = "watch", to: str = "", days: int = 0,
+                kinds: str = "video", confirm: bool = False,
+                spawn: bool = True) -> str:
+    if not confirm:
+        return _json({"error": "confirm=False: пересылка пишет сообщения в "
+                               "указанный чат Telegram, требуется явный "
+                               "confirm=True"})
+    try:
+        with DB(DB_PATH) as db:
+            res = plan_job(db, sources, kinds=kinds, days=days, mode="forward",
+                           to=to)
+        if spawn:
+            res["runner"] = _runner(res["job_id"])
+        res["note"] = ("задание создано; прогресс — tg_downloads_status; "
+                       "исполнитель — фоновый процесс downloads.py run --job N")
+        return _json(res)
+    except Exception as exc:
+        return _json({"error": f"downloads: {exc}"})
+
+
 def mcp_status(job_id: int = 0) -> str:
     with DB(DB_PATH) as db:
         return _json(status(db, job_id))
@@ -505,15 +711,17 @@ def mcp_collections() -> str:
 
 MODULE = {
     "id": "downloads",
-    "version": 1,
+    "version": 2,
     "schema": ensure_schema,
     "workspace": {
         ("GET", "downloads/jobs"): ws_jobs,
         ("GET", "downloads/job"): ws_job,
         ("GET", "downloads/files"): ws_files,
+        ("GET", "downloads/forwards"): ws_forwards,
         ("GET", "downloads/collections"): ws_collections,
         ("POST", "downloads/job"): ws_job_create,
         ("POST", "downloads/run"): ws_run,
+        ("POST", "downloads/forward"): ws_forward,
         ("POST", "downloads/job/pause"): ws_job_pause,
         ("POST", "downloads/job/resume"): ws_job_resume,
         ("POST", "downloads/job/cancel"): ws_job_cancel,
@@ -523,6 +731,7 @@ MODULE = {
     "mcp": [
         {
             "name": "tg_downloads_run",
+            "gate": "downloads",
             "description": (
                 "Создать задание скачивания медиа из выбранных источников и "
                 "запустить фоновый загрузчик. sources через запятую: watch "
@@ -536,17 +745,35 @@ MODULE = {
             "fn": mcp_run,
         },
         {
-            "name": "tg_downloads_status",
+            "name": "tg_downloads_forward",
+            "gate": "forwards",
             "description": (
-                "Задания скачивания: список с прогрессом и сводка библиотеки "
-                "файлов (по kind, суммарный размер); с job_id — одно задание: "
-                "параметры, счётчики пунктов done/skipped/failed и причины "
-                "пропусков (duplicate, duplicate-content, too-big, missing, kind)."
+                "Создать задание пересылки медиа (без скачивания: байты через "
+                "клиента не идут) и запустить фоновый исполнитель. Аргументы "
+                "как у tg_downloads_run плюс to — адресат: saved (избранное), "
+                "@username или числовой id чата. Дедуп — по id файла Telegram: "
+                "тот же файл в любой позиции источников не пересылается "
+                "повторно; контентный дедуп (перезалитые копии) здесь "
+                "невозможен. Пишет сообщения в Telegram: требует "
+                "confirm=True и гейт TG_ALLOW_FORWARDS."
+            ),
+            "fn": mcp_forward,
+        },
+        {
+            "name": "tg_downloads_status",
+            "gate": "any",
+            "description": (
+                "Задания скачивания/пересылки: список с прогрессом и сводные "
+                "библиотек (файлы по kind с суммарным размером; пересылки по "
+                "адресатам); с job_id — одно задание: параметры, счётчики "
+                "пунктов done/skipped/failed и причины пропусков (duplicate, "
+                "duplicate-content, too-big, missing, kind, forwards-restricted)."
             ),
             "fn": mcp_status,
         },
         {
             "name": "tg_downloads_collections",
+            "gate": "any",
             "description": (
                 "Подборки каналов для повторяемых заданий скачивания: имя и "
                 "chat_id. Используются в sources как collection:<имя>; watch-лист "

@@ -1240,7 +1240,8 @@ def _wait_for(proc: subprocess.Popen, pred) -> dict:
 def _mcp_env(**extra: str) -> dict:
     env = {k: v for k, v in os.environ.items()
            if k not in ("TG_DB", "TG_ALLOW_MANAGE", "TG_ALLOW_LIVE", "TG_EXPOSE_SQL",
-                        "TG_STRICT_WATCH", "TG_ALLOW_DOWNLOADS", "TG_MODULES_OFF",
+                        "TG_STRICT_WATCH", "TG_ALLOW_DOWNLOADS", "TG_ALLOW_FORWARDS",
+                        "TG_MODULES_OFF",
                         "TELEGRAM_API_ID", "TELEGRAM_API_HASH",
                         "TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME")}
     env["TG_ENV_FILE"] = ""

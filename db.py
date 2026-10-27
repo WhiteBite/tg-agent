@@ -320,7 +320,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class DB:
@@ -374,6 +374,8 @@ class DB:
             self._migrate_invite_status()
         if version < 7:
             self._migrate_v7()
+        if version < 8:
+            self._migrate_v8()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -584,6 +586,10 @@ class DB:
 
     def _migrate_v7(self) -> None:
         # схемы функциональных модулей живут в самих модулях, выполняются отсюда
+        from modules import ensure_schema
+        ensure_schema(self.conn)
+
+    def _migrate_v8(self) -> None:
         from modules import ensure_schema
         ensure_schema(self.conn)
 

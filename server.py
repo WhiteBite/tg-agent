@@ -13,6 +13,8 @@ TG_ALLOW_MANAGE=1 — добавить управление чатами (manage
                     темы, участники, инвайт-ссылки; каждая операция требует confirm=True)
 TG_ALLOW_DOWNLOADS=1 — добавить инструменты скачивания медиа (downloads-модуль;
                     запуск задания требует confirm=True)
+TG_ALLOW_FORWARDS=1 — добавить пересылку медиа (downloads-модуль, mode=forward;
+                    пишет сообщения в указанный адресат, требует confirm=True)
 
 Запуск:   python3 server.py          (stdio, дёргает opencode)
 Проверка: python3 server.py --list
@@ -46,6 +48,7 @@ STRICT_WATCH = os.environ.get("TG_STRICT_WATCH", "").lower() in ("1", "true", "y
 ALLOW_LIVE = os.environ.get("TG_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
 ALLOW_MANAGE = os.environ.get("TG_ALLOW_MANAGE", "").lower() in ("1", "true", "yes")
 ALLOW_DOWNLOADS = os.environ.get("TG_ALLOW_DOWNLOADS", "").lower() in ("1", "true", "yes")
+ALLOW_FORWARDS = os.environ.get("TG_ALLOW_FORWARDS", "").lower() in ("1", "true", "yes")
 
 mcp = _Server(
     name="telegram",
@@ -854,11 +857,17 @@ if ALLOW_MANAGE:
             return _j({"error": f"manage: {e}"})
 
 
-if ALLOW_DOWNLOADS:
+if ALLOW_DOWNLOADS or ALLOW_FORWARDS:
     import modules as modules_reg
 
+    _gate_on = {
+        "downloads": ALLOW_DOWNLOADS,
+        "forwards": ALLOW_FORWARDS,
+        "any": ALLOW_DOWNLOADS or ALLOW_FORWARDS,
+    }
     for _spec in modules_reg.mcp_specs():
-        mcp.tool(name=_spec["name"], description=_spec["description"])(_spec["fn"])
+        if _gate_on.get(_spec.get("gate", "downloads")):
+            mcp.tool(name=_spec["name"], description=_spec["description"])(_spec["fn"])
 
 
 def _tool_list() -> list:
