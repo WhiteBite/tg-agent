@@ -751,16 +751,12 @@ def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int) -> N
             _apply_new(db, pack, w, op, run_id, now)
 
 
-def _autoclose_replied_questions(db: DB, pack: dict, w: dict, rows: list[dict],
+def _record_question_replies(db: DB, pack: dict, w: dict, rows: list[dict],
                                  run_id: int, now: int) -> None:
-    """Открытый вопрос скоупа закрывается ответом другого отправителя на его
-    evidence-сообщение; ответ ищется только в строках текущего батча."""
-    replies: dict[int, dict] = {}
+    replies: dict[int, list[dict]] = {}
     for r in rows:
-        if r["reply_to"]:
-            replies[r["reply_to"]] = {"msg_id": r["msg_id"],
-                                      "sender_id": r["sender_id"],
-                                      "text": r["text"] or ""}
+        if r["reply_to"] and r["sender_id"] is not None and r["text"]:
+            replies.setdefault(r["reply_to"], []).append(r)
     if not replies:
         return
     for q in db.conn.execute(
@@ -769,28 +765,25 @@ def _autoclose_replied_questions(db: DB, pack: dict, w: dict, rows: list[dict],
             "JOIN entity_events ev ON ev.entity_id=e.id AND ev.op='new' "
             "JOIN messages m ON m.chat_id=ev.chat_id AND m.msg_id=ev.msg_id "
             "JOIN entity_sources s ON s.entity_id=e.id AND s.chat_id=? AND s.topic_id=? "
-            "WHERE e.pack=? AND e.kind='question' AND e.closed_ts IS NULL",
-            (w["chat_id"], w["topic_id"], pack["id"])).fetchall():
-        reply = replies.get(q["qmsg"])
-        if reply is None or reply["sender_id"] == q["qsender"]:
-            continue
-        cur = db.conn.execute(
-            "UPDATE entities SET status='done', closed_ts=?, updated_ts=? "
-            "WHERE id=? AND closed_ts IS NULL", (now, now, q["id"]))
-        if cur.rowcount == 0:
-            continue
-        db.conn.execute(
-            "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, "
-            "to_val, chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (q["id"], run_id, now, "auto_close", "status", "open", "done",
-             w["chat_id"], reply["msg_id"], reply["text"][:80]))
+            "WHERE e.pack=? AND e.kind='question' AND e.closed_ts IS NULL "
+            "AND m.chat_id=? AND m.topic_id=? AND m.deleted=0",
+            (w["chat_id"], w["topic_id"], pack["id"], w["chat_id"], w["topic_id"])).fetchall():
+        for reply in replies.get(q["qmsg"], []):
+            if q["qsender"] is None or reply["sender_id"] == q["qsender"]:
+                continue
+            existing = db.conn.execute(
+                "SELECT 1 FROM entity_events WHERE entity_id=? AND op='reply_received' "
+                "AND chat_id=? AND msg_id=?", (q["id"], w["chat_id"], reply["msg_id"])).fetchone()
+            if existing:
+                continue
+            db.conn.execute(
+                "INSERT INTO entity_events(entity_id,run_id,ts,op,field,to_val,chat_id,msg_id,quote) "
+                "VALUES(?,?,?,'reply_received','response','requires_review',?,?,?)",
+                (q["id"], run_id, now, w["chat_id"], reply["msg_id"], reply["text"][:80]))
 
 
-def _autoconfirm_reacted_questions(db: DB, pack: dict, w: dict,
+def _record_question_reactions(db: DB, pack: dict, w: dict,
                                    run_id: int, now: int) -> None:
-    """Открытый вопрос скоупа закрывается, если на его evidence-сообщении
-    набралось min_count реакций из autoconfirm пакета; уже закрытый ответом
-    вопрос пропускается по guard'у closed_ts."""
     ac = pack.get("autoconfirm") or {}
     emojis = set(ac.get("emojis") or [])
     if not emojis:
@@ -802,8 +795,9 @@ def _autoconfirm_reacted_questions(db: DB, pack: dict, w: dict,
             "JOIN entity_events ev ON ev.entity_id=e.id AND ev.op='new' "
             "JOIN messages m ON m.chat_id=ev.chat_id AND m.msg_id=ev.msg_id "
             "JOIN entity_sources s ON s.entity_id=e.id AND s.chat_id=? AND s.topic_id=? "
-            "WHERE e.pack=? AND e.kind='question' AND e.closed_ts IS NULL",
-            (w["chat_id"], w["topic_id"], pack["id"])):
+            "WHERE e.pack=? AND e.kind='question' AND e.closed_ts IS NULL "
+            "AND m.chat_id=? AND m.topic_id=? AND m.deleted=0",
+            (w["chat_id"], w["topic_id"], pack["id"], w["chat_id"], w["topic_id"])):
         parts: list[str] = []
         total = 0
         for item in json.loads(q["reac"] or "[]"):
@@ -814,16 +808,15 @@ def _autoconfirm_reacted_questions(db: DB, pack: dict, w: dict,
                 total += count
         if total < min_count:
             continue
-        cur = db.conn.execute(
-            "UPDATE entities SET status='done', closed_ts=?, updated_ts=? "
-            "WHERE id=? AND closed_ts IS NULL", (now, now, q["id"]))
-        if cur.rowcount == 0:
+        quote = "реакции: " + " ".join(parts)
+        if db.conn.execute("SELECT 1 FROM entity_events WHERE entity_id=? AND op='reaction_received' "
+                           "AND chat_id=? AND msg_id=? AND quote=?",
+                           (q["id"], w["chat_id"], q["qmsg"], quote)).fetchone():
             continue
         db.conn.execute(
-            "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, "
-            "to_val, chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (q["id"], run_id, now, "auto_close", "status", "open", "done",
-             w["chat_id"], q["qmsg"], "реакции: " + " ".join(parts)))
+            "INSERT INTO entity_events(entity_id,run_id,ts,op,field,to_val,chat_id,msg_id,quote) "
+            "VALUES(?,?,?,'reaction_received','response','requires_review',?,?,?)",
+            (q["id"], run_id, now, w["chat_id"], q["qmsg"], quote))
 
 
 def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
@@ -958,8 +951,8 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
                          len(valid), rejected, overflow, status,
                          duration_ms, meta, rejects)
     _apply_ops(db, pack, w, valid, run_id)
-    _autoclose_replied_questions(db, pack, w, rows, run_id, now)
-    _autoconfirm_reacted_questions(db, pack, w, run_id, now)
+    _record_question_replies(db, pack, w, rows, run_id, now)
+    _record_question_reactions(db, pack, w, run_id, now)
     new_cursor = max(cursor or 0, upto_msg)
     if overflow:
         clamp = dropped_min - 1

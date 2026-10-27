@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import json
+import time
+
+from db import DB, clean_text
+from workspace_store import KINDS, STATUSES, WorkspaceError, metadata, revision
+
+
+def put_meta(db: DB, key: str, value) -> None:
+    db.conn.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, json.dumps(value, ensure_ascii=False)))
+
+
+def human_event(db: DB, entity_id: int, op: str, field: str, old, new, note: str = "") -> int:
+    return db.conn.execute(
+        "INSERT INTO entity_events(entity_id,ts,op,field,from_val,to_val,quote) VALUES(?,?,?,?,?,?,?)",
+        (entity_id, int(time.time()), op, field, None if old is None else str(old),
+         None if new is None else str(new), clean_text(note))).lastrowid
+
+
+def checked_entity(db: DB, body: dict) -> dict:
+    try:
+        entity_id, expected = int(body["id"]), int(body["expected_revision"])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise WorkspaceError("Нужны id и expected_revision") from exc
+    row = db.conn.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
+    if not row:
+        raise WorkspaceError("Запись не найдена", 404)
+    if revision(db, entity_id) != expected:
+        raise WorkspaceError("Запись изменилась. Перезагрузите карточку перед сохранением.", 409)
+    return dict(row)
+
+
+def entity_review(db: DB, body: dict) -> dict:
+    state = body.get("state")
+    if state not in ("approved", "rejected"):
+        raise WorkspaceError("Проверка: approved или rejected")
+    note = body.get("note") or ""
+    if not isinstance(note, str) or len(note) > 4000:
+        raise WorkspaceError("Комментарий должен быть текстом до 4000 символов")
+    with db.conn:
+        db.conn.execute("BEGIN IMMEDIATE")
+        e = checked_entity(db, body)
+        old = metadata(db, f"ws:review:{e['id']}", {})
+        if old.get("state") == state and old.get("note") == note and old.get("revision") == revision(db, e["id"]):
+            return {"ok": True, "id": e["id"], "revision": revision(db, e["id"]), "unchanged": True}
+        rev = human_event(db, e["id"], "human_review", "review_state", old.get("state", "pending"), state, note)
+        put_meta(db, f"ws:review:{e['id']}", {"state": state, "note": note, "revision": rev, "ts": int(time.time())})
+    return {"ok": True, "id": e["id"], "revision": rev,
+            "note": "Локальная проверка. Экспортёр пока не использует её как запрет отправки."}
+
+
+def entity_edit(db: DB, body: dict) -> dict:
+    fields = body.get("fields")
+    allowed = {"title", "body", "owner", "due_ts", "status", "kind"}
+    if not isinstance(fields, dict) or not fields or set(fields) - allowed:
+        raise WorkspaceError("Неизвестные или пустые поля исправления")
+    for key, value in fields.items():
+        if key in ("title", "body", "owner") and value is not None and not isinstance(value, str):
+            raise WorkspaceError("Название, описание и ответственный должны быть текстом")
+        if key == "title" and (not value or not value.strip() or len(value) > 500):
+            raise WorkspaceError("Нужно название до 500 символов")
+        if key == "status" and value not in STATUSES:
+            raise WorkspaceError("Неизвестный статус")
+        if key == "kind" and value not in KINDS:
+            raise WorkspaceError("Неизвестный тип записи")
+        if key == "due_ts" and value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise WorkspaceError("Срок должен быть unix-ts или null")
+    changes = []
+    with db.conn:
+        db.conn.execute("BEGIN IMMEDIATE")
+        e = checked_entity(db, body)
+        for key, value in fields.items():
+            if isinstance(value, str):
+                value = clean_text(value.strip())
+            if e[key] == value:
+                continue
+            changes.append((key, e[key], value))
+            db.conn.execute(f"UPDATE entities SET {key}=? WHERE id=?", (value, e["id"]))
+            human_event(db, e["id"], "human_edit", key, e[key], value)
+        if changes:
+            now = int(time.time())
+            if "status" in fields:
+                closed = e["closed_ts"] or now if fields["status"] == "done" else None
+                db.conn.execute("UPDATE entities SET closed_ts=? WHERE id=?", (closed, e["id"]))
+            db.conn.execute("UPDATE entities SET updated_ts=? WHERE id=?", (now, e["id"]))
+            put_meta(db, f"ws:review:{e['id']}", {"state": "pending", "revision": revision(db, e["id"])})
+    return {"ok": True, "id": e["id"], "revision": revision(db, e["id"]), "changed": [c[0] for c in changes]}
+
+
+def project_review(db: DB, body: dict) -> dict:
+    project = body.get("project")
+    try:
+        through = int(body["through_event_id"])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise WorkspaceError("Нужен курсор through_event_id") from exc
+    if not isinstance(project, str) or not project.strip() or through < 0:
+        raise WorkspaceError("Нужны проект и неотрицательный курсор")
+    with db.conn:
+        db.conn.execute("BEGIN IMMEDIATE")
+        maximum = db.conn.execute("SELECT COALESCE(MAX(ev.id),0) FROM entity_events ev JOIN entities e "
+                                  "ON e.id=ev.entity_id WHERE e.project=?", (project,)).fetchone()[0]
+        if through > maximum:
+            raise WorkspaceError("Курсор выше последнего события проекта")
+        old = int(db.get_meta(f"ws:project_review:{project}") or 0)
+        put_meta(db, f"ws:project_review:{project}", max(old, through))
+    return {"ok": True, "project": project, "reviewed_event_id": max(old, through)}
+
+
+def person(db: DB, body: dict) -> dict:
+    key = body.get("key")
+    if not isinstance(key, str) or not key.strip() or len(key) > 200:
+        raise WorkspaceError("Нужен ключ человека")
+    fields = {k: body.get(k, "") for k in ("display_name", "role", "crm_member_guid")}
+    if any(not isinstance(v, str) or len(v) > 500 for v in fields.values()):
+        raise WorkspaceError("Поля человека должны быть текстом до 500 символов")
+    ids = body.get("telegram_sender_ids", [])
+    if not isinstance(ids, list) or any(isinstance(i, bool) or not isinstance(i, int) for i in ids):
+        raise WorkspaceError("Telegram ID должны быть списком целых чисел")
+    with db.conn:
+        put_meta(db, f"ws:person:{key}", {**fields, "telegram_sender_ids": ids})
+    return {"ok": True, "key": key}
+
+
+def project_topics(db: DB, body: dict) -> dict:
+    project, topics = body.get("project"), body.get("topics")
+    if not isinstance(project, str) or not project.strip() or len(project) > 120:
+        raise WorkspaceError("Нужно название проекта до 120 символов")
+    if not isinstance(topics, list) or not topics or len(topics) > 500:
+        raise WorkspaceError("Выберите от 1 до 500 тем")
+    pairs = []
+    for topic in topics:
+        try:
+            cid, tid = int(topic["chat_id"]), int(topic["topic_id"]) or 1
+        except (KeyError, ValueError, TypeError) as exc:
+            raise WorkspaceError("Нужны chat_id и topic_id") from exc
+        if not db.conn.execute("SELECT 1 FROM topics WHERE chat_id=? AND topic_id=?", (cid, tid)).fetchone():
+            raise WorkspaceError("Одна из тем отсутствует в индексе")
+        pairs.append((cid, tid))
+    project = clean_text(project.strip())
+    with db.conn:
+        for cid, tid in set(pairs):
+            db.conn.execute("INSERT INTO watch(chat_id,topic_id,project,added_at) VALUES(?,?,?,?) "
+                            "ON CONFLICT(chat_id,topic_id) DO UPDATE SET project=excluded.project",
+                            (cid, tid, project, int(time.time())))
+            db.conn.execute("UPDATE entities SET project=? WHERE chat_id=? AND topic_id=? AND closed_ts IS NULL",
+                            (project, cid, tid))
+    return {"ok": True, "project": project, "topics": [{"chat_id": c, "topic_id": t} for c, t in pairs]}

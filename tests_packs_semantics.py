@@ -951,21 +951,21 @@ def test_autoclose_replied_questions(root: Path) -> None:
                     ]})
     with DB(db_path) as db:
         q1 = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
-        check(q1["status"] == "done" and q1["closed_ts"] is not None,
-              "auto_close: вопрос закрыт ответом другого отправителя",
+        check(q1["status"] == "open" and q1["closed_ts"] is None,
+              "reply: ответ требует проверки, вопрос остаётся открытым",
               f"{q1['status']}/{q1['closed_ts']}")
         ev = db.conn.execute(
-            "SELECT * FROM entity_events WHERE entity_id=1 AND op='auto_close'"
+            "SELECT * FROM entity_events WHERE entity_id=1 AND op='reply_received'"
         ).fetchone()
-        check(ev is not None and ev["field"] == "status" and ev["from_val"] == "open"
-              and ev["to_val"] == "done" and ev["chat_id"] == chat
+        check(ev is not None and ev["field"] == "response" and ev["from_val"] is None
+              and ev["to_val"] == "requires_review" and ev["chat_id"] == chat
               and ev["msg_id"] == 911 and ev["quote"] == "блоки привезут в среду",
               "auto_close: событие auto_close со статусом и evidence ответа",
               f"ev={dict(ev) if ev else None}")
         last = db.conn.execute(
             "SELECT op FROM entity_events WHERE entity_id=1 ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        check(last is not None and last["op"] == "auto_close",
+        check(last is not None and last["op"] == "reply_received",
               "auto_close: последнее событие вопроса — auto_close",
               str(last and last["op"]))
         q2 = db.conn.execute("SELECT * FROM entities WHERE id=2").fetchone()
@@ -981,7 +981,7 @@ def test_autoclose_replied_questions(root: Path) -> None:
               "auto_close: задача с ответом не тронута",
               f"{t1['status']}/{t1['closed_ts']}")
         n = db.conn.execute(
-            "SELECT COUNT(*) c FROM entity_events WHERE op='auto_close'"
+            "SELECT COUNT(*) c FROM entity_events WHERE op='reply_received'"
         ).fetchone()["c"]
         check(n == 1, "auto_close: ровно одно auto_close-событие", str(n))
 
@@ -993,8 +993,8 @@ def test_autoclose_replied_questions(root: Path) -> None:
         q1 = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
         n = db.conn.execute(
             "SELECT COUNT(*) c FROM entity_events WHERE entity_id=1 "
-            "AND op='auto_close'").fetchone()["c"]
-        check(q1["status"] == "done" and n == 1,
+             "AND op='reply_received'").fetchone()["c"]
+        check(q1["status"] == "open" and n == 1,
               "auto_close: повторный прогон не добавляет событий",
               f"status={q1['status']} events={n}")
 
@@ -1062,14 +1062,14 @@ def test_autoconfirm_reactions(root: Path) -> None:
                     ]})
     with DB(db_path) as db:
         q1 = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
-        check(q1["status"] == "done" and q1["closed_ts"] is not None,
-              "autoconfirm: 👍×2 закрывает вопрос",
+        check(q1["status"] == "open" and q1["closed_ts"] is None,
+              "reactions: 👍×2 не закрывает вопрос без проверки",
               f"{q1['status']}/{q1['closed_ts']}")
         ev = db.conn.execute(
-            "SELECT * FROM entity_events WHERE entity_id=1 AND op='auto_close'"
+            "SELECT * FROM entity_events WHERE entity_id=1 AND op='reaction_received'"
         ).fetchone()
-        check(ev is not None and ev["field"] == "status"
-              and ev["from_val"] == "open" and ev["to_val"] == "done"
+        check(ev is not None and ev["field"] == "response"
+              and ev["from_val"] is None and ev["to_val"] == "requires_review"
               and ev["chat_id"] == chat and ev["msg_id"] == 951
               and ev["quote"] == "реакции: 👍×2",
               "autoconfirm: событие auto_close с реакцией evidence вопроса",
@@ -1085,21 +1085,21 @@ def test_autoconfirm_reactions(root: Path) -> None:
         q4 = db.conn.execute("SELECT * FROM entities WHERE id=4").fetchone()
         n4 = db.conn.execute(
             "SELECT COUNT(*) c FROM entity_events WHERE entity_id=4 "
-            "AND op='auto_close'").fetchone()["c"]
-        check(q4["status"] == "done" and n4 == 1,
+            "AND op='reaction_received'").fetchone()["c"]
+        check(q4["status"] == "open" and n4 == 1,
               "autoconfirm: ответ+реакции — ровно одно auto_close-событие",
               f"status={q4['status']} events={n4}")
         q5 = db.conn.execute("SELECT * FROM entities WHERE id=5").fetchone()
         ev5 = db.conn.execute(
             "SELECT quote FROM entity_events WHERE entity_id=5 "
-            "AND op='auto_close'").fetchone()
-        check(q5["status"] == "done" and ev5 is not None
+             "AND op='reaction_received'").fetchone()
+        check(q5["status"] == "open" and ev5 is not None
               and ev5["quote"].startswith("реакции:")
               and "👍" in ev5["quote"] and "✅" in ev5["quote"],
               "autoconfirm: 👍×1+✅×1 в сумме дают min_count",
               f"status={q5['status']} quote={ev5 and ev5['quote']}")
         total = db.conn.execute(
-            "SELECT COUNT(*) c FROM entity_events WHERE op='auto_close'"
+            "SELECT COUNT(*) c FROM entity_events WHERE op='reaction_received'"
         ).fetchone()["c"]
         check(total == 3, "autoconfirm: всего ровно три auto_close-события",
               str(total))
@@ -1110,7 +1110,7 @@ def test_autoconfirm_reactions(root: Path) -> None:
                     provider=lambda prompt, pk: {"ops": []})
     with DB(db_path) as db:
         total = db.conn.execute(
-            "SELECT COUNT(*) c FROM entity_events WHERE op='auto_close'"
+            "SELECT COUNT(*) c FROM entity_events WHERE op='reaction_received'"
         ).fetchone()["c"]
         q2 = db.conn.execute("SELECT status FROM entities WHERE id=2").fetchone()
         check(total == 3 and q2["status"] == "open",

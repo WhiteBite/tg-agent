@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 from db import DB, clean_text
 from sanitize import sanitize_name
 from env import load_env
+import workspace_api
 
 load_env()
 
@@ -74,7 +75,7 @@ def build_state() -> dict:
         last: dict[int, tuple] = {}
         for r in db.conn.execute(
             "SELECT m.chat_id, m.text, m.sender_name, m.ts FROM messages m "
-            "JOIN (SELECT chat_id, MAX(msg_id) AS max_id FROM messages "
+            "JOIN (SELECT chat_id, MAX(msg_id) AS max_id FROM messages WHERE deleted=0 "
             "      GROUP BY chat_id) t ON t.chat_id = m.chat_id AND t.max_id = m.msg_id"
         ):
             last[r["chat_id"]] = (clean_text(r["text"]), sanitize_name(r["sender_name"]),
@@ -228,6 +229,20 @@ class Handler(BaseHTTPRequestHandler):
         if u.path in ("/", "/index.html"):
             html = (HERE / "ui.html").read_bytes()
             self._send(html, "text/html; charset=utf-8")
+        elif u.path.startswith("/assets/"):
+            name = u.path.removeprefix("/assets/")
+            allowed = {"workspace.css", "workspace.js", "workspace_entities.js", "workspace_projects.js",
+                       "workspace_messages.js", "workspace_settings.js"}
+            if name not in allowed:
+                self._json({"error": "not found"}, 404)
+                return
+            mime = "text/css" if name.endswith(".css") else "text/javascript"
+            self._send((HERE / "ui_assets" / name).read_bytes(), mime + "; charset=utf-8")
+        elif u.path.startswith("/api/workspace/"):
+            with _db() as db:
+                result, code = workspace_api.dispatch(db, "GET", u.path.removeprefix("/api/workspace/"),
+                                                      {k: v[0] for k, v in q.items() if k != "token"})
+            self._json(result, code)
         elif u.path == "/api/state":
             self._json(build_state())
         elif u.path == "/api/messages":
@@ -240,7 +255,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = db.conn.execute(
                         """SELECT msg_id, topic_id, ts, date_iso, sender_name, is_service,
                                   text, media, reply_to FROM messages
-                           WHERE chat_id=? AND topic_id=? AND ts<=?
+                           WHERE chat_id=? AND topic_id=? AND ts<=? AND deleted=0
                            ORDER BY msg_id DESC LIMIT ?""",
                         (chat, 1 if topic in (0, 1) else topic, around, limit),
                     ).fetchall()
@@ -248,7 +263,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = db.conn.execute(
                         """SELECT msg_id, topic_id, ts, date_iso, sender_name, is_service,
                                   text, media, reply_to FROM messages
-                           WHERE chat_id=? AND topic_id=? AND (?=0 OR msg_id<?)
+                           WHERE chat_id=? AND topic_id=? AND (?=0 OR msg_id<?) AND deleted=0
                            ORDER BY msg_id DESC LIMIT ?""",
                         (chat, 1 if topic in (0, 1) else topic, before, before, limit),
                     ).fetchall()
@@ -280,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
             with _db() as db:
                 rows = db.conn.execute(
                     """SELECT chat_id, msg_id, topic_id, ts, sender_name, text, is_service
-                       FROM messages WHERE ts > ? ORDER BY msg_id LIMIT 300""", (since,)
+                       FROM messages WHERE ts > ? AND deleted=0 ORDER BY ts,msg_id LIMIT 300""", (since,)
                 ).fetchall()
             msgs = []
             for r in rows:
@@ -353,6 +368,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         b = self._body()
         try:
+            if u.path.startswith("/api/workspace/"):
+                with _db() as db:
+                    result, code = workspace_api.dispatch(db, "POST", u.path.removeprefix("/api/workspace/"), b)
+                self._json(result, code)
+                return
             if u.path == "/api/watch":
                 with _db() as db:
                     db.watch_add(int(b["chat_id"]), int(b["topic_id"]),

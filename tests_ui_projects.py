@@ -165,10 +165,10 @@ def test_projects_api() -> None:
                 check(e.code == 401, "auth: GET /api/projects без token -> 401",
                       str(e.code))
 
-            _, no_ct = _post_json(f"{base}/api/projects/visit",
+            no_ct_status, no_ct = _post_json(f"{base}/api/projects/visit",
                                   {"project": "x"}, token="t9",
                                   ctype="text/plain")
-            check(415, "csrf: POST без application/json -> 415",
+            check(no_ct_status == 415, "csrf: POST без application/json -> 415",
                   str(no_ct))
 
             # --- GET /api/projects ---
@@ -247,11 +247,11 @@ def test_projects_api() -> None:
 
             # --- HTML содержит контейнер панели ---
             html = urllib.request.urlopen(f"{base}/", timeout=2).read().decode()
-            check("api/projects" in html,
-                  "HTML: index.html содержит api/projects")
-            check("projpanel" in html or "project-panel" in html
-                  or "prj-" in html,
-                  "HTML: index.html содержит контейнер панели проектов")
+            check('/assets/workspace_projects.js' in html,
+                  "HTML: оболочка подключает модуль проектов")
+            project_asset = urllib.request.urlopen(f"{base}/assets/workspace_projects.js", timeout=2)
+            check(project_asset.status == 200 and "javascript" in project_asset.headers["Content-Type"],
+                  "HTML: модуль проектов доступен с правильным Content-Type")
 
         finally:
             proc.terminate()
