@@ -78,12 +78,61 @@
   function closeModal() {
     $("#setup-dialog").close();
   }
+  let guard = null;
+  const setupDialog = $("#setup-dialog");
+  function armGuard(form) {
+    const g = (guard = { dirty: false, warned: false, discard: null });
+    const mark = () => (g.dirty = true);
+    form.addEventListener("input", mark);
+    form.addEventListener("change", mark);
+    $("#discard-changes").onclick = () => {
+      $("#unsaved-guard").hidden = true;
+      const discard = guard?.discard;
+      guard = null;
+      discard?.();
+    };
+    $("#keep-editing").onclick = () => {
+      $("#unsaved-guard").hidden = true;
+      g.warned = false;
+    };
+  }
+  function warnUnsaved(discard) {
+    if (!guard || !guard.dirty || guard.warned) return false;
+    guard.warned = true;
+    guard.discard = discard;
+    $("#unsaved-guard").hidden = false;
+    return true;
+  }
+  function requestClose() {
+    if (warnUnsaved(closeModal)) return;
+    closeModal();
+  }
+  setupDialog.addEventListener("cancel", (e) => {
+    if (warnUnsaved(closeModal)) e.preventDefault();
+  });
+  setupDialog.addEventListener("click", (e) => {
+    if (e.target !== setupDialog) return;
+    const r = setupDialog.getBoundingClientRect();
+    if (
+      e.clientX >= r.left &&
+      e.clientX <= r.right &&
+      e.clientY >= r.top &&
+      e.clientY <= r.bottom
+    )
+      return;
+    if (warnUnsaved(closeModal)) return;
+    if (guard) setupDialog.close();
+  });
+  setupDialog.addEventListener("close", () => {
+    guard = null;
+  });
   async function setupProject(name = "") {
     const dialog = $("#setup-dialog");
+    guard = null;
     $("#setup-content").innerHTML =
       '<h2 id="setup-title">Темы проекта</h2><div class="loading">Читаем индекс…</div><button class="button" id="setup-cancel">Закрыть</button>';
     if (!dialog.open) dialog.showModal();
-    $("#setup-cancel").onclick = closeModal;
+    $("#setup-cancel").onclick = requestClose;
     try {
       const state = await W.api("/api/state");
       $("#setup-content").innerHTML =
@@ -100,8 +149,9 @@
             )
             .join("") ||
           '<p class="muted">Нет синхронизированных тем. Сначала добавьте чат в разделе «Переписка».</p>'
-        }</fieldset><div id="setup-error" role="status"></div><div class="modal-footer"><button class="button" type="button" id="setup-cancel">Отменить</button><button class="button primary" type="submit">Назначить выбранные темы</button></div></form>`;
-      $("#setup-cancel").onclick = closeModal;
+        }</fieldset><div id="setup-error" role="status"></div><div class="notice warning" id="unsaved-guard" role="status" hidden>Изменения не сохранены<div class="cluster"><button type="button" class="button danger" id="discard-changes">Всё равно закрыть</button><button type="button" class="button" id="keep-editing">Продолжить правку</button></div></div><div class="modal-footer"><button class="button" type="button" id="setup-cancel">Отменить</button><button class="button primary" type="submit">Назначить выбранные темы</button></div></form>`;
+      $("#setup-cancel").onclick = requestClose;
+      armGuard($("#project-form"));
       $("#project-name").focus();
       $("#project-form").onsubmit = async (e) => {
         e.preventDefault();
@@ -131,16 +181,17 @@
     } catch (e) {
       $("#setup-content").innerHTML =
         `<h2 id="setup-title">Проект недоступен</h2>${W.error(e)}<div class="modal-footer"><button class="button" id="setup-cancel">Закрыть</button></div>`;
-      $("#setup-cancel").onclick = closeModal;
+      $("#setup-cancel").onclick = requestClose;
     }
   }
   function editPerson(p) {
     const d = $("#setup-dialog");
     $("#setup-content").innerHTML =
-      `<h2 id="setup-title">${esc(p.owner)}</h2><form id="person-form" class="stack"><div class="field"><label for="person-name">Имя человека</label><input id="person-name" name="display_name" required value="${esc(p.display_name || p.owner)}"></div><div class="field"><label for="person-role">Роль в проекте</label><input id="person-role" name="role" value="${esc(p.role)}" placeholder="Например, прораб"></div><div class="field"><label for="person-ids">Telegram ID (через запятую)</label><input id="person-ids" name="ids" value="${esc((p.telegram_sender_ids || []).join(", "))}"></div><div class="field"><label for="person-crm">GUID участника в 101</label><input id="person-crm" name="crm_member_guid" value="${esc(p.crm_member_guid)}" placeholder="Необязательно"></div><p class="muted">Ручная справочная связь. Она не меняет исходного автора сообщений.</p><div id="person-error"></div><div class="modal-footer"><button class="button" type="button" id="cancel-person">Отменить</button><button class="button primary">Сохранить связь</button></div></form>`;
+      `<h2 id="setup-title">${esc(p.owner)}</h2><form id="person-form" class="stack"><div class="field"><label for="person-name">Имя человека</label><input id="person-name" name="display_name" required value="${esc(p.display_name || p.owner)}"></div><div class="field"><label for="person-role">Роль в проекте</label><input id="person-role" name="role" value="${esc(p.role)}" placeholder="Например, прораб"></div><div class="field"><label for="person-ids">Telegram ID (через запятую)</label><input id="person-ids" name="ids" value="${esc((p.telegram_sender_ids || []).join(", "))}"></div><div class="field"><label for="person-crm">GUID участника в 101</label><input id="person-crm" name="crm_member_guid" value="${esc(p.crm_member_guid)}" placeholder="Необязательно"></div><p class="muted">Ручная справочная связь. Она не меняет исходного автора сообщений.</p><div id="person-error"></div><div class="notice warning" id="unsaved-guard" role="status" hidden>Изменения не сохранены<div class="cluster"><button type="button" class="button danger" id="discard-changes">Всё равно закрыть</button><button type="button" class="button" id="keep-editing">Продолжить правку</button></div></div><div class="modal-footer"><button class="button" type="button" id="cancel-person">Отменить</button><button class="button primary">Сохранить связь</button></div></form>`;
     d.showModal();
+    armGuard($("#person-form"));
     $("#person-name").focus();
-    $("#cancel-person").onclick = closeModal;
+    $("#cancel-person").onclick = requestClose;
     $("#person-form").onsubmit = async (e) => {
       e.preventDefault();
       const f = Object.fromEntries(new FormData(e.currentTarget)),

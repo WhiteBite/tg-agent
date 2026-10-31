@@ -25,6 +25,7 @@ window.WS = (() => {
       '<circle cx="12" cy="12" r="9"/><path d="M9 8a3 3 0 0 1 6 0c0 2-3 2-3 5m0 3h.01"/>',
     messages:
       '<path d="M21 11a8 8 0 0 1-8 8H6l-4 3V11a8 8 0 0 1 8-8h3a8 8 0 0 1 8 8Z"/>',
+    downloads: '<path d="M12 3v11m-4-4 4 4 4-4M4 17v4h16v-4"/>',
     integrations: '<path d="M8 3v5m8-5v5M6 8h12v4a6 6 0 0 1-12 0zm6 10v4"/>',
     settings:
       '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--surface)"/><circle cx="15" cy="17" r="3" fill="var(--surface)"/>',
@@ -121,8 +122,8 @@ window.WS = (() => {
   };
   const badge = (value, text) =>
     `<span class="badge ${esc(value)}">${esc(text || statuses[value] || value)}</span>`;
-  const empty = (title, text, action = "") =>
-    `<div class="empty">${icon("tasks")}<h2>${esc(title)}</h2><p>${esc(text)}</p>${action}</div>`;
+  const empty = (title, text, action = "", iconName = "tasks") =>
+    `<div class="empty">${icon(iconName)}<h2>${esc(title)}</h2><p>${esc(text)}</p>${action}</div>`;
   const error = (e, retry = "") =>
     `<div class="notice danger error-box"><strong>Не удалось загрузить данные</strong><span>${esc(e.message || e)}</span>${retry ? `<button class="button" data-action="${esc(retry)}">Повторить</button>` : ""}</div>`;
   function toast(text) {
@@ -147,9 +148,13 @@ window.WS = (() => {
       "Переписка",
       "Источники и контекст. Отмечайте только нужные темы.",
     ],
+    downloads: [
+      "Загрузки",
+      "Скачивание и пересылка медиа из отмеченных источников.",
+    ],
     integrations: [
       "Интеграции",
-      "Подключение 101 ещё не подтверждает совместимость API.",
+      "Локальное состояние выгрузки и запросы-кандидаты.",
     ],
     settings: ["Настройки", "Проекты, люди, уведомления и внешний вид."],
     project: ["Проект", "Контроль проекта по переписке."],
@@ -162,13 +167,24 @@ window.WS = (() => {
     ["decisions", "Решения"],
     ["questions", "Вопросы"],
     ["messages", "Переписка"],
+    ["downloads", "Загрузки"],
     ["integrations", "Интеграции"],
     ["settings", "Настройки"],
   ];
   let route = { name: "attention", params: new URLSearchParams() };
   const screens = {};
   let serial = 0;
+  const scrollMemory = new Map();
+  let currentHash = location.hash;
+  function saveScroll() {
+    const main = $("#main");
+    if (!main) return;
+    scrollMemory.set(currentHash, main.scrollTop);
+    while (scrollMemory.size > 50)
+      scrollMemory.delete(scrollMemory.keys().next().value);
+  }
   function go(name, params = {}) {
+    saveScroll();
     location.hash = name + (query(params) ? "?" + query(params) : "");
   }
   function saved(key, fallback) {
@@ -193,8 +209,15 @@ window.WS = (() => {
           : "light"
         : value;
   }
+  function setMenu(on) {
+    $("#navigation").classList.toggle("visible", on);
+    $("#menu-toggle").setAttribute("aria-expanded", String(on));
+    $("#nav-scrim").hidden = !on;
+  }
   async function render() {
     const seq = ++serial;
+    saveScroll();
+    currentHash = location.hash;
     const [name, params = ""] = location.hash.slice(1).split("?");
     route = {
       name: headings[name] ? name : "attention",
@@ -216,8 +239,7 @@ window.WS = (() => {
           `<a class="nav-link" href="#${key}" ${key === route.name || (key === "projects" && route.name === "project") ? 'aria-current="page"' : ""}>${icon(key)}<span>${label}</span></a>`,
       )
       .join("");
-    $("#navigation").classList.remove("visible");
-    $("#menu-toggle").setAttribute("aria-expanded", "false");
+    setMenu(false);
     $("#view").innerHTML =
       '<div class="loading" role="status">Загружаем данные…</div>';
     const drawer = $("#entity-drawer");
@@ -226,6 +248,10 @@ window.WS = (() => {
       if (screens[route.name]) await screens[route.name](route.params, seq);
       else
         $("#view").innerHTML = empty("Раздел загружается", "Обновите страницу");
+      if (seq === serial) {
+        const y = scrollMemory.get(currentHash);
+        if (y) $("#main").scrollTop = y;
+      }
     } catch (e) {
       if (seq === serial) $("#view").innerHTML = error(e, "reload");
     }
@@ -234,16 +260,22 @@ window.WS = (() => {
     try {
       const h = await get("home");
       const f = h.freshness || {};
-      $("#freshness").innerHTML = [
+      const stale = (ts) => !ts || Date.now() / 1000 - ts > 7200;
+      const rows = [
         ["Сообщения", f.messages_ts],
         ["Извлечение", f.extraction_ts],
         ["Конвейер", f.pipeline_ok_ts],
-      ]
-        .map(
-          ([label, ts]) =>
-            `<span class="${!ts || Date.now() / 1000 - ts > 7200 ? "stale" : ""}">${label}: ${relative(ts)}</span>`,
-        )
-        .join("");
+      ];
+      $("#freshness").innerHTML =
+        rows
+          .map(
+            ([label, ts]) =>
+              `<span class="${stale(ts) ? "stale" : ""}">${label}: ${relative(ts)}</span>`,
+          )
+          .join("") +
+        (rows.some(([, ts]) => stale(ts))
+          ? '<button class="text-button" data-action="sync">Синхронизировать</button>'
+          : "");
       $("#footer-state").textContent = "Индекс подключён";
     } catch {
       $("#freshness").innerHTML =
@@ -251,28 +283,59 @@ window.WS = (() => {
       $("#footer-state").textContent = "Нет связи с индексом";
     }
   }
+  async function syncStale(button) {
+    button.disabled = true;
+    try {
+      await api("/api/sync", {});
+      toast("Синхронизация запущена");
+      go("messages");
+      pollSyncStatus();
+    } catch (e) {
+      toast(e.message);
+      button.disabled = false;
+    }
+  }
+  function pollSyncStatus() {
+    api("/api/sync_status")
+      .then((s) => {
+        if (s.running) setTimeout(pollSyncStatus, 1500);
+        else {
+          if (s.code)
+            toast(
+              "Синхронизация не завершена. Проверьте вход в Telegram через CLI.",
+            );
+          refreshHealth();
+        }
+      })
+      .catch(() => refreshHealth());
+  }
   document.addEventListener("click", (e) => {
     const b = e.target.closest("[data-action]");
     if (b?.dataset.action === "reload") render();
+    if (b?.dataset.action === "sync") syncStale(b);
   });
   window.addEventListener("hashchange", render);
   document.addEventListener("DOMContentLoaded", () => {
     applyTheme(saved("ws:theme", "light"));
+    matchMedia("(prefers-color-scheme: dark)").addEventListener(
+      "change",
+      () => {
+        if (saved("ws:theme", "light") === "system") applyTheme("system");
+      },
+    );
     $("#menu-toggle").innerHTML = icon("menu");
+    $("#nav-close").innerHTML = icon("close");
     $("#search-icon").innerHTML = icon("search");
-    $("#menu-toggle").onclick = () => {
-      const on = $("#navigation").classList.toggle("visible");
-      $("#menu-toggle").setAttribute("aria-expanded", String(on));
-    };
+    $("#menu-toggle").onclick = () =>
+      setMenu(!$("#navigation").classList.contains("visible"));
+    $("#nav-scrim").onclick = () => setMenu(false);
+    $("#nav-close").onclick = () => setMenu(false);
     $("#global-search").onsubmit = (e) => {
       e.preventDefault();
       go("search", { q: $("#global-query").value.trim() });
     };
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        $("#navigation").classList.remove("visible");
-        $("#menu-toggle").setAttribute("aria-expanded", "false");
-      }
+      if (e.key === "Escape") setMenu(false);
     });
     render();
     refreshHealth();

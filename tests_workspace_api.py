@@ -75,6 +75,18 @@ class WorkspaceHTTPTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read())
 
+    def request_api(self, path, body=None, token=True, ctype="application/json"):
+        url = f"http://127.0.0.1:{self.port}/api/{path}"
+        if token:
+            url += ("&" if "?" in path else "?") + "token=workspace-test"
+        data = json.dumps(body or {}).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": ctype})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
     def test_attention_has_real_counts(self):
         status, d = self.request("home")
         self.assertEqual(status, 200)
@@ -223,6 +235,16 @@ class WorkspaceHTTPTests(unittest.TestCase):
     def test_unknown_project_and_person_validation(self):
         self.assertEqual(self.request("project?project=Нет")[0], 404)
         self.assertEqual(self.request("people", {"key": "Иван", "telegram_sender_ids": ["wrong"]})[0], 400)
+
+    def test_sync_cancel_without_running_sync(self):
+        status, d = self.request_api("sync/cancel", {})
+        self.assertEqual(status, 409)
+        self.assertEqual(d["ok"], False)
+        self.assertTrue(isinstance(d["error"], str) and d["error"])
+
+    def test_sync_cancel_security_gates(self):
+        self.assertEqual(self.request_api("sync/cancel", token=False)[0], 401)
+        self.assertEqual(self.request_api("sync/cancel", {}, ctype="text/plain")[0], 415)
 
 
 if __name__ == "__main__":

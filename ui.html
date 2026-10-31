@@ -18,11 +18,17 @@
     <script defer src="/assets/workspace_projects.js"></script>
     <script defer src="/assets/workspace_messages.js"></script>
     <script defer src="/assets/workspace_settings.js"></script>
+    <script defer src="/assets/workspace_downloads.js"></script>
   </head>
   <body>
     <a class="skip" href="#main">К содержимому</a>
     <div class="app-shell">
       <aside class="sidenav" id="navigation" aria-label="Рабочее пространство">
+        <button
+          class="icon-button nav-close"
+          id="nav-close"
+          aria-label="Закрыть навигацию"
+        ></button>
         <a class="brand" href="#attention"
           ><span class="brand-mark">TG</span
           ><span>TG Agent<small>Контроль проектов</small></span></a
@@ -81,6 +87,7 @@
         </footer>
       </div>
     </div>
+    <div class="nav-scrim" id="nav-scrim" hidden></div>
     <div class="toast" id="toast" role="status" hidden></div>
     <dialog id="entity-drawer" class="drawer" aria-labelledby="drawer-title">
       <div id="drawer-content"></div>

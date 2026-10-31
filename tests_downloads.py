@@ -903,7 +903,8 @@ def _mcp_env(**extra: str) -> dict:
                         "TG_MODULES_OFF",
                         "TELEGRAM_API_ID", "TELEGRAM_API_HASH",
                         "TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME")}
-    env["TG_ENV_FILE"] = ""
+    # на Windows пустое значение env-переменной = её удаление, поэтому несуществующий путь
+    env["TG_ENV_FILE"] = str(TMP / "absent.env")
     env["TG_DOWNLOADS_DIR"] = str(TMP)
     env.update(extra)
     return env
@@ -1057,7 +1058,7 @@ def test_runner_spawn() -> None:
     saved = {k: os.environ.get(k) for k in keys}
     os.environ["TG_DB"] = str(db_path)
     os.environ["TG_DOWNLOADS_DIR"] = str(TMP)
-    os.environ["TG_ENV_FILE"] = ""
+    os.environ["TG_ENV_FILE"] = str(TMP / "absent.env")
     os.environ.pop("TG_MODULES_OFF", None)
     for k in keys[4:]:
         os.environ.pop(k, None)

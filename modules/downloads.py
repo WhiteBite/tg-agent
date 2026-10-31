@@ -548,7 +548,7 @@ def _int_or(data: dict, name: str) -> int:
 
 
 def _optional_int(value) -> Optional[int]:
-    if value in (None, "", 0, "0"):
+    if value in (None, ""):
         return None
     try:
         return int(value)

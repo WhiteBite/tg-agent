@@ -61,7 +61,7 @@ def _allowed_hosts() -> set[str]:
 
 ALLOWED_HOSTS = _allowed_hosts()
 
-_sync = {"running": False, "lines": [], "code": None}
+_sync = {"running": False, "lines": [], "code": None, "proc": None}
 _lock = threading.Lock()
 
 
@@ -112,12 +112,12 @@ def _spawn_sync(args: list[str]) -> None:
     with _lock:
         if _sync["running"]:
             return
-        _sync.update(running=True, lines=[], code=None)
-    env = dict(os.environ, TG_DB=DB_PATH)
-    proc = subprocess.Popen(
-        [sys.executable, str(HERE / "sync.py")] + args,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
-    )
+        env = dict(os.environ, TG_DB=DB_PATH)
+        proc = subprocess.Popen(
+            [sys.executable, str(HERE / "sync.py")] + args,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+        )
+        _sync.update(running=True, lines=[], code=None, proc=proc)
 
     def pump() -> None:
         for line in proc.stdout or []:
@@ -128,6 +128,7 @@ def _spawn_sync(args: list[str]) -> None:
         with _lock:
             _sync["running"] = False
             _sync["code"] = proc.returncode
+            _sync["proc"] = None
 
     threading.Thread(target=pump, daemon=True).start()
 
@@ -232,7 +233,7 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path.startswith("/assets/"):
             name = u.path.removeprefix("/assets/")
             allowed = {"workspace.css", "workspace.js", "workspace_entities.js", "workspace_projects.js",
-                       "workspace_messages.js", "workspace_settings.js"}
+                       "workspace_messages.js", "workspace_settings.js", "workspace_downloads.js"}
             if name not in allowed:
                 self._json({"error": "not found"}, 404)
                 return
@@ -413,6 +414,19 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/sync":
                 run_sync()
                 self._json({"ok": True, "started": True})
+            elif u.path == "/api/sync/cancel":
+                with _lock:
+                    proc = _sync["proc"]
+                if proc is None or proc.poll() is not None:
+                    self._json({"ok": False, "error": "синхронизация не запущена"}, 409)
+                    return
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                self._json({"ok": True})
             elif u.path == "/api/projects/visit":
                 proj = b.get("project")
                 if not proj or not isinstance(proj, str):

@@ -70,7 +70,8 @@ a fluid message panel, single pane on mobile. Drawer width min(520px,100vw).
 - Search view: separate entity/message results and pagination, context navigation.
 
 Primitives are shared CSS classes and JS renderers under ui_assets, not parallel
-framework components. SVG line icons use one 20x20 viewBox and 1.75 stroke.
+framework components. SVG line icons use one 24x24 viewBox and 1.75 stroke,
+rendered at 20px.
 
 ## 6. Motion and interaction
 120ms hover/press, 180ms drawer opacity/transform, no layout animation. Reduced motion

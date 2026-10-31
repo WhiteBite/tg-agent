@@ -315,9 +315,21 @@
     if (!node) return;
     try {
       const s = await api("/api/sync_status");
-      node.innerHTML = `<div class="notice ${s.code && !s.running ? "danger" : ""}">${esc(s.running ? "Синхронизация: " + (s.lines.at(-1) || "идёт загрузка") : s.code === 0 ? "Синхронизация завершена" : "Синхронизация не завершена. " + (s.lines.at(-1) || "Проверьте вход в Telegram через CLI."))}</div>`;
-      if (s.running) setTimeout(pollSync, 1500);
-      else W.refreshHealth();
+      node.innerHTML = `<div class="notice ${s.code && !s.running ? "danger" : ""}">${esc(s.running ? "Синхронизация: " + (s.lines.at(-1) || "идёт загрузка") : s.code === 0 ? "Синхронизация завершена" : "Синхронизация не завершена. " + (s.lines.at(-1) || "Проверьте вход в Telegram через CLI."))}${s.running ? ' <button class="button" id="sync-cancel">Отменить</button>' : ""}</div>`;
+      if (s.running) {
+        $("#sync-cancel").onclick = async () => {
+          $("#sync-cancel").disabled = true;
+          try {
+            await api("/api/sync/cancel", {});
+            W.toast("Синхронизация отменена");
+            pollSync();
+          } catch (e) {
+            node.innerHTML = W.error(e);
+            setTimeout(pollSync, 1500);
+          }
+        };
+        setTimeout(pollSync, 1500);
+      } else W.refreshHealth();
     } catch (e) {
       node.innerHTML = W.error(e);
     }

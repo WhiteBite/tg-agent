@@ -7,6 +7,7 @@
   --ink: #202d28;
   --muted: #58665e;
   --rule: #d9dfd6;
+  --edge: #7f8d82;
   --accent: #17654e;
   --accent-soft: #e1efe6;
   --on-accent: #fff;
@@ -42,6 +43,7 @@
   --ink: #ecf0eb;
   --muted: #aebbb2;
   --rule: #3e4c45;
+  --edge: #6b7a72;
   --accent: #83c9ac;
   --accent-soft: #293f34;
   --on-accent: #14251b;
@@ -80,6 +82,10 @@ textarea {
 button,
 a {
   touch-action: manipulation;
+}
+input[type="radio"],
+input[type="checkbox"] {
+  accent-color: var(--accent);
 }
 button {
   cursor: pointer;
@@ -209,8 +215,8 @@ small {
   margin-top: var(--s1);
 }
 .brand-mark {
-  height: 38px;
-  width: 38px;
+  height: 40px;
+  width: 40px;
   display: grid;
   place-items: center;
   background: var(--ink);
@@ -226,7 +232,7 @@ small {
 }
 #main-nav {
   display: grid;
-  gap: var(--s1);
+  gap: var(--s2);
 }
 .nav-link {
   display: flex;
@@ -300,7 +306,7 @@ small {
   max-width: 520px;
   width: 55%;
   padding: var(--s2) var(--s3);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--edge);
   border-radius: var(--r1);
   background: var(--surface);
 }
@@ -323,6 +329,10 @@ small {
   color: var(--accent);
   padding: var(--s1) var(--s2);
   font-size: var(--text-sm);
+}
+.text-button:hover {
+  color: var(--ink);
+  text-decoration: underline;
 }
 main {
   overflow-y: auto;
@@ -369,6 +379,8 @@ main {
   display: flex;
   gap: var(--s4);
   flex-wrap: wrap;
+  align-items: center;
+  min-height: 1.5em;
   color: var(--muted);
   font-size: var(--text-xs);
   margin-bottom: var(--s6);
@@ -398,7 +410,7 @@ main {
 }
 .button,
 .icon-button {
-  border: 1px solid var(--rule);
+  border: 1px solid var(--edge);
   background: var(--surface);
   border-radius: var(--r1);
   padding: var(--s2) var(--s3);
@@ -432,12 +444,14 @@ main {
   padding: var(--s2);
   width: 40px;
 }
-.mobile-menu {
+.mobile-menu,
+.nav-close {
   display: none;
 }
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--s2);
   margin-bottom: var(--s8);
   background: var(--surface);
   border: 1px solid var(--rule);
@@ -564,7 +578,7 @@ main {
 input,
 select,
 textarea {
-  border: 1px solid var(--rule);
+  border: 1px solid var(--edge);
   background: var(--surface);
   color: var(--ink);
   border-radius: var(--r1);
@@ -572,6 +586,9 @@ textarea {
   min-height: 40px;
   max-width: 100%;
   min-width: 0;
+}
+::placeholder {
+  color: var(--muted);
 }
 textarea {
   resize: vertical;
@@ -657,6 +674,10 @@ textarea {
   color: inherit;
   padding: 0;
   text-align: left;
+}
+.register th button:hover {
+  color: var(--accent);
+  text-decoration: underline;
 }
 .register td {
   padding: var(--s4);
@@ -770,6 +791,15 @@ dialog::backdrop {
   max-width: 100vw;
   border-left: 1px solid var(--rule);
   overflow: auto;
+}
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+.drawer[open] {
+  animation: drawer-in 0.18s ease;
 }
 .drawer-header {
   display: flex;
@@ -1086,6 +1116,18 @@ dialog::backdrop {
   .mobile-menu {
     display: inline-flex;
   }
+  .nav-close {
+    display: inline-flex;
+    position: absolute;
+    top: var(--s3);
+    right: var(--s3);
+  }
+  .nav-scrim {
+    position: fixed;
+    inset: 0;
+    background: var(--scrim);
+    z-index: 39;
+  }
   .breadcrumb {
     display: none;
   }
@@ -1173,6 +1215,29 @@ dialog::backdrop {
   .tab {
     min-height: 44px;
     font-size: 15px;
+  }
+  .icon-button {
+    width: 44px;
+  }
+  .topic-entry .icon-button {
+    width: 44px;
+    min-height: 44px;
+  }
+  input,
+  select,
+  textarea {
+    min-height: 44px;
+  }
+  .check-row {
+    min-height: 44px;
+    align-items: center;
+  }
+  textarea {
+    min-height: 100px;
+  }
+  .text-button {
+    min-height: 44px;
+    padding: var(--s2) var(--s3);
   }
   .global-search input {
     font-size: 15px;
@@ -1316,6 +1381,7 @@ dialog::backdrop {
   }
   .freshness {
     gap: var(--s2);
+    min-height: 3em;
   }
   .pagination {
     flex-wrap: wrap;
