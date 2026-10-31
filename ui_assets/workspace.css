@@ -801,6 +801,15 @@ dialog::backdrop {
 .drawer[open] {
   animation: drawer-in 0.18s ease;
 }
+@keyframes drawer-out {
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+.drawer.closing {
+  animation: drawer-out 0.18s ease;
+}
 .drawer-header {
   display: flex;
   gap: var(--s4);

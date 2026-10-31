@@ -29,7 +29,7 @@
               .slice(0, 8)
               .map(
                 (ev) =>
-                  `<article class="attention-row"><div class="row-body"><button class="row-title" data-entity="${ev.entity_id}">${esc(ev.title)}</button><div class="row-meta"><span>${esc(ev.project || "Без проекта")}</span><span>${esc(ev.field || "Запись")}: ${esc(ev.to_val || ev.op)}</span><span>${time(ev.ts)}</span></div></div></article>`,
+                  `<article class="attention-row"><div class="row-body"><button class="row-title" data-entity="${ev.entity_id}">${esc(ev.title)}</button><div class="row-meta"><span>${esc(ev.project || "Без проекта")}</span><span>${ev.field ? esc(W.fieldLabel(ev.field)) : "Запись"}: ${esc(W.valueLabel(ev.to_val || ev.op, ev.field))}</span><span>${time(ev.ts)}</span></div></div></article>`,
               )
               .join("")
           : W.empty(
@@ -133,7 +133,7 @@
     });
     const rows = d.items || [];
     $("#project-body").innerHTML =
-      `<div class="notice">Отметка просмотра изменений не помечает переписку прочитанной и не подтверждает правильность извлечения.</div><div class="section-heading section-gap"><h2>${d.total} событий после прошлой проверки</h2><button class="button primary" id="review-project" ${!rows.length ? "disabled" : ""}>Отметить показанное просмотренным</button></div><div class="panel">${rows.length ? rows.map((ev) => `<article class="attention-row"><div class="row-body"><button class="row-title" data-entity="${ev.entity_id}">${esc(ev.title)}</button><div class="row-meta"><span>${esc(ev.field || "Запись")}: ${esc(ev.from_val || "—")} → ${esc(ev.to_val || ev.op)}</span><span>${time(ev.ts)}</span></div></div></article>`).join("") : W.empty("Вы просмотрели изменения", "Новые события появятся после следующего извлечения.")}</div><div class="pagination"><span>${Math.min(Number(d.offset) + rows.length, d.total)} из ${d.total}</span><div class="cluster"><button class="button" id="changes-prev" ${!Number(d.offset) ? "disabled" : ""}>Назад</button><button class="button" id="changes-next" ${Number(d.offset) + rows.length >= d.total ? "disabled" : ""}>Далее</button></div></div>`;
+      `<div class="notice">Отметка просмотра изменений не помечает переписку прочитанной и не подтверждает правильность извлечения.</div><div class="section-heading section-gap"><h2>${d.total} событий после прошлой проверки</h2><button class="button primary" id="review-project" ${!rows.length ? "disabled" : ""}>Отметить показанное просмотренным</button></div><div class="panel">${rows.length ? rows.map((ev) => `<article class="attention-row"><div class="row-body"><button class="row-title" data-entity="${ev.entity_id}">${esc(ev.title)}</button><div class="row-meta"><span>${ev.field ? esc(W.fieldLabel(ev.field)) : "Запись"}: ${esc(W.valueLabel(ev.from_val || "—", ev.field))} → ${esc(W.valueLabel(ev.to_val || ev.op, ev.field))}</span><span>${time(ev.ts)}</span></div></div></article>`).join("") : W.empty("Вы просмотрели изменения", "Новые события появятся после следующего извлечения.")}</div><div class="pagination"><span>${Math.min(Number(d.offset) + rows.length, d.total)} из ${d.total}</span><div class="cluster"><button class="button" id="changes-prev" ${!Number(d.offset) ? "disabled" : ""}>Назад</button><button class="button" id="changes-next" ${Number(d.offset) + rows.length >= d.total ? "disabled" : ""}>Далее</button></div></div>`;
     $("#changes-prev").onclick = () =>
       W.go("project", {
         project: name,

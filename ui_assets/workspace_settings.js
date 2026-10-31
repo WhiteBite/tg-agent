@@ -81,7 +81,7 @@
   let guard = null;
   const setupDialog = $("#setup-dialog");
   function armGuard(form) {
-    const g = (guard = { dirty: false, warned: false, discard: null });
+    const g = (guard ||= { dirty: false, warned: false, discard: null });
     const mark = () => (g.dirty = true);
     form.addEventListener("input", mark);
     form.addEventListener("change", mark);
@@ -128,13 +128,14 @@
   });
   async function setupProject(name = "") {
     const dialog = $("#setup-dialog");
-    guard = null;
+    guard = { dirty: false, warned: false, discard: null };
     $("#setup-content").innerHTML =
       '<h2 id="setup-title">Темы проекта</h2><div class="loading">Читаем индекс…</div><button class="button" id="setup-cancel">Закрыть</button>';
     if (!dialog.open) dialog.showModal();
     $("#setup-cancel").onclick = requestClose;
     try {
       const state = await W.api("/api/state");
+      if (!dialog.open) return;
       $("#setup-content").innerHTML =
         `<h2 id="setup-title">${name ? "Изменить темы проекта" : "Подключить проект"}</h2><form id="project-form" class="stack"><div class="field"><label for="project-name">Название проекта</label><input id="project-name" name="project" required maxlength="120" value="${esc(name)}" placeholder="Например, Захарьевская"></div><div class="notice">Назначение темы другому проекту перенесёт её открытые сущности. Переписка и отметки прочтения сохранятся.</div><fieldset style="border:0;padding:0"><legend class="field-label">Выберите синхронизированные темы</legend>${
           state.chats
@@ -186,6 +187,7 @@
   }
   function editPerson(p) {
     const d = $("#setup-dialog");
+    guard = { dirty: false, warned: false, discard: null };
     $("#setup-content").innerHTML =
       `<h2 id="setup-title">${esc(p.owner)}</h2><form id="person-form" class="stack"><div class="field"><label for="person-name">Имя человека</label><input id="person-name" name="display_name" required value="${esc(p.display_name || p.owner)}"></div><div class="field"><label for="person-role">Роль в проекте</label><input id="person-role" name="role" value="${esc(p.role)}" placeholder="Например, прораб"></div><div class="field"><label for="person-ids">Telegram ID (через запятую)</label><input id="person-ids" name="ids" value="${esc((p.telegram_sender_ids || []).join(", "))}"></div><div class="field"><label for="person-crm">GUID участника в 101</label><input id="person-crm" name="crm_member_guid" value="${esc(p.crm_member_guid)}" placeholder="Необязательно"></div><p class="muted">Ручная справочная связь. Она не меняет исходного автора сообщений.</p><div id="person-error"></div><div class="notice warning" id="unsaved-guard" role="status" hidden>Изменения не сохранены<div class="cluster"><button type="button" class="button danger" id="discard-changes">Всё равно закрыть</button><button type="button" class="button" id="keep-editing">Продолжить правку</button></div></div><div class="modal-footer"><button class="button" type="button" id="cancel-person">Отменить</button><button class="button primary">Сохранить связь</button></div></form>`;
     d.showModal();
