@@ -1329,8 +1329,8 @@ def test_mcp_manage_tools(tmp: Path) -> None:
     proc3 = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_LIVE="1", TG_ALLOW_MANAGE="1"))
     try:
         names3 = _init(proc3)
-        check(len(names3) == 26,
-              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 26 инструмента",
+        check(len(names3) == 27,
+              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 27 инструмента",
               str(sorted(names3)))
     finally:
         _stop(proc3)

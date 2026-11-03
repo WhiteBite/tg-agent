@@ -114,6 +114,19 @@ CREATE TABLE IF NOT EXISTS invite_status (
     checked_ts     INTEGER NOT NULL
 );
 
+-- статус проверенных внешних ссылок (пишет checkmega.py; host — задел под другие хосты)
+CREATE TABLE IF NOT EXISTS link_status (
+    host       TEXT NOT NULL,          -- mega
+    value      TEXT NOT NULL,          -- хэндл ссылки без домена и ключа
+    kind       TEXT,                    -- file | folder
+    status     TEXT NOT NULL,          -- ok | dead | blocked | error
+    size       INTEGER,
+    nodes      INTEGER,
+    error      TEXT,
+    checked_ts INTEGER NOT NULL,
+    PRIMARY KEY (host, value)
+);
+
 -- папки Telegram (состав лежит прямо в объекте папки)
 CREATE TABLE IF NOT EXISTS folders (
     folder_id INTEGER PRIMARY KEY,
@@ -320,7 +333,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class DB:
@@ -376,6 +389,8 @@ class DB:
             self._migrate_v7()
         if version < 8:
             self._migrate_v8()
+        if version < 9:
+            self._migrate_v9()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -593,6 +608,17 @@ class DB:
         from modules import ensure_schema
         ensure_schema(self.conn)
 
+    def _migrate_v9(self) -> None:
+        try:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS link_status ("
+                "host TEXT NOT NULL, value TEXT NOT NULL, kind TEXT, "
+                "status TEXT NOT NULL, size INTEGER, nodes INTEGER, "
+                "error TEXT, checked_ts INTEGER NOT NULL, "
+                "PRIMARY KEY (host, value))")
+        except sqlite3.OperationalError:
+            pass
+
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
     def get_cursor(self, chat_id: int, topic_id: int = 0) -> int:
@@ -697,9 +723,19 @@ class DB:
             args.append(since_ts)
         sql += " GROUP BY r.kind, r.value ORDER BY n DESC"
         rows = [dict(r) for r in self.conn.execute(sql, args)]
+        mega_handles: dict[str, str] = {}
+        for r in rows:
+            if r["kind"] == "url":
+                ml = mega_link(r["value"])
+                if ml:
+                    mega_handles[r["value"]] = ml[1]
+        mega_cache = (self.link_status_map("mega", sorted(set(mega_handles.values())))
+                      if mega_handles else {})
         out: dict[str, list[dict]] = {}
         tally: dict[str, int] = {"ok": 0, "member": 0, "expired": 0,
                                  "invalid": 0, "error": 0, "unknown": 0}
+        mega_tally: dict[str, int] = {"ok": 0, "dead": 0, "blocked": 0,
+                                      "error": 0, "unknown": 0}
         for r in rows:
             if r["kind"] == "invite":
                 st = r.pop("invite_status") or "unknown"
@@ -712,12 +748,20 @@ class DB:
                 r.pop("invite_status", None)
                 r.pop("invite_title", None)
                 r.pop("invite_checked_ts", None)
+                if r["value"] in mega_handles:
+                    st = (mega_cache.get(mega_handles[r["value"]]) or {}).get("status", "unknown")
+                    r["mega_status"] = st
+                    if st in mega_tally:
+                        mega_tally[st] += 1
             out.setdefault(r["kind"], [])
             if len(out[r["kind"]]) < limit:
                 out[r["kind"]].append(r)
         if any(tally.values()):
             checked = {k: v for k, v in tally.items() if k != "unknown"}
             out["invite_status"] = {"unknown": tally["unknown"], "checked": checked}
+        if any(mega_tally.values()):
+            checked = {k: v for k, v in mega_tally.items() if k != "unknown"}
+            out["mega_status"] = {"unknown": mega_tally["unknown"], "checked": checked}
         return out
 
     def invite_refs(
@@ -774,6 +818,72 @@ class DB:
              None if is_channel is None else int(is_channel),
              None if request_needed is None else int(request_needed),
              error, checked_ts or int(time.time())),
+        )
+        self.conn.commit()
+
+    def mega_refs(
+        self,
+        limit: int = 50,
+        chat_id: Optional[int] = None,
+        chat_ids: Optional[list[int]] = None,
+        since_ts: Optional[int] = None,
+    ) -> list[dict]:
+        """Различные mega.nz/mega.co.nz-ссылки из refs, свежие первыми.
+
+        SQL LIKE отбирает кандидатов, финальный фильтр делает mega_link:
+        префикс-подобные домены (xmega.nz) отбрасываются.
+        """
+        sql = """
+            SELECT r.value, COUNT(*) n, MAX(m.ts) last_ts
+            FROM refs r LEFT JOIN messages m ON m.chat_id = r.chat_id AND m.msg_id = r.msg_id
+            WHERE r.kind = 'url'
+              AND (r.value LIKE '%mega.nz/%' OR r.value LIKE '%mega.co.nz/%')
+        """
+        args: list[Any] = []
+        if chat_id is not None:
+            sql += " AND r.chat_id = ?"
+            args.append(chat_id)
+        elif chat_ids:
+            sql += f" AND r.chat_id IN ({','.join('?' * len(chat_ids))})"
+            args.extend(chat_ids)
+        if since_ts:
+            sql += " AND m.ts >= ?"
+            args.append(since_ts)
+        sql += " GROUP BY r.value ORDER BY last_ts DESC"
+        out: list[dict] = []
+        for r in self.conn.execute(sql, args):
+            if len(out) >= int(limit):
+                break
+            if mega_link(r["value"]):
+                out.append(dict(r))
+        return out
+
+    def link_status_map(self, host: str, values: list[str]) -> dict[str, dict]:
+        """Кэш статусов ссылок одного хоста: value -> строка link_status."""
+        if not values:
+            return {}
+        marks = ",".join("?" * len(values))
+        rows = self.conn.execute(
+            f"SELECT * FROM link_status WHERE host = ? AND value IN ({marks})",
+            [host, *values])
+        return {r["value"]: dict(r) for r in rows}
+
+    def link_status_set(
+        self,
+        host: str,
+        value: str,
+        status: str,
+        kind: Optional[str] = None,
+        size: Optional[int] = None,
+        nodes: Optional[int] = None,
+        error: Optional[str] = None,
+        checked_ts: Optional[int] = None,
+    ) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO link_status(host, value, kind, status, size, nodes, "
+            "error, checked_ts) VALUES(?,?,?,?,?,?,?,?)",
+            (host, value, kind, status, size, nodes, error,
+             checked_ts or int(time.time())),
         )
         self.conn.commit()
 
@@ -1759,6 +1869,15 @@ _REF_TME_PUBLIC = re.compile(
 _REF_INVITE = re.compile(r"t\.me/(\+[\w-]+|joinchat/[\w-]+)")
 _REF_URL = re.compile(r"https?://[^\s<>\"']+")
 
+# новый /file|folder|embed/<h>#k и старый #!<h>!<k> / #F!<h>!<k>; парольные #P! не матчатся
+_MEGA_RE = re.compile(
+    r"https?://(?:[a-z0-9-]+\.)*(?:mega\.nz|mega\.co\.nz)/"
+    r"(?:(?:file|embed)/([\w-]+)"
+    r"|folder/([\w-]+)"
+    r"|#F!([\w-]+)!"
+    r"|#!([\w-]+)!)",
+    re.IGNORECASE)
+
 
 def extract_refs(text: Optional[str], fwd_channel_id: Optional[int] = None) -> list[tuple[str, str]]:
     """Вытаскивает из текста сообщения все ссылки: @юзернеймы, публичные t.me,
@@ -1776,6 +1895,22 @@ def extract_refs(text: Optional[str], fwd_channel_id: Optional[int] = None) -> l
     if fwd_channel_id:
         out.append(("forward", str(fwd_channel_id)))
     return out
+
+
+def mega_link(text: Optional[str]) -> Optional[tuple[str, str]]:
+    """(kind, handle) из ссылки mega.nz любого формата или текста вокруг неё;
+    None — мега-ссылки нет. Хэндл без домена и ключа. Домен требует точку
+    перед mega.nz — xmega.nz и прочие подделки не распознаются."""
+    if not text:
+        return None
+    m = _MEGA_RE.search(text)
+    if not m:
+        return None
+    groups = m.groups()
+    for kind, g in (("file", 0), ("folder", 1), ("folder", 2), ("file", 3)):
+        if groups[g]:
+            return (kind, groups[g])
+    return None
 
 
 # ------------------- безопасный SQL для агента -------------------

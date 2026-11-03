@@ -800,10 +800,10 @@ def test_migration() -> None:
             "forward_files", "forward_sources"}
     check(need <= tables, "v6->v8: таблицы заданий и модуля созданы",
           str(sorted(need - tables)))
-    check(uv == SCHEMA_VERSION == 8, "v6->v8: user_version поднят", str(uv))
+    check(uv == SCHEMA_VERSION == 9, "v6->v9: user_version поднят", str(uv))
     with DB(p) as db:
         uv2 = db.conn.execute("PRAGMA user_version").fetchone()[0]
-    check(uv2 == 8, "v8: повторное открытие без миграций", str(uv2))
+    check(uv2 == 9, "v9: повторное открытие без миграций", str(uv2))
 
     p7 = TMP / "v7.sqlite"
     raw = sqlite3.connect(str(p7))
@@ -816,7 +816,7 @@ def test_migration() -> None:
     check({"forward_files", "forward_sources"} <= t7,
           "v7->v8: таблицы пересылок добавлены в существующую базу",
           str(sorted({"forward_files", "forward_sources"} - t7)))
-    check(uv7 == 8, "v7->v8: user_version поднят", str(uv7))
+    check(uv7 == 9, "v7->v9: user_version поднят", str(uv7))
 
 
 def test_registry() -> None:

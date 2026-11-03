@@ -3576,6 +3576,169 @@ def test_checklinks(db_path: Path) -> None:
           f"table={'invite_status' in tabs} uv={uv}")
 
 
+class FakeMegaApi:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, url, payload):
+        self.calls.append((url, payload))
+        r = self.responses.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+def test_checkmega(db_path: Path) -> None:
+    print("=== checkmega: статус mega.nz-ссылок через публичный web-API ===")
+    import checkmega as cmg
+
+    check(cmg.mega_link("https://mega.nz/file/h7BlFbhR#key") == ("file", "h7BlFbhR")
+          and cmg.mega_link("https://mega.nz/folder/COQ2HLJA#k") == ("folder", "COQ2HLJA")
+          and cmg.mega_link("https://mega.nz/embed/emb123#k") == ("file", "emb123")
+          and cmg.mega_link("https://mega.nz/#!oldFILE!key") == ("file", "oldFILE")
+          and cmg.mega_link("https://mega.co.nz/#F!oldFOLD!key") == ("folder", "oldFOLD"),
+          "checkmega: хэндл из нового/старого формата, файл/папка/embed")
+    check(cmg.mega_link("качай https://mega.nz/file/h7BlFbhR#key скорее")
+          == ("file", "h7BlFbhR"),
+          "checkmega: ссылка выцепляется из произвольного текста")
+    check(cmg.mega_link("https://mega.nz/#P!AAA5TWTc") is None
+          and cmg.mega_link("https://xmega.nz/file/ABC#k") is None
+          and cmg.mega_link("https://mega.nz/folder/") is None
+          and cmg.mega_link("https://t.me/+AbCdEf") is None
+          and cmg.mega_link("не ссылка") is None and cmg.mega_link("") is None,
+          "checkmega: парольные, чужой домен, обрезанные и мусор не мега")
+
+    cm_db = db_path.parent / "checkmega.sqlite"
+    if cm_db.exists():
+        cm_db.unlink()
+    with DB(cm_db) as db:
+        db.upsert_chat(-100888, "Файлы", None, "supergroup", False, 100)
+        for msg_id, ts, text in (
+                (1, 1000, "https://mega.nz/file/live1#k"),
+                (2, 2000, "ещё https://mega.nz/file/live1#k"),
+                (3, 3000, "https://mega.nz/folder/lfold#k и "
+                          "https://xmega.nz/file/fake1 https://t.me/durov")):
+            db.insert_message({"chat_id": -100888, "msg_id": msg_id, "topic_id": 1,
+                               "ts": ts, "sender_id": 1, "sender_name": "A",
+                               "text": text, "is_out": 0, "is_service": 0})
+        db.insert_refs(-100888, 1, [("url", "https://mega.nz/file/live1#k")])
+        db.insert_refs(-100888, 2, [("url", "https://mega.nz/file/live1#k")])
+        db.insert_refs(-100888, 3, [("url", "https://mega.nz/folder/lfold#k"),
+                                     ("url", "https://xmega.nz/file/fake1"),
+                                     ("url", "https://t.me/durov")])
+        rows = db.mega_refs(limit=10)
+        check([r["value"] for r in rows] == ["https://mega.nz/folder/lfold#k",
+                                             "https://mega.nz/file/live1#k"]
+              and rows[1]["n"] == 2,
+              "checkmega: mega_refs — только мега (xmega.nz отброшен), дедуп, "
+              "свежесть по last_ts", str(rows))
+        rows_limited = db.mega_refs(limit=1, chat_id=-100888)
+        check(len(rows_limited) == 1
+              and rows_limited[0]["value"] == "https://mega.nz/folder/lfold#k",
+              "checkmega: limit режет после фильтра, chat_id работает",
+              str(rows_limited))
+
+    api = FakeMegaApi([
+        {"s": 774, "at": "x"},
+        -16,
+        [-9],
+        [{"pad": "***", "f": [{}, {}, {}]}],
+    ])
+    rep = cmg.check_megas(
+        ["https://mega.nz/file/live1#k", "https://mega.nz/file/dead1#k",
+         "https://mega.nz/file/gone1#k", "https://mega.nz/folder/lfold#k",
+         "https://mega.nz/file/live1#k", "мусор без ссылки"],
+        DB(cm_db), delay=0, transport=api)
+    by_h = {r["value"]: r for r in rep["results"]}
+    check(len(by_h) == 4 and len(api.calls) == 4 and rep["live_checks"] == 4,
+          "checkmega: дубли и мусор склеиваются, по одной живой проверке на ссылку",
+          str(len(api.calls)))
+    check(by_h["live1"]["status"] == "ok" and by_h["live1"]["size"] == 774
+          and by_h["live1"]["kind"] == "file",
+          "checkmega: живой файл -> ok с размером", str(by_h.get("live1")))
+    check(by_h["dead1"]["status"] == "blocked" and by_h["gone1"]["status"] == "dead",
+          "checkmega: -16 (голое) и -9 (в массиве) -> терминальные статусы",
+          str([by_h.get("dead1"), by_h.get("gone1")]))
+    check(by_h["lfold"]["status"] == "ok" and by_h["lfold"]["nodes"] == 3,
+          "checkmega: живая папка -> ok с числом объектов", str(by_h.get("lfold")))
+
+    rep2 = cmg.check_megas(["https://mega.nz/file/live1#k",
+                            "https://mega.nz/file/dead1#k"],
+                           DB(cm_db), delay=0, transport=FakeMegaApi([]))
+    check(all(r.get("from_cache") for r in rep2["results"])
+          and rep2["live_checks"] == 0,
+          "checkmega: свежие статусы из кэша, живых запросов нет",
+          str([r.get("from_cache") for r in rep2["results"]]))
+
+    check(cmg.check_one("file", "flaky1", attempts=3, retry_wait=0,
+                         transport=FakeMegaApi([[-3], {"s": 5}]))["status"] == "ok",
+          "checkmega: EAGAIN переживается повтором")
+    check(cmg.check_one("file", "stuck1", attempts=3, retry_wait=0,
+                        transport=FakeMegaApi([[-3], [-3], [-3]]))
+          == {"status": "error", "error": "api -3"},
+          "checkmega: EAGAIN трижды -> error api -3")
+    rep_err = cmg.check_megas(["https://mega.nz/file/err1#k"], DB(cm_db), delay=0,
+                              transport=FakeMegaApi([RuntimeError("boom")]))
+    check(rep_err["results"][0]["status"] == "error"
+          and "boom" in rep_err["results"][0]["error"],
+          "checkmega: сбой сети -> error, прогон не падает",
+          str(rep_err["results"][0]))
+
+    with DB(cm_db) as db:
+        old = int(time.time()) - 30 * 86400
+        db.link_status_set("mega", "live1", "ok", kind="file", size=774,
+                           checked_ts=old)
+    api2 = FakeMegaApi([{"s": 999}])
+    rep3 = cmg.check_megas(["https://mega.nz/file/live1#k",
+                            "https://mega.nz/file/dead1#k"],
+                           DB(cm_db), delay=0, transport=api2)
+    by3 = {r["value"]: r for r in rep3["results"]}
+    check(len(api2.calls) == 1 and by3["live1"]["from_cache"] is False
+          and by3["live1"]["size"] == 999
+          and by3["dead1"]["from_cache"] is True,
+          "checkmega: протухший ok перепроверяется, blocked не трогается",
+          str([r["value"] for r in rep3["results"]]))
+    rep3f = cmg.check_megas(["https://mega.nz/file/dead1#k"], DB(cm_db),
+                            force=True, delay=0, transport=FakeMegaApi([]))
+    check(rep3f["results"][0]["from_cache"] is True,
+          "checkmega: force не перепроверяет терминальные")
+
+    rep4 = cmg.check_megas(["https://mega.nz/file/a1#k", "https://mega.nz/file/a2#k",
+                            "https://mega.nz/folder/a3#k"],
+                           DB(cm_db), delay=0, live_cap=1,
+                           transport=FakeMegaApi([{"s": 1}]))
+    by4 = {r["value"]: r for r in rep4["results"]}
+    check(by4["a1"]["status"] == "ok" and by4["a2"]["status"] == "unchecked"
+          and rep4["skipped_cap"] == ["a2", "a3"],
+          "checkmega: live_cap ограничивает живые запросы, хвост в skipped_cap",
+          str(by4.get("a2")))
+
+    with DB(cm_db) as db:
+        summ = db.refs_summary(chat_id=-100888)
+        by_val = {r["value"]: r for r in summ["url"]}
+        check(by_val["https://mega.nz/file/live1#k"]["mega_status"] == "ok"
+              and by_val["https://mega.nz/folder/lfold#k"]["mega_status"] == "ok"
+              and "mega_status" not in by_val["https://t.me/durov"],
+              "checkmega: refs_summary джойнит статус меги",
+              str({k: v.get("mega_status") for k, v in by_val.items()}))
+        check(summ.get("mega_status") == {"unknown": 0, "checked": {"ok": 2, "dead": 0,
+                                                                    "blocked": 0, "error": 0}},
+              "checkmega: сводка mega_status в refs_summary",
+              str(summ.get("mega_status")))
+
+    with DB(cm_db) as db:
+        db.conn.execute("DROP TABLE link_status")
+        db.conn.execute("PRAGMA user_version = 8")
+    with DB(cm_db) as db:
+        tabs = {r[0] for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check("link_status" in tabs and uv == SCHEMA_VERSION,
+          "checkmega: миграция v8->v9 создаёт link_status",
+          f"table={'link_status' in tabs} uv={uv}")
+
+
 def test_services_pack(db_path: Path) -> None:
     print("=== services: пакет для сервисов, триалов и промо ===")
     sv_db = db_path.parent / "services_pack.sqlite"
@@ -5358,6 +5521,7 @@ def main() -> int:
     test_extract_all_indexed(db_path)
     test_search_global(db_path)
     test_checklinks(db_path)
+    test_checkmega(db_path)
     test_services_pack(db_path)
     test_pipeline(db_path)
     test_extract_until_done(db_path)

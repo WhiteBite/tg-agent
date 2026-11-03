@@ -152,7 +152,7 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_stats` | Активность: разбивка по темам, топ авторов, динамика по дням, медиа |
 | `tg_mark_read` | Отметить тему прочитанной (агент зовёт сам только после того, как показал разбор) |
 | `tg_index_stats` | Что лежит в индексе и за какой период |
-| `tg_links` | Что шерили: топ @упоминаний, t.me, инвайтов (с пометкой жива/истекла из кэша checklinks), URL и источников пересылок |
+| `tg_links` | Что шерили: топ @упоминаний, t.me, инвайтов (с пометкой жива/истекла из кэша checklinks), mega.nz (жива/удалена из кэша checkmega), URL и источников пересылок |
 | `tg_topics` | Структура индекса: чаты, а по chat_id — его темы со счётчиками |
 | `tg_digests` | Готовые выжимки новых сообщений (создаёт `digest.py`) |
 | `tg_entities` | Извлечённые сущности (задачи, решения, обещания, вопросы): project, kind, status, owner, due_ts; фильтры pack/kind/status/project/owner/chat_id и query — подстрока в title/body |
@@ -309,6 +309,34 @@ Telegram показывает превью ссылки до кнопки «Пр
 `tg_live_check_invites` — принимает ссылки списком или текстом сообщений,
 сначала кэш, живыми запросами добирает только протухшее (не больше 5 за
 вызов).
+
+## Проверка mega.nz-ссылок: жива или удалена
+
+```bash
+python3 checkmega.py --link "https://mega.nz/file/AbCd#key"   # конкретная ссылка
+python3 checkmega.py                                         # меги из watch-чатов
+python3 checkmega.py --newest 50                             # свежие из всего индекса
+python3 checkmega.py --chat -100123 --days 7                 # один чат, окно по времени
+```
+
+Обёртка над публичным web-API MEGA (`POST g.api.mega.co.nz/cs`: файлы — команда
+`g`, папки — `f`) — те же запросы, которыми браузер открывает ссылку. Без
+аккаунта, без скачивания, ключ из ссылки серверу не уходит; телеграм-сессия
+тоже не нужна — чистый HTTPS. Живая ссылка отдаёт размер файла или число
+объектов папки; несуществующая (-9) и снятая по жалобе (-16) фиксируются
+навсегда (хэндл не оживает), живая перепроверяется не чаще раза в `--max-age`
+дней. Кэш — в таблице `link_status` с колонкой `host`: следующий файловый
+хост встанет туда же без миграций. Между живыми запросами пауза `--delay`,
+EAGAIN/ERATELIMIT пережидаются повтором.
+
+Форматы: новый `/file/<h>#key` и `/folder/<h>#key` (плюс `/embed/`), старый
+`#!<h>!<key>` и `#F!<h>!<key>`, домены `mega.nz`/`mega.co.nz`; парольные `#P!`
+без пароля не проверяются.
+
+Агент проверяет сам: при `TG_ALLOW_LIVE=1` есть инструмент `tg_live_check_mega`
+— принимает ссылки списком или текстом сообщений, сначала кэш, живыми
+запросами добирает только протухшее (не больше 5 за вызов). Статусы видны
+офлайн: `tg_links` помечает меги жива/удалена и даёт сводку.
 
 ## Подключение к opencode
 
@@ -728,6 +756,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `sync.py` | Telethon → SQLite: инкрементальная синхронизация, бэкфилл чанками, папки, пины, подхват правок (`edited_ts`) |
 | `search.py` | Глобальный поиск Telegram: публичные каналы/группы/юзеры по ключевому слову |
 | `checklinks.py` | Статус инвайт-ссылок (checkChatInvite без вступления): CLI + кэш `invite_status`, терминальные expired/invalid, перепроверка живых не чаще раза в N дней, FloodWait-пacing |
+| `checkmega.py` | Статус mega.nz-ссылок (файл/папка через публичный web-API): CLI + кэш `link_status` (host-колонка под другие хосты), терминальные dead/blocked (-9/-16), перепроверка живых не чаще раза в N дней, без телеграм-сессии |
 | `folders.py` | Правка состава папок Telegram: add/remove чатов (пишущий модуль, контент не пишет) |
 | `manage.py` | Создание и управление чатами: группы, каналы, форумы, настройки, участники (гейт `TG_ALLOW_MANAGE=1`) |
 | `announce.py` | Релиз-посты: баннер PIL, шаблон YAML, readme тем из org.yaml, черновик из CHANGELOG; гейт `TG_ALLOW_MANAGE=1` |
@@ -759,7 +788,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 1275 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс пятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1294 офлайн-проверки (без аккаунта Telegram) — свои проверки плюс пятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -823,7 +852,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **1275 проверок: свои проверки плюс пятнадцать suites
+`python3 test_offline.py` — **1294 проверок: свои проверки плюс пятнадцать suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
@@ -954,6 +983,13 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
   перепроверяется, протухшее да, force не трогает терминальные, live_cap),
   invite_refs дедупит и сортирует по свежести, refs_summary джойнит статусы,
   миграция v5→v6; `tg_live_check_invites` без кредов — JSON-ошибка
+- `checkmega`: хэндл из нового/старого формата mega.nz (файл/папка/embed,
+  парольные и чужие домены отбрасываются), ответы web-API на фейк-транспорте
+  (живой файл с размером, живая папка с числом объектов, -16/-9 терминальные,
+  EAGAIN повтором и error после трёх, сетевой сбой без падения прогона),
+  кэш link_status (свежее из кэша, протухшее перепроверяется, force не трогает
+  терминальные, live_cap), mega_refs фильтрует xmega.nz, refs_summary джойнит
+  статусы и сводку mega_status, миграция v8→v9
 - пакет `services`: триал с due_text через dedup_hint-схему, другая
   формулировка с тем же hint — дубликат; stub создаёт service/trial/promo
 - семантика паков (`tests_packs_semantics.py`): детерминированный `due_text` →
