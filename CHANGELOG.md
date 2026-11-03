@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.15.0 — 2026-11-03
+Валидатор cloud.mail.ru, отправка для агента и дедуп перед публикацией:
+- `checkmail.py`: статус публичных облаков cloud.mail.ru через `GET cloud.mail.ru/api/v2/folder` — без аккаунта и скачивания. Живое облако отдаёт имя, размер и число объектов; `not_exists` — терминальный dead; 429/5xx пережидаются повтором. Кэш в `link_status` (host='mailru'), CLI зеркалит checkmega.
+- `db.py`: миграция v10 добавляет `link_status.title` (имя облака); `cloudmail_link` + реестр `_LINK_HOSTS` + `split_links`; `refs_summary` размечает статусы всех хостов реестра (сводки `mega_status`/`mailru_status`); `mega_refs`/`mailru_refs` через общий `_url_refs`.
+- `--exclude-chat` / `exclude_chat_id` в checklinks/checkmega/checkmail и MCP-инструментах: ссылки, уже встречавшиеся в чате, помечаются `status=duplicate` без живой проверки — дедуп перед публикацией «в мой канал».
+- `server.py`: `tg_live_check_mailru` и роутер `tg_live_check_links` (инвайты/меги/облака одним вызовом) за `TG_ALLOW_LIVE=1`; `tg_send_message(chat, text, confirm=True)` за `TG_ALLOW_SEND=1` — один текст в чат по id или @username.
+- `checklinks.py`: инвайты понимают алиас `telegram.me/+…`.
+- `notify.py`: SystemExit из make_client (нет кредов) возвращается структурной ошибкой, а не валит вызывающий код; CLI выходит кодом 1 при неудачной отправке; адресат `to` принимает числовой id.
+- Тесты: `test_checkmail`, exclude-проверки, notify `to=`, MCP-гейт `TG_ALLOW_SEND` (подсчёты: 17 с гейтом, 29 при LIVE+MANAGE), полный прогон 1294 → 1319 проверки.
+
 ## 0.14.0 — 2026-11-03
 Валидатор mega.nz-ссылок:
 - `checkmega.py`: статус mega.nz/mega.co.nz-ссылок (файл/папка, новый `/file/<h>#k` и старый `#!`/`#F!` форматы) через публичный web-API MEGA (`POST g.api.mega.co.nz/cs`: файлы — команда `g`, папки — `f` с `n=`) — без аккаунта, скачивания и телеграм-сессии, ключ из ссылки серверу не уходит. Живая отдаёт размер файла или число объектов папки; несуществующая (-9) и снятая по жалобе (-16) — терминальные, повторно не проверяются; живые перепроверяются не чаще раза в `--max-age` дней; пауза `--delay` между живыми запросами, EAGAIN/ERATELIMIT пережидаются повтором. CLI зеркалит checklinks: `--link/--newest/--watched/--chat/--days/--force`.

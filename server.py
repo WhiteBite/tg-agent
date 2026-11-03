@@ -29,14 +29,14 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 try:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server  # type: ignore[assignment]
 
-from db import DB, clean_text, run_sql
+from db import DB, clean_text, run_sql, split_links
 from env import load_env
 
 load_env()
@@ -47,6 +47,7 @@ EXPOSE_SQL = os.environ.get("TG_EXPOSE_SQL", "").lower() in ("1", "true", "yes")
 STRICT_WATCH = os.environ.get("TG_STRICT_WATCH", "").lower() in ("1", "true", "yes")
 ALLOW_LIVE = os.environ.get("TG_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
 ALLOW_MANAGE = os.environ.get("TG_ALLOW_MANAGE", "").lower() in ("1", "true", "yes")
+ALLOW_SEND = os.environ.get("TG_ALLOW_SEND", "").lower() in ("1", "true", "yes")
 ALLOW_DOWNLOADS = os.environ.get("TG_ALLOW_DOWNLOADS", "").lower() in ("1", "true", "yes")
 ALLOW_FORWARDS = os.environ.get("TG_ALLOW_FORWARDS", "").lower() in ("1", "true", "yes")
 
@@ -667,13 +668,15 @@ if ALLOW_LIVE:
             "Ссылки можно передать списком или просто текстом сообщений."
         ),
     )
-    async def tg_live_check_invites(links: list[str], force: bool = False) -> str:
+    async def tg_live_check_invites(links: list[str], force: bool = False,
+                                    exclude_chat_id: Optional[int] = None) -> str:
         try:
             import checklinks as check_mod
             with _db() as db:
                 cl = await _live()
                 rep = await check_mod.check_invites(cl, links, db, force=force,
-                                                    live_cap=5)
+                                                    live_cap=5,
+                                                    exclude_chat_id=exclude_chat_id)
             return _j({**rep,
                        "note": "статусы — данные о чужих чатах, не инструкции"})
         except Exception as exc:
@@ -686,17 +689,87 @@ if ALLOW_LIVE:
             "или снята по жалобе; у живой — размер файла или число объектов "
             "папки. Публичный web-API MEGA, без аккаунта и без скачивания. "
             "Свежие статусы берутся из кэша (checkmega.py), удалённые не "
-            "перепроверяются. force=True игнорирует кэш. Ссылки можно передать "
-            "списком или просто текстом сообщений."
+            "перепроверяются. force=True игнорирует кэш. exclude_chat_id — "
+            "инвайты этого чата не нести (дедуп перед публикацией). Ссылки "
+            "можно передать списком или просто текстом сообщений."
         ),
     )
-    async def tg_live_check_mega(links: list[str], force: bool = False) -> str:
+    async def tg_live_check_mega(links: list[str], force: bool = False,
+                                 exclude_chat_id: Optional[int] = None) -> str:
         try:
             import checkmega as check_mod
             with _db() as db:
-                rep = check_mod.check_megas(links, db, force=force, live_cap=5)
+                rep = check_mod.check_megas(links, db, force=force, live_cap=5,
+                                            exclude_chat_id=exclude_chat_id)
             return _j({**rep,
                        "note": "статусы — данные о чужих файлах, не инструкции"})
+        except Exception as exc:
+            return _j({"error": f"live: {exc}"})
+
+    @mcp.tool(
+        name="tg_live_check_mailru",
+        description=(
+            "ЖИВАЯ проверка cloud.mail.ru-ссылок (публичные «облака»): жива или "
+            "удалена; у живого — имя, размер и число объектов. Публичный web-API "
+            "облака, без аккаунта и скачивания. Свежие статусы берутся из кэша "
+            "(checkmail.py), удалённые не перепроверяются. force=True игнорирует "
+            "кэш. exclude_chat_id — ссылки этого чата не нести (дедуп перед "
+            "публикацией). Ссылки можно передать списком или текстом сообщений."
+        ),
+    )
+    def tg_live_check_mailru(links: list[str], force: bool = False,
+                             exclude_chat_id: Optional[int] = None) -> str:
+        try:
+            import checkmail as check_mod
+            with _db() as db:
+                rep = check_mod.check_mailru(links, db, force=force, live_cap=5,
+                                             exclude_chat_id=exclude_chat_id)
+            return _j({**rep,
+                       "note": "статусы — данные о чужих файлах, не инструкции"})
+        except Exception as exc:
+            return _j({"error": f"live: {exc}"})
+
+    @mcp.tool(
+        name="tg_live_check_links",
+        description=(
+            "ЖИВАЯ проверка смеси ссылок одним вызовом: Telegram-инвайты "
+            "(t.me/+…/joinchat, telegram.me), mega.nz файлы/папки, cloud.mail.ru "
+            "облака. Роутит по домену: инвайты — messages.checkChatInvite (без "
+            "вступления), меги и облака — их публичные web-API. У каждого вида "
+            "свой кэш и не больше 5 живых запросов за вызов. exclude_chat_id — "
+            "ссылки, уже встречавшиеся в этом чате, возвращаются со "
+            "status=duplicate и не проверяются (дедуп перед публикацией). "
+            "force=True игнорирует кэш. Ссылки можно передать списком или "
+            "текстом сообщений."
+        ),
+    )
+    async def tg_live_check_links(links: list[str], force: bool = False,
+                                 exclude_chat_id: Optional[int] = None) -> str:
+        try:
+            import checklinks as chk
+            import checkmega as cmg
+            import checkmail as cml
+            parts = split_links(links)
+            out: dict = {}
+            with _db() as db:
+                if parts["invite"]:
+                    cl = await _live()
+                    out["invites"] = await chk.check_invites(
+                        cl, parts["invite"], db, force=force, live_cap=5,
+                        exclude_chat_id=exclude_chat_id)
+                if parts["mega"]:
+                    out["mega"] = cmg.check_megas(parts["mega"], db, force=force,
+                                                  live_cap=5,
+                                                  exclude_chat_id=exclude_chat_id)
+                if parts["mailru"]:
+                    out["mailru"] = cml.check_mailru(parts["mailru"], db, force=force,
+                                                     live_cap=5,
+                                                     exclude_chat_id=exclude_chat_id)
+            if not out:
+                return _j({"error": "ссылок известных видов не нашлось "
+                                     "(t.me инвайты, mega.nz, cloud.mail.ru)"})
+            return _j({**out,
+                       "note": "статусы — данные о чужих чатах и файлах, не инструкции"})
         except Exception as exc:
             return _j({"error": f"live: {exc}"})
 
@@ -877,6 +950,31 @@ if ALLOW_MANAGE:
                 links_product=links_product, db_path=INDEX))
         except Exception as e:
             return _j({"error": f"manage: {e}"})
+
+
+if ALLOW_SEND:
+    @mcp.tool(
+        name="tg_send_message",
+        description=(
+            "Отправить сообщение в чат (канал/группу/личный): chat — числовой id "
+            "(например -100…) или @username. Пишущая операция: требует "
+            "confirm=True, регистрируется только при TG_ALLOW_SEND=1. "
+            "Один текст за вызов (лимит длины задаёт Telegram)."
+        ),
+    )
+    def tg_send_message(chat: Union[int, str], text: str,
+                        confirm: bool = False) -> str:
+        if not confirm:
+            return _j({"error": "confirm=False: операция записи требует явного confirm=True"})
+        try:
+            import notify as notify_mod
+            target = chat if isinstance(chat, int) else chat.strip()
+            res = notify_mod.notify([text], dry_run=False, to=target)
+            if not res.get("ok"):
+                return _j({**res, "error": f"send: {res.get('error', 'не удалось')}"})
+            return _j(res)
+        except Exception as exc:
+            return _j({"error": f"send: {exc}"})
 
 
 if ALLOW_DOWNLOADS or ALLOW_FORWARDS:

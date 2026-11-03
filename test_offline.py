@@ -1894,7 +1894,9 @@ def test_monitor_notify(db_path: Path) -> None:
             os.environ["TG_ALLOW_SEND"] = saved
 
     srv = (Path(__file__).parent / "server.py").read_text(encoding="utf-8")
-    check("notify" not in srv, "server.py не содержит notify (MCP остаётся read-only)")
+    check("import notify as notify_mod" in srv
+          and srv.index("if ALLOW_SEND:") < srv.index("import notify as notify_mod"),
+          "server.py: notify импортируется только за гейтом TG_ALLOW_SEND")
 
 
 def test_media(db_path: Path) -> None:
@@ -3440,7 +3442,8 @@ def test_checklinks(db_path: Path) -> None:
           and chk.invite_hash("t.me/joinchat/QwErTy") == "QwErTy"
           and chk.invite_hash("+AbCdEf") == "AbCdEf"
           and chk.invite_hash("joinchat/QwErTy") == "QwErTy"
-          and chk.invite_hash("rawhash123") == "rawhash123",
+          and chk.invite_hash("rawhash123") == "rawhash123"
+          and chk.invite_hash("https://telegram.me/+TgAlias1") == "TgAlias1",
           "checklinks: hash из +/joinchat/ссылки с https и сырого хэша")
     check(chk.invite_hash("заходи в https://t.me/+AbCdEf?x=1 скорее") == "AbCdEf",
           "checklinks: hash выцепляется из произвольного текста")
@@ -3581,7 +3584,7 @@ class FakeMegaApi:
         self.responses = list(responses)
         self.calls = []
 
-    def __call__(self, url, payload):
+    def __call__(self, url, payload=None):
         self.calls.append((url, payload))
         r = self.responses.pop(0)
         if isinstance(r, Exception):
@@ -3593,14 +3596,14 @@ def test_checkmega(db_path: Path) -> None:
     print("=== checkmega: статус mega.nz-ссылок через публичный web-API ===")
     import checkmega as cmg
 
-    check(cmg.mega_link("https://mega.nz/file/h7BlFbhR#key") == ("file", "h7BlFbhR")
-          and cmg.mega_link("https://mega.nz/folder/COQ2HLJA#k") == ("folder", "COQ2HLJA")
+    check(cmg.mega_link("https://mega.nz/file/AbCdEf12#key") == ("file", "AbCdEf12")
+          and cmg.mega_link("https://mega.nz/folder/FoLdAb34#k") == ("folder", "FoLdAb34")
           and cmg.mega_link("https://mega.nz/embed/emb123#k") == ("file", "emb123")
           and cmg.mega_link("https://mega.nz/#!oldFILE!key") == ("file", "oldFILE")
           and cmg.mega_link("https://mega.co.nz/#F!oldFOLD!key") == ("folder", "oldFOLD"),
           "checkmega: хэндл из нового/старого формата, файл/папка/embed")
-    check(cmg.mega_link("качай https://mega.nz/file/h7BlFbhR#key скорее")
-          == ("file", "h7BlFbhR"),
+    check(cmg.mega_link("качай https://mega.nz/file/AbCdEf12#key скорее")
+          == ("file", "AbCdEf12"),
           "checkmega: ссылка выцепляется из произвольного текста")
     check(cmg.mega_link("https://mega.nz/#P!AAA5TWTc") is None
           and cmg.mega_link("https://xmega.nz/file/ABC#k") is None
@@ -3722,10 +3725,22 @@ def test_checkmega(db_path: Path) -> None:
               and "mega_status" not in by_val["https://t.me/durov"],
               "checkmega: refs_summary джойнит статус меги",
               str({k: v.get("mega_status") for k, v in by_val.items()}))
-        check(summ.get("mega_status") == {"unknown": 0, "checked": {"ok": 2, "dead": 0,
-                                                                    "blocked": 0, "error": 0}},
+        check(summ.get("mega_status") == {"unknown": 0, "checked": {"ok": 2}},
               "checkmega: сводка mega_status в refs_summary",
               str(summ.get("mega_status")))
+
+    rep_x = cmg.check_megas(["https://mega.nz/file/live1#k",
+                             "https://mega.nz/folder/lfold#k",
+                             "https://mega.nz/file/newone#k"],
+                            DB(cm_db), delay=0, exclude_chat_id=-100888,
+                            transport=FakeMegaApi([{"s": 1}]))
+    by_x = {r["value"]: r for r in rep_x["results"]}
+    check(by_x["live1"]["status"] == "duplicate"
+          and by_x["lfold"]["status"] == "duplicate"
+          and by_x["live1"].get("already_in") == -100888
+          and by_x["newone"]["status"] == "ok" and rep_x["live_checks"] == 1,
+          "checkmega: exclude_chat_id метит известные в чате дублями без проверки",
+          str(by_x.get("live1")))
 
     with DB(cm_db) as db:
         db.conn.execute("DROP TABLE link_status")
@@ -3737,6 +3752,173 @@ def test_checkmega(db_path: Path) -> None:
     check("link_status" in tabs and uv == SCHEMA_VERSION,
           "checkmega: миграция v8->v9 создаёт link_status",
           f"table={'link_status' in tabs} uv={uv}")
+
+
+def test_checkmail(db_path: Path) -> None:
+    print("=== checkmail: статус cloud.mail.ru-ссылок через публичный web-API ===")
+    import sqlite3
+    import urllib.error
+
+    import checkmail as cml
+    from db import cloudmail_link
+
+    check(cloudmail_link("https://cloud.mail.ru/public/AbCd12/EfGh34") == "AbCd12/EfGh34"
+          and cloudmail_link("https://cloud.mail.ru/public/ZxYw98/VuTs76") == "ZxYw98/VuTs76"
+          and cloudmail_link("https://cloud.mail.ru/public/aB3_x/bY9-z") == "aB3_x/bY9-z",
+          "checkmail: веблинк из ссылки")
+    check(cloudmail_link("качай https://cloud.mail.ru/public/AbCd12/EfGh34 скорее")
+          == "AbCd12/EfGh34",
+          "checkmail: ссылка выцепляется из произвольного текста")
+    check(cloudmail_link("https://xcloud.mail.ru/public/a/b") is None
+          and cloudmail_link("https://cloud.mail.ru/public/") is None
+          and cloudmail_link("https://cloud.mail.ru/home/") is None
+          and cloudmail_link("https://t.me/+AbCdEf") is None
+          and cloudmail_link("не ссылка") is None and cloudmail_link("") is None,
+          "checkmail: чужие домены, обрезанные и мусор не облако")
+
+    ml_db = db_path.parent / "checkmail.sqlite"
+    if ml_db.exists():
+        ml_db.unlink()
+    with DB(ml_db) as db:
+        db.upsert_chat(-100889, "Облака", None, "supergroup", False, 100)
+        for msg_id, ts, text in (
+                (1, 1000, "https://cloud.mail.ru/public/live1/x1"),
+                (2, 2000, "ещё https://cloud.mail.ru/public/live1/x1"),
+                (3, 3000, "https://cloud.mail.ru/public/lfold/y1 и "
+                          "https://xcloud.mail.ru/public/fake/f")):
+            db.insert_message({"chat_id": -100889, "msg_id": msg_id, "topic_id": 1,
+                               "ts": ts, "sender_id": 1, "sender_name": "A",
+                               "text": text, "is_out": 0, "is_service": 0})
+        db.insert_refs(-100889, 1, [("url", "https://cloud.mail.ru/public/live1/x1")])
+        db.insert_refs(-100889, 2, [("url", "https://cloud.mail.ru/public/live1/x1")])
+        db.insert_refs(-100889, 3, [("url", "https://cloud.mail.ru/public/lfold/y1"),
+                                     ("url", "https://xcloud.mail.ru/public/fake/f")])
+        rows = db.mailru_refs(limit=10)
+        check([r["value"] for r in rows] == ["https://cloud.mail.ru/public/lfold/y1",
+                                             "https://cloud.mail.ru/public/live1/x1"]
+              and rows[1]["n"] == 2,
+              "checkmail: mailru_refs — только облака (xcloud отброшен), дедуп, "
+              "свежесть по last_ts", str(rows))
+
+    alive = {"body": {"name": "Пак", "kind": "folder", "size": 944471347,
+                      "count": {"folders": 0, "files": 91},
+                      "weblink": "live1/x1"}}
+    dead = {"status": 404, "body": {"weblink":
+                                    {"value": "dead1/y1", "error": "not_exists"}}}
+    api = FakeMegaApi([alive, dead])
+    rep = cml.check_mailru(
+        ["https://cloud.mail.ru/public/live1/x1",
+         "https://cloud.mail.ru/public/dead1/y1",
+         "https://cloud.mail.ru/public/live1/x1", "мусор без ссылки"],
+        DB(ml_db), delay=0, transport=api)
+    by_w = {r["value"]: r for r in rep["results"]}
+    check(len(by_w) == 2 and len(api.calls) == 2 and rep["live_checks"] == 2,
+          "checkmail: дубли и мусор склеиваются, по одной живой проверке на ссылку",
+          str(len(api.calls)))
+    check(by_w["live1/x1"]["status"] == "ok" and by_w["live1/x1"]["size"] == 944471347
+          and by_w["live1/x1"]["nodes"] == 91 and by_w["live1/x1"]["title"] == "Пак",
+          "checkmail: живое облако -> ok с именем, размером и числом объектов",
+          str(by_w.get("live1/x1")))
+    check(by_w["dead1/y1"]["status"] == "dead",
+          "checkmail: not_exists -> терминальный dead", str(by_w.get("dead1/y1")))
+
+    rep2 = cml.check_mailru(["https://cloud.mail.ru/public/live1/x1",
+                             "https://cloud.mail.ru/public/dead1/y1"],
+                            DB(ml_db), delay=0, transport=FakeMegaApi([]))
+    check(all(r.get("from_cache") for r in rep2["results"])
+          and rep2["live_checks"] == 0,
+          "checkmail: свежие статусы из кэша, живых запросов нет",
+          str([r.get("from_cache") for r in rep2["results"]]))
+
+    check(cml.check_one("flaky1/z", attempts=3, retry_wait=0,
+                        transport=FakeMegaApi([
+                            urllib.error.HTTPError("u", 429, "many", None, None),
+                            alive]))["status"] == "ok",
+          "checkmail: 429 переживается повтором")
+    check(cml.check_one("deny1/z", attempts=3, retry_wait=0,
+                        transport=FakeMegaApi([
+                            urllib.error.HTTPError("u", 403, "denied", None, None)]))
+          == {"status": "error", "error": "http 403"},
+          "checkmail: неретраимый HTTP-статус -> error http N")
+    check(cml.check_one("odd1/z", transport=FakeMegaApi([{"body": {}}]))
+          == {"status": "error", "error": "unexpected response"},
+          "checkmail: неожиданное тело -> error")
+    rep_err = cml.check_mailru(["https://cloud.mail.ru/public/err1/z"], DB(ml_db),
+                               delay=0, transport=FakeMegaApi([RuntimeError("boom")]))
+    check(rep_err["results"][0]["status"] == "error"
+          and "boom" in rep_err["results"][0]["error"],
+          "checkmail: сбой сети -> error, прогон не падает",
+          str(rep_err["results"][0]))
+
+    with DB(ml_db) as db:
+        old = int(time.time()) - 30 * 86400
+        db.link_status_set("mailru", "live1/x1", "ok", title="Пак",
+                           checked_ts=old)
+    api3 = FakeMegaApi([dict(alive)])
+    rep3 = cml.check_mailru(["https://cloud.mail.ru/public/live1/x1",
+                             "https://cloud.mail.ru/public/dead1/y1"],
+                            DB(ml_db), delay=0, transport=api3)
+    by3 = {r["value"]: r for r in rep3["results"]}
+    check(len(api3.calls) == 1 and by3["live1/x1"]["from_cache"] is False
+          and by3["dead1/y1"]["from_cache"] is True,
+          "checkmail: протухший ok перепроверяется, dead не трогается",
+          str([r["value"] for r in rep3["results"]]))
+    rep3f = cml.check_mailru(["https://cloud.mail.ru/public/dead1/y1"], DB(ml_db),
+                             force=True, delay=0, transport=FakeMegaApi([]))
+    check(rep3f["results"][0]["from_cache"] is True,
+          "checkmail: force не перепроверяет терминальные")
+
+    rep4 = cml.check_mailru(["https://cloud.mail.ru/public/a1/x",
+                             "https://cloud.mail.ru/public/a2/x",
+                             "https://cloud.mail.ru/public/a3/x"],
+                            DB(ml_db), delay=0, live_cap=1,
+                            transport=FakeMegaApi([dict(alive)]))
+    by4 = {r["value"]: r for r in rep4["results"]}
+    check(by4["a1/x"]["status"] == "ok" and by4["a2/x"]["status"] == "unchecked"
+          and rep4["skipped_cap"] == ["a2/x", "a3/x"],
+          "checkmail: live_cap ограничивает живые запросы, хвост в skipped_cap",
+          str(by4.get("a2/x")))
+
+    rep5 = cml.check_mailru(["https://cloud.mail.ru/public/live1/x1",
+                             "https://cloud.mail.ru/public/lfold/y1",
+                             "https://cloud.mail.ru/public/newone/z1"],
+                            DB(ml_db), delay=0, exclude_chat_id=-100889,
+                            transport=FakeMegaApi([dict(alive)]))
+    by5 = {r["value"]: r for r in rep5["results"]}
+    check(by5["live1/x1"]["status"] == "duplicate"
+          and by5["lfold/y1"]["status"] == "duplicate"
+          and by5["live1/x1"].get("already_in") == -100889
+          and by5["newone/z1"]["status"] == "ok" and rep5["live_checks"] == 1,
+          "checkmail: exclude_chat_id метит известные в чате дублями без проверки",
+          str(by5.get("live1/x1")))
+
+    with DB(ml_db) as db:
+        summ = db.refs_summary(chat_id=-100889)
+        by_val = {r["value"]: r for r in summ["url"]}
+        check(by_val["https://cloud.mail.ru/public/live1/x1"]["mailru_status"] == "ok"
+              and "mailru_status" not in by_val["https://xcloud.mail.ru/public/fake/f"],
+              "checkmail: refs_summary джойнит статус облака",
+              str({k: v.get("mailru_status") for k, v in by_val.items()}))
+        check(summ.get("mailru_status") == {"unknown": 1, "checked": {"ok": 1}},
+              "checkmail: сводка mailru_status в refs_summary",
+              str(summ.get("mailru_status")))
+
+    ml_db2 = db_path.parent / "checkmail_v9.sqlite"
+    if ml_db2.exists():
+        ml_db2.unlink()
+    raw = sqlite3.connect(str(ml_db2))
+    raw.execute("CREATE TABLE link_status (host TEXT NOT NULL, value TEXT NOT NULL, "
+                "kind TEXT, status TEXT NOT NULL, size INTEGER, nodes INTEGER, "
+                "error TEXT, checked_ts INTEGER NOT NULL, PRIMARY KEY (host, value))")
+    raw.execute("PRAGMA user_version = 9")
+    raw.commit()
+    raw.close()
+    with DB(ml_db2) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(link_status)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check("title" in cols and uv == SCHEMA_VERSION,
+          "checkmail: миграция v9->v10 добавляет колонку title",
+          f"cols={sorted(cols)} uv={uv}")
 
 
 def test_services_pack(db_path: Path) -> None:
@@ -5522,6 +5704,7 @@ def main() -> int:
     test_search_global(db_path)
     test_checklinks(db_path)
     test_checkmega(db_path)
+    test_checkmail(db_path)
     test_services_pack(db_path)
     test_pipeline(db_path)
     test_extract_until_done(db_path)

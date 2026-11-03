@@ -37,7 +37,7 @@ from db import DB  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
-_INVITE_RE = re.compile(r"t\.me/(?:\+([\w-]+)|joinchat/([\w-]+))", re.IGNORECASE)
+_INVITE_RE = re.compile(r"(?:t|telegram)\.me/(?:\+([\w-]+)|joinchat/([\w-]+))", re.IGNORECASE)
 _RAW_HASH_RE = re.compile(r"[\w-]+")
 
 try:  # телега не обязательна в офлайн-тестах
@@ -123,14 +123,23 @@ async def check_invites(
     force: bool = False,
     delay: float = 0.6,
     live_cap: Optional[int] = None,
+    exclude_chat_id: Optional[int] = None,
 ) -> dict:
     """Проверить список ссылок/хэшей с кэшем invite_status.
 
     Терминальные (expired/invalid) и свежие статусы берутся из кэша; живыми
     запросами добирается только протухшее. live_cap ограничивает число живых
     запросов за вызов (защита от флуда), остальное уходит со status=unchecked.
+    exclude_chat_id — инвайты, уже встречавшиеся в этом чате, не проверяются и
+    возвращаются со status=duplicate (дедуп перед публикацией куда-то).
     """
     uniq = list(dict.fromkeys(h for h in (invite_hash(x) for x in hashes) if h))
+    known: set[str] = set()
+    if exclude_chat_id is not None:
+        for r in db.invite_refs(limit=10**6, chat_id=exclude_chat_id):
+            h = invite_hash(r["value"])
+            if h:
+                known.add(h)
     cached = db.invite_status_map(uniq)
     now = int(time.time())
     fresh = max_age_days * 86400
@@ -138,6 +147,10 @@ async def check_invites(
     live = 0
     skipped: list[str] = []
     for h in uniq:
+        if h in known:
+            results.append({"value": h, "status": "duplicate",
+                            "already_in": exclude_chat_id})
+            continue
         row = cached.get(h)
         terminal = bool(row) and row["status"] in TERMINAL
         if row and (terminal or (not force and now - row["checked_ts"] < fresh)):
@@ -176,6 +189,7 @@ _STATUS_RU = {
     "member": "ты уже участник",
     "expired": "ИСТЕКЛА",
     "invalid": "НЕВАЛИДНА",
+    "duplicate": "ДУБЛЬ (уже в чате)",
     "unchecked": "не проверена",
 }
 
@@ -218,7 +232,8 @@ async def _amain(args: argparse.Namespace) -> int:
         await client.start(**sync_mod.start_kwargs())
         try:
             rep = await check_invites(client, hashes, db, max_age_days=args.max_age,
-                                      force=args.force, delay=args.delay)
+                                      force=args.force, delay=args.delay,
+                                      exclude_chat_id=args.exclude_chat)
         finally:
             await client.disconnect()
     _print_report(rep)
@@ -246,6 +261,8 @@ def main() -> None:
                     help="пауза между живыми запросами (по умолчанию 0.6с)")
     ap.add_argument("--force", action="store_true",
                     help="игнорировать возраст кэша (expired/invalid не перепроверяются никогда)")
+    ap.add_argument("--exclude-chat", type=int, metavar="ID",
+                    help="не нести инвайты, уже встречавшиеся в чате ID (дедуп перед публикацией)")
     args = ap.parse_args()
     if not (args.link or args.newest or args.watched or args.chat):
         args.watched = True

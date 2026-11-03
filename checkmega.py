@@ -107,19 +107,28 @@ def check_megas(
     force: bool = False,
     delay: float = 0.6,
     live_cap: Optional[int] = None,
+    exclude_chat_id: Optional[int] = None,
     transport: Optional[Transport] = None,
 ) -> dict:
     """Проверить список ссылок/текстов с кэшем link_status.
 
     Терминальные (dead/blocked) и свежие статусы берутся из кэша; живыми
     запросами добирается только протухшее. live_cap ограничивает число живых
-    запросов за вызов, остальное уходит со status=unchecked.
+    запросов за вызов, остальное уходит со status=unchecked. exclude_chat_id —
+    меги, уже встречавшиеся в этом чате, не проверяются и возвращаются со
+    status=duplicate (дедуп перед публикацией куда-то).
     """
     uniq: dict[str, str] = {}
     for u in urls:
         parsed = mega_link(u)
         if parsed:
             uniq.setdefault(parsed[1], parsed[0])
+    known: set[str] = set()
+    if exclude_chat_id is not None:
+        for r in db.mega_refs(limit=10**6, chat_id=exclude_chat_id):
+            v = mega_link(r["value"])
+            if v:
+                known.add(v[1])
     cached = db.link_status_map("mega", list(uniq))
     now = int(time.time())
     fresh = max_age_days * 86400
@@ -127,6 +136,10 @@ def check_megas(
     live = 0
     skipped: list[str] = []
     for handle, kind in uniq.items():
+        if handle in known:
+            results.append({"value": handle, "kind": kind, "status": "duplicate",
+                            "already_in": exclude_chat_id})
+            continue
         row = cached.get(handle)
         terminal = bool(row) and row["status"] in TERMINAL
         if row and (terminal or (not force and now - row["checked_ts"] < fresh)):
@@ -166,6 +179,7 @@ _STATUS_RU = {
     "ok": "ЖИВА",
     "dead": "НЕ ДОСТУПНА",
     "blocked": "УДАЛЕНА (жалоба)",
+    "duplicate": "ДУБЛЬ (уже в чате)",
     "error": "ошибка",
     "unchecked": "не проверена",
 }
@@ -227,6 +241,8 @@ def main() -> None:
                     help="пауза между живыми запросами (по умолчанию 0.6с)")
     ap.add_argument("--force", action="store_true",
                     help="игнорировать возраст кэша (dead/blocked не перепроверяются никогда)")
+    ap.add_argument("--exclude-chat", type=int, metavar="ID",
+                    help="не нести меги, уже встречавшиеся в чате ID (дедуп перед публикацией)")
     args = ap.parse_args()
     if not (args.link or args.newest or args.watched or args.chat):
         args.watched = True
@@ -243,7 +259,8 @@ def main() -> None:
                 return
             print(f"проверяю {len(urls)} мега-ссылку(ок) из индекса")
         rep = check_megas(urls, db, max_age_days=args.max_age,
-                          force=args.force, delay=args.delay)
+                          force=args.force, delay=args.delay,
+                          exclude_chat_id=args.exclude_chat)
     _print_report(rep)
 
 

@@ -46,7 +46,11 @@ def _send(messages: list[str], to: str = "me") -> dict:
     t.start()
     t.join()
     if "exc" in out:
-        raise out["exc"]
+        exc = out["exc"]
+        # SystemExit из make_client обязан стать ошибкой-словарём, иначе он роняет вызывающий код
+        if isinstance(exc, SystemExit):
+            return {"ok": False, "error": str(exc.code or "отправка прервана")}
+        raise exc
     sent, errors = out["res"]
     if errors:
         return {"ok": False, "sent": sent, "errors": errors}
@@ -91,7 +95,10 @@ def main() -> None:
     texts = [a for a in args if not a.startswith("--")]
     if not texts:
         texts = [ln for ln in sys.stdin.read().splitlines() if ln.strip()]
-    print(json.dumps(notify(texts, dry_run=not send), ensure_ascii=False))
+    result = notify(texts, dry_run=not send)
+    print(json.dumps(result, ensure_ascii=False))
+    if not result.get("ok", True):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

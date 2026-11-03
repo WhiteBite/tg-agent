@@ -1241,7 +1241,7 @@ def _mcp_env(**extra: str) -> dict:
     env = {k: v for k, v in os.environ.items()
            if k not in ("TG_DB", "TG_ALLOW_MANAGE", "TG_ALLOW_LIVE", "TG_EXPOSE_SQL",
                         "TG_STRICT_WATCH", "TG_ALLOW_DOWNLOADS", "TG_ALLOW_FORWARDS",
-                        "TG_MODULES_OFF",
+                        "TG_ALLOW_SEND", "TG_MODULES_OFF",
                         "TELEGRAM_API_ID", "TELEGRAM_API_HASH",
                         "TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME")}
     env["TG_ENV_FILE"] = ""
@@ -1329,11 +1329,46 @@ def test_mcp_manage_tools(tmp: Path) -> None:
     proc3 = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_LIVE="1", TG_ALLOW_MANAGE="1"))
     try:
         names3 = _init(proc3)
-        check(len(names3) == 27,
-              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 27 инструмента",
+        check(len(names3) == 29,
+              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 29 инструмента",
               str(sorted(names3)))
     finally:
         _stop(proc3)
+
+
+def test_mcp_send_tool(tmp: Path) -> None:
+    print("=== MCP: tg_send_message за TG_ALLOW_SEND=1 ===")
+    db = tmp / "mcp_send.sqlite"
+    with DB(db):
+        pass
+
+    proc = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_SEND="1"))
+    try:
+        names = _init(proc)
+        check("tg_send_message" in names and len(names) == 17,
+              "MCP send: TG_ALLOW_SEND=1 -> 16 базовых + tg_send_message = 17",
+              str(sorted(n for n in names if n.startswith("tg_send"))))
+        no_confirm = _call(proc, "tg_send_message",
+                            {"chat": "@mychannel", "text": "привет"}, 3)
+        check(no_confirm.get("error") and "confirm" in no_confirm["error"],
+              "MCP send: confirm=False -> JSON-ошибка про confirm",
+              str(no_confirm)[:90])
+        no_creds = _call(proc, "tg_send_message",
+                         {"chat": "@mychannel", "text": "привет", "confirm": True}, 4)
+        check(no_creds.get("error", "").startswith("send:"),
+              "MCP send: confirm=True без кредов -> JSON-ошибка, не зависание",
+              str(no_creds)[:90])
+    finally:
+        _stop(proc)
+
+    proc2 = _start(_mcp_env(TG_DB=str(db)))
+    try:
+        names2 = _init(proc2)
+        check("tg_send_message" not in names2 and len(names2) == 16,
+              "MCP send: без TG_ALLOW_SEND инструмента нет",
+              str(sorted(n for n in names2 if n.startswith("tg_send"))))
+    finally:
+        _stop(proc2)
 
 
 def main() -> int:
@@ -1353,7 +1388,7 @@ def main() -> int:
                test_topic_edit, test_topic_gate_off,
                 test_members_invite, test_members_admin, test_members_kick,
                 test_links, test_chat_info, test_members_gate_off,
-                test_mcp_manage_tools)
+                test_mcp_manage_tools, test_mcp_send_tool)
     try:
         for fn in tests:
             try:

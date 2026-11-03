@@ -126,6 +126,32 @@ def test_notify_event_loop() -> None:
         notify_mod._telegram_send = saved
 
 
+def test_notify_to_target() -> None:
+    print("=== notify: адресат to= доезжает до транспорта ===")
+    import notify as notify_mod
+
+    seen: dict = {}
+
+    async def fake_transport(messages: list[str], to="me") -> tuple[int, list[str]]:
+        seen["to"] = to
+        seen["n"] = len(messages)
+        return len(messages), []
+
+    saved = notify_mod._telegram_send
+    notify_mod._telegram_send = fake_transport
+    os.environ["TG_ALLOW_SEND"] = "1"
+    try:
+        res = notify_mod.notify(["текст"], dry_run=False, to="@mychannel")
+        res2 = notify_mod.notify(["текст2"], dry_run=False, to=-100123)
+    finally:
+        notify_mod._telegram_send = saved
+        os.environ.pop("TG_ALLOW_SEND", None)
+    check(res.get("ok") is True and res2.get("ok") is True
+          and seen.get("to") == -100123 and seen.get("n") == 1,
+          "notify: to=@username и числовой id проходят до транспорта",
+          str(seen))
+
+
 def test_pipeline_send_end_to_end() -> None:
     print("=== pipeline --send: полный прогон на фейк-клиенте со стаб-транспортом ===")
     import notify as notify_mod
@@ -774,6 +800,7 @@ def test_loop_until_done_false() -> None:
 def main() -> int:
     try:
         test_notify_event_loop()
+        test_notify_to_target()
         test_pipeline_send_end_to_end()
         test_step_budget()
         test_oneshot_lock()

@@ -347,10 +347,10 @@ def test_posts_migration(tmp: Path) -> None:
         db.insert_message(msg(-1010, 1, ts=100, text="до миграции"))
         cols = {r[1] for r in db.conn.execute("PRAGMA table_info(posts)")}
         uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
-    check(SCHEMA_VERSION == 9, "v9: SCHEMA_VERSION = 9", str(SCHEMA_VERSION))
+    check(SCHEMA_VERSION == 10, "v10: SCHEMA_VERSION = 10", str(SCHEMA_VERSION))
     check({"chat_id", "msg_id", "topic_id", "kind", "product", "tpl_hash", "ts"} <= cols,
           "fresh: таблица posts со всеми колонками", str(sorted(cols)))
-    check(uv == 9, "fresh: user_version = 9", str(uv))
+    check(uv == 10, "fresh: user_version = 10", str(uv))
 
     raw = sqlite3.connect(str(p))
     raw.execute("DROP TABLE IF EXISTS posts")
@@ -364,7 +364,7 @@ def test_posts_migration(tmp: Path) -> None:
             "SELECT COUNT(*) FROM messages WHERE chat_id=-1010").fetchone()[0]
     check({"chat_id", "msg_id", "topic_id", "kind", "product", "tpl_hash", "ts"} <= cols,
           "v4->v5: posts создана миграцией", str(sorted(cols)))
-    check(uv == 9, "v4->v9: user_version поднят", str(uv))
+    check(uv == 10, "v4->v10: user_version поднят", str(uv))
     check(kept == 1, "v4->v5: строки messages не потеряны", str(kept))
 
 

@@ -13,7 +13,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from sanitize import sanitize_name, sanitize_user_content
 from redact import redact
@@ -114,12 +114,13 @@ CREATE TABLE IF NOT EXISTS invite_status (
     checked_ts     INTEGER NOT NULL
 );
 
--- статус проверенных внешних ссылок (пишет checkmega.py; host — задел под другие хосты)
+-- статус проверенных внешних ссылок (пишет checkmega.py/checkmail.py; host — задел под другие хосты)
 CREATE TABLE IF NOT EXISTS link_status (
-    host       TEXT NOT NULL,          -- mega
+    host       TEXT NOT NULL,          -- mega | mailru
     value      TEXT NOT NULL,          -- хэндл ссылки без домена и ключа
     kind       TEXT,                    -- file | folder
     status     TEXT NOT NULL,          -- ok | dead | blocked | error
+    title      TEXT,                   -- имя облака (у mega всегда NULL)
     size       INTEGER,
     nodes      INTEGER,
     error      TEXT,
@@ -333,7 +334,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class DB:
@@ -391,6 +392,8 @@ class DB:
             self._migrate_v8()
         if version < 9:
             self._migrate_v9()
+        if version < 10:
+            self._migrate_v10()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -619,6 +622,12 @@ class DB:
         except sqlite3.OperationalError:
             pass
 
+    def _migrate_v10(self) -> None:
+        try:
+            self.conn.execute("ALTER TABLE link_status ADD COLUMN title TEXT")
+        except sqlite3.OperationalError:
+            pass
+
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
     def get_cursor(self, chat_id: int, topic_id: int = 0) -> int:
@@ -723,19 +732,22 @@ class DB:
             args.append(since_ts)
         sql += " GROUP BY r.kind, r.value ORDER BY n DESC"
         rows = [dict(r) for r in self.conn.execute(sql, args)]
-        mega_handles: dict[str, str] = {}
+        link_values: dict[str, dict[str, str]] = {}
         for r in rows:
-            if r["kind"] == "url":
-                ml = mega_link(r["value"])
-                if ml:
-                    mega_handles[r["value"]] = ml[1]
-        mega_cache = (self.link_status_map("mega", sorted(set(mega_handles.values())))
-                      if mega_handles else {})
+            if r["kind"] != "url":
+                continue
+            for host, extract in _LINK_HOSTS:
+                val = extract(r["value"])
+                if val:
+                    link_values.setdefault(host, {})[r["value"]] = val
+                    break
+        link_caches = {host: (self.link_status_map(host, sorted(set(vals.values())))
+                              if vals else {})
+                       for host, vals in link_values.items()}
         out: dict[str, list[dict]] = {}
         tally: dict[str, int] = {"ok": 0, "member": 0, "expired": 0,
                                  "invalid": 0, "error": 0, "unknown": 0}
-        mega_tally: dict[str, int] = {"ok": 0, "dead": 0, "blocked": 0,
-                                      "error": 0, "unknown": 0}
+        link_tallies: dict[str, dict[str, int]] = {h: {} for h, _ in _LINK_HOSTS}
         for r in rows:
             if r["kind"] == "invite":
                 st = r.pop("invite_status") or "unknown"
@@ -748,20 +760,21 @@ class DB:
                 r.pop("invite_status", None)
                 r.pop("invite_title", None)
                 r.pop("invite_checked_ts", None)
-                if r["value"] in mega_handles:
-                    st = (mega_cache.get(mega_handles[r["value"]]) or {}).get("status", "unknown")
-                    r["mega_status"] = st
-                    if st in mega_tally:
-                        mega_tally[st] += 1
+                for host, vals in link_values.items():
+                    if r["value"] in vals:
+                        st = (link_caches[host].get(vals[r["value"]]) or {}).get("status", "unknown")
+                        r[f"{host}_status"] = st
+                        link_tallies[host][st] = link_tallies[host].get(st, 0) + 1
             out.setdefault(r["kind"], [])
             if len(out[r["kind"]]) < limit:
                 out[r["kind"]].append(r)
         if any(tally.values()):
             checked = {k: v for k, v in tally.items() if k != "unknown"}
             out["invite_status"] = {"unknown": tally["unknown"], "checked": checked}
-        if any(mega_tally.values()):
-            checked = {k: v for k, v in mega_tally.items() if k != "unknown"}
-            out["mega_status"] = {"unknown": mega_tally["unknown"], "checked": checked}
+        for host, lt in link_tallies.items():
+            if any(lt.values()):
+                checked = {k: v for k, v in lt.items() if k != "unknown"}
+                out[f"{host}_status"] = {"unknown": lt.get("unknown", 0), "checked": checked}
         return out
 
     def invite_refs(
@@ -821,23 +834,24 @@ class DB:
         )
         self.conn.commit()
 
-    def mega_refs(
+    def _url_refs(
         self,
+        like: str,
+        extract: Callable[[str], Optional[str]],
         limit: int = 50,
         chat_id: Optional[int] = None,
         chat_ids: Optional[list[int]] = None,
         since_ts: Optional[int] = None,
     ) -> list[dict]:
-        """Различные mega.nz/mega.co.nz-ссылки из refs, свежие первыми.
+        """Различные ссылки одного хоста из refs (kind='url'), свежие первыми.
 
-        SQL LIKE отбирает кандидатов, финальный фильтр делает mega_link:
+        SQL LIKE отбирает кандидатов, финальный фильтр делает extract:
         префикс-подобные домены (xmega.nz) отбрасываются.
         """
-        sql = """
+        sql = f"""
             SELECT r.value, COUNT(*) n, MAX(m.ts) last_ts
             FROM refs r LEFT JOIN messages m ON m.chat_id = r.chat_id AND m.msg_id = r.msg_id
-            WHERE r.kind = 'url'
-              AND (r.value LIKE '%mega.nz/%' OR r.value LIKE '%mega.co.nz/%')
+            WHERE r.kind = 'url' AND ({like})
         """
         args: list[Any] = []
         if chat_id is not None:
@@ -854,9 +868,35 @@ class DB:
         for r in self.conn.execute(sql, args):
             if len(out) >= int(limit):
                 break
-            if mega_link(r["value"]):
+            if extract(r["value"]):
                 out.append(dict(r))
         return out
+
+    def mega_refs(
+        self,
+        limit: int = 50,
+        chat_id: Optional[int] = None,
+        chat_ids: Optional[list[int]] = None,
+        since_ts: Optional[int] = None,
+    ) -> list[dict]:
+        """Различные mega.nz/mega.co.nz-ссылки из refs, свежие первыми."""
+        return self._url_refs(
+            "r.value LIKE '%mega.nz/%' OR r.value LIKE '%mega.co.nz/%'",
+            _mega_value, limit=limit, chat_id=chat_id,
+            chat_ids=chat_ids, since_ts=since_ts)
+
+    def mailru_refs(
+        self,
+        limit: int = 50,
+        chat_id: Optional[int] = None,
+        chat_ids: Optional[list[int]] = None,
+        since_ts: Optional[int] = None,
+    ) -> list[dict]:
+        """Различные cloud.mail.ru-ссылки из refs, свежие первыми."""
+        return self._url_refs(
+            "r.value LIKE '%cloud.mail.ru/public/%'",
+            cloudmail_link, limit=limit, chat_id=chat_id,
+            chat_ids=chat_ids, since_ts=since_ts)
 
     def link_status_map(self, host: str, values: list[str]) -> dict[str, dict]:
         """Кэш статусов ссылок одного хоста: value -> строка link_status."""
@@ -874,15 +914,16 @@ class DB:
         value: str,
         status: str,
         kind: Optional[str] = None,
+        title: Optional[str] = None,
         size: Optional[int] = None,
         nodes: Optional[int] = None,
         error: Optional[str] = None,
         checked_ts: Optional[int] = None,
     ) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO link_status(host, value, kind, status, size, nodes, "
-            "error, checked_ts) VALUES(?,?,?,?,?,?,?,?)",
-            (host, value, kind, status, size, nodes, error,
+            "INSERT OR REPLACE INTO link_status(host, value, kind, status, title, "
+            "size, nodes, error, checked_ts) VALUES(?,?,?,?,?,?,?,?,?)",
+            (host, value, kind, status, title, size, nodes, error,
              checked_ts or int(time.time())),
         )
         self.conn.commit()
@@ -1911,6 +1952,54 @@ def mega_link(text: Optional[str]) -> Optional[tuple[str, str]]:
         if groups[g]:
             return (kind, groups[g])
     return None
+
+
+_MAILRU_RE = re.compile(
+    r"https?://(?:[a-z0-9-]+\.)*cloud\.mail\.ru/public/([\w-]+/[\w-]+)",
+    re.IGNORECASE)
+
+
+def cloudmail_link(text: Optional[str]) -> Optional[str]:
+    """Веблинк публичного облака cloud.mail.ru из ссылки или текста вокруг неё
+    (id/ключ без домена, например AbCd12/EfGh34); None — не облачная ссылка."""
+    if not text:
+        return None
+    m = _MAILRU_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _mega_value(url: str) -> Optional[str]:
+    ml = mega_link(url)
+    return ml[1] if ml else None
+
+
+# реестр http-хостов ссылочных валидаторов: (host в link_status, извлечение хэндла)
+_LINK_HOSTS: tuple[tuple[str, Callable[[str], Optional[str]]], ...] = (
+    ("mega", _mega_value),
+    ("mailru", cloudmail_link),
+)
+
+
+def split_links(items: Optional[list[str]]) -> dict[str, list[str]]:
+    """Разложить ссылки/тексты по видам для валидаторов: invite | mega | mailru
+    | rest. Текст с несколькими ссылками попадает в каждую подходящую корзину —
+    каждый валидатор выцепит своё."""
+    out: dict[str, list[str]] = {"invite": [], "mega": [], "mailru": [], "rest": []}
+    for s in items or []:
+        t = s or ""
+        hit = False
+        if _REF_INVITE.search(t):
+            out["invite"].append(s)
+            hit = True
+        if mega_link(t):
+            out["mega"].append(s)
+            hit = True
+        if cloudmail_link(t):
+            out["mailru"].append(s)
+            hit = True
+        if not hit:
+            out["rest"].append(s)
+    return out
 
 
 # ------------------- безопасный SQL для агента -------------------
