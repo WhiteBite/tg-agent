@@ -5,7 +5,7 @@ import os
 import time
 
 from db import DB
-from workspace_store import REVIEW_JOINS, REVIEW_STATE_SQL, WorkspaceError, metadata, page
+from workspace_store import REVIEW_JOINS, REVIEW_STATE_SQL, WorkspaceError, metadata, page, review
 
 
 def home(db: DB, params: dict) -> dict:
@@ -55,6 +55,86 @@ def home(db: DB, params: dict) -> dict:
         "SELECT ev.*,e.title,e.project,e.kind FROM entity_events ev JOIN entities e ON e.id=ev.entity_id "
         + ("WHERE e.project=? " if args else "") + "ORDER BY ev.id DESC LIMIT 10", args)]
     return {"counts": counts, "attention": attention[:30], "freshness": fresh, "recent_changes": recent}
+
+
+def chat_analysis(db: DB, params: dict) -> dict:
+    try:
+        chat_id = int(params.get("chat_id"))
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceError("Нужен числовой chat_id") from exc
+    raw_topic = params.get("topic_id")
+    try:
+        topic_id = int(raw_topic) if raw_topic not in (None, "") else 1
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceError("topic_id должен быть числом") from exc
+    topic_id = 1 if topic_id in (0, 1) else topic_id
+    chat = db.conn.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
+    if chat is None:
+        raise WorkspaceError("Чат не найден в индексе", 404)
+    topic = db.conn.execute("SELECT * FROM topics WHERE chat_id=? AND topic_id=?",
+                            (chat_id, topic_id)).fetchone()
+    watch = db.conn.execute("SELECT * FROM watch WHERE chat_id=? AND topic_id=?",
+                            (chat_id, topic_id)).fetchone()
+    scope = ("(EXISTS(SELECT 1 FROM entity_sources es WHERE es.entity_id=e.id "
+             "AND es.chat_id=? AND es.topic_id=?) "
+             "OR (e.chat_id=? AND e.topic_id=? AND NOT EXISTS("
+             "SELECT 1 FROM entity_sources es2 WHERE es2.entity_id=e.id)))")
+    scope_args = [chat_id, topic_id, chat_id, topic_id]
+    eo, elimit = page(params, "entity_")
+    rows = [dict(r) for r in db.conn.execute(
+        "SELECT e.* FROM entities e WHERE " + scope +
+        " ORDER BY e.updated_ts DESC, e.id DESC LIMIT ? OFFSET ?",
+        [*scope_args, elimit, eo])]
+    for e in rows:
+        e["review_state"] = review(db, e["id"])
+    gap_predicate = ("e.closed_ts IS NULL AND (e.kind='question' "
+                     "OR (e.kind='promise' AND e.due_ts IS NULL) "
+                     "OR (e.kind='promise' AND (e.owner IS NULL OR e.owner='')))")
+    gaps_total = db.conn.execute(
+        "SELECT COUNT(*) FROM entities e WHERE " + gap_predicate + " AND " + scope,
+        scope_args).fetchone()[0]
+    gaps = [dict(r) for r in db.conn.execute(
+        "SELECT e.id, e.pack, e.kind, e.title, e.owner, e.due_ts, e.project, e.created_ts, "
+        "CASE WHEN e.kind='question' THEN 'вопрос без ответа' "
+        "WHEN e.due_ts IS NULL THEN 'обещание без срока' "
+        "ELSE 'обещание без ответственного' END AS reason "
+        "FROM entities e WHERE " + gap_predicate + " AND " + scope +
+        " ORDER BY e.created_ts, e.id LIMIT ?",
+        [*scope_args, elimit])]
+    kind_rows = db.conn.execute(
+        "SELECT e.kind, e.status, COUNT(*) AS n FROM entities e WHERE " + scope +
+        " GROUP BY e.kind, e.status", scope_args).fetchall()
+    total = sum(r["n"] for r in kind_rows)
+    counts: dict[str, int] = {}
+    for r in kind_rows:
+        counts[r["kind"]] = counts.get(r["kind"], 0) + r["n"]
+    open_n = sum(r["n"] for r in kind_rows if r["status"] != "done")
+    mo, mlimit = page(params, "message_")
+    msg_total = db.conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE chat_id=? AND topic_id=? AND deleted=0",
+        (chat_id, topic_id)).fetchone()[0]
+    mrows = [dict(r) for r in db.conn.execute(
+        "SELECT msg_id, topic_id, ts, date_iso, sender_name, is_service, text, media "
+        "FROM messages WHERE chat_id=? AND topic_id=? AND deleted=0 "
+        "ORDER BY msg_id DESC LIMIT ? OFFSET ?", (chat_id, topic_id, mlimit, mo))]
+    mrows.reverse()
+    watch_item = None
+    if watch is not None:
+        watch_item = dict(watch)
+        watch_item["new_since_read"] = db.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE chat_id=? AND topic_id=? "
+            "AND deleted=0 AND msg_id>?",
+            (chat_id, topic_id, watch_item.get("last_read") or 0)).fetchone()[0]
+    return {
+        "chat": dict(chat),
+        "topic": dict(topic) if topic else None,
+        "watch": watch_item,
+        "digests": db.digests_list(chat_id, topic_id, 3),
+        "counts": {"total": total, "open": open_n, "by_kind": counts},
+        "entities": {"items": rows, "total": total, "offset": eo, "limit": elimit},
+        "gaps": {"items": gaps, "total": gaps_total},
+        "messages": {"items": mrows, "total": msg_total, "offset": mo, "limit": mlimit},
+    }
 
 
 def projects(db: DB) -> dict:

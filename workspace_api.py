@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from modules import workspace_routes
 from workspace_store import WorkspaceError, changes, entities, entity, scrub
-from workspace_views import home, integration_preview, integration_status, notification_preview, people, projects
+from workspace_views import (chat_analysis, home, integration_preview,
+                             integration_status, notification_preview, people,
+                             projects)
 from workspace_write import entity_edit, entity_review, person, project_review, project_topics
 from workspace_search import search
 
@@ -13,6 +15,8 @@ def get(db, path: str, params: dict):
     match path:
         case "home":
             return home(db, params)
+        case "analysis":
+            return chat_analysis(db, params)
         case "projects":
             return projects(db)
         case "project":

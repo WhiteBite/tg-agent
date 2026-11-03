@@ -236,6 +236,43 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("project?project=Нет")[0], 404)
         self.assertEqual(self.request("people", {"key": "Иван", "telegram_sender_ids": ["wrong"]})[0], 400)
 
+    def test_analysis_scopes_entities_and_hides_deleted(self):
+        with DB(self.db_path) as db:
+            db.conn.execute("INSERT INTO digests(chat_id,topic_id,ts,since_msg,upto_msg,summary) "
+                            "VALUES(-100111,1,?,1,10,'Сводка темы')", (self.now,))
+            db.conn.execute(
+                "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,owner,project,created_ts,updated_ts) "
+                "VALUES(5,'services',-100999,7,'trial','Триал','open',NULL,'А',?,?)",
+                (self.now - 500, self.now - 100))
+            db.conn.execute(
+                "INSERT INTO entity_sources(entity_id,chat_id,topic_id,first_seen_ts,last_seen_ts) "
+                "VALUES(5,-100111,1,?,?)", (self.now - 500, self.now - 100))
+            db.conn.commit()
+        status, d = self.request("analysis?chat_id=-100111&topic_id=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(d["chat"]["title"], "Объект")
+        self.assertEqual(d["watch"]["project"], "А")
+        self.assertEqual(d["digests"][0]["summary"], "Сводка темы")
+        ids = [e["id"] for e in d["entities"]["items"]]
+        self.assertEqual(set(ids), {1, 2, 3, 5})
+        self.assertTrue(all(e["review_state"] == "pending" for e in d["entities"]["items"]))
+        self.assertEqual(d["counts"]["total"], 4)
+        self.assertEqual(d["counts"]["open"], 4)
+        self.assertEqual(d["counts"]["by_kind"], {"task": 1, "question": 1, "promise": 1, "trial": 1})
+        self.assertEqual([g["id"] for g in d["gaps"]["items"]], [2, 3])
+        self.assertEqual(d["gaps"]["items"][0]["reason"], "вопрос без ответа")
+        self.assertEqual(d["gaps"]["items"][1]["reason"], "обещание без срока")
+        self.assertEqual(d["gaps"]["total"], 2)
+        self.assertEqual([m["msg_id"] for m in d["messages"]["items"]], [10])
+
+    def test_analysis_validates_chat_and_generalizes_topic(self):
+        self.assertEqual(self.request("analysis")[0], 400)
+        self.assertEqual(self.request("analysis?chat_id=-100111&topic_id=abc")[0], 400)
+        self.assertEqual(self.request("analysis?chat_id=-100222")[0], 404)
+        status, d = self.request("analysis?chat_id=-100111&topic_id=0")
+        self.assertEqual(status, 200)
+        self.assertEqual(d["topic"]["topic_id"], 1)
+
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})
         self.assertEqual(status, 409)

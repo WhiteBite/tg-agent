@@ -68,6 +68,9 @@ a fluid message panel, single pane on mobile. Drawer width min(520px,100vw).
 - Settings forms: project-topic assignment, people aliases, local notification preview.
 - Loading state: immediate labelled busy state, errors remain near failed content.
 - Search view: separate entity/message results and pagination, context navigation.
+- Chat analysis view: one topic scoped summary — watch/project line, latest digests,
+  kind counts, entity register reusing the shared drawer, gaps with reasons, recent
+  messages; deep-linked by chat_id and topic_id for external clients.
 
 Primitives are shared CSS classes and JS renderers under ui_assets, not parallel
 framework components. SVG line icons use one 24x24 viewBox and 1.75 stroke,
