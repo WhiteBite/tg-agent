@@ -322,11 +322,11 @@ window.WS = (() => {
   });
   window.addEventListener("hashchange", render);
   document.addEventListener("DOMContentLoaded", () => {
-    applyTheme(saved("ws:theme", "light"));
+    applyTheme(saved("ws:theme", "dark"));
     matchMedia("(prefers-color-scheme: dark)").addEventListener(
       "change",
       () => {
-        if (saved("ws:theme", "light") === "system") applyTheme("system");
+        if (saved("ws:theme", "dark") === "system") applyTheme("system");
       },
     );
     $("#menu-toggle").innerHTML = icon("menu");

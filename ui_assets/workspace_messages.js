@@ -212,6 +212,7 @@
               ? d.hits.map(messageHtml).join("")
               : W.empty("Ничего не найдено", "Уточните запрос.");
             bindSelection(d.hits);
+            regroup();
           } catch (e) {
             $("#message-list").innerHTML = W.error(e);
           }
@@ -236,10 +237,35 @@
       }
     }
   }
-  function messageHtml(m) {
-    return `<article class="message ${selected.has(m.msg_id) ? "selected" : ""}" data-message="${m.msg_id}"><div class="message-meta"><strong>${esc(m.sender_name || "Автор неизвестен")}</strong><time>${time(m.ts)}</time></div>${m.reply_to ? `<small>Ответ на сообщение ${m.reply_to}</small>` : ""}<p>${esc(m.text || (m.media ? "Вложение без текста" : "Сервисное сообщение"))}</p><div class="message-actions">${m.media ? badgeMedia(m.media) : ""}<button class="text-button" data-select-msg="${m.msg_id}">${icon("copy")}${selected.has(m.msg_id) ? "Снять выделение" : "В выдержку"}</button></div></article>`;
-  }
   const badgeMedia = (m) => `<span class="badge">${esc(m)}</span>`;
+  function senderTint(name) {
+    const s = String(name || "");
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return h % 6;
+  }
+  function initials(name) {
+    const parts = String(name || "?").trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return "?";
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  function bubble(m, withActions) {
+    const name = m.sender_name || "Автор неизвестен";
+    const sel = withActions && selected.has(m.msg_id);
+    return `<article class="message ${sel ? "selected" : ""}" data-message="${m.msg_id}" data-sender="${esc(name)}" data-tint="${senderTint(name)}"><span class="msg-avatar" aria-hidden="true">${esc(initials(name))}</span><div class="msg-body"><div class="msg-head"><strong>${esc(name)}</strong></div>${m.reply_to ? `<small class="msg-reply">Ответ на сообщение ${m.reply_to}</small>` : ""}<p>${esc(m.text || (m.media ? "Вложение без текста" : "Сервисное сообщение"))}</p><div class="msg-foot"><time>${time(m.ts)}</time>${m.media ? badgeMedia(m.media) : ""}${withActions ? `<button class="text-button" data-select-msg="${m.msg_id}">${icon("copy")}${sel ? "Снять выделение" : "В выдержку"}</button>` : ""}</div></div></article>`;
+  }
+  const messageHtml = (m) => bubble(m, true);
+  function regroup(root) {
+    const node = root || $("#message-list");
+    if (!node) return;
+    let prev = null;
+    node.querySelectorAll(".message").forEach((el) => {
+      const same = prev !== null && el.dataset.sender === prev;
+      el.classList.toggle("same-as-prev", same);
+      prev = el.dataset.sender;
+    });
+  }
   function updateSelection() {
     $("#copybar").hidden = selected.size === 0;
     $("#copy-count").textContent = `Выбрано сообщений: ${selected.size}`;
@@ -283,6 +309,7 @@
           "Синхронизируйте тему или выберите другой источник.",
         );
       bindSelection(cache);
+      regroup();
       $("#older-messages")?.addEventListener("click", async function older() {
         try {
           const prev = await api(
@@ -305,6 +332,7 @@
             prev.messages.map(messageHtml).join(""),
           );
           bindSelection(cache);
+          regroup();
         } catch (e) {
           W.toast(e.message);
         }
@@ -400,6 +428,7 @@
             list.scrollTop + list.clientHeight >= list.scrollHeight - 100;
         list.insertAdjacentHTML("beforeend", rows.map(messageHtml).join(""));
         bindSelection(cache);
+        regroup();
         if (bottom) list.scrollTop = list.scrollHeight;
       }
     } catch (e) {
@@ -407,4 +436,6 @@
     }
   }, 5000);
   W.screens.messages = messages;
+  W.bubble = bubble;
+  W.regroup = regroup;
 })();

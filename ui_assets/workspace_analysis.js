@@ -6,8 +6,7 @@
     `${esc(kinds[g.kind] || g.kind)} · ${esc(g.reason)}` +
     (g.owner ? ` · ${esc(g.owner)}` : "") +
     (g.due_ts ? ` · срок ${date(g.due_ts)}` : "");
-  const msgRow = (m) =>
-    `<article class="message"><div class="message-meta"><strong>${esc(m.sender_name || "Автор неизвестен")}</strong><time>${time(m.ts)}</time></div><p>${esc(m.text || (m.media ? "Вложение без текста" : "Сервисное сообщение"))}</p></article>`;
+  const msgRow = (m) => W.bubble(m, false);
   async function analysis(params, seq) {
     const chatId = Number(params.get("chat_id")) || null,
       topic = Number(params.get("topic_id")) || 1;
@@ -49,11 +48,12 @@
           ? d.gaps.items.map((g) => `<div class="attention-row"><div class="row-body"><button class="row-title" data-entity="${g.id}">${esc(g.title)}</button><small>${gapText(g)}</small></div></div>`).join("")
           : '<p class="muted">Открытых вопросов без ответа и обещаний без срока или ответственного нет.</p>'
       }</section>` +
-      `<section class="stack"><h3>Последние сообщения</h3>${
+      `<section class="stack message-thread"><h3>Последние сообщения</h3>${
         d.messages.items.length
           ? d.messages.items.map(msgRow).join("")
           : W.empty("Сообщений нет", "Тема ещё не синхронизирована.")
       }</section>`;
+    W.regroup(document.querySelector(".message-thread"));
     const items = d.entities.items;
     if (items.length) {
       const pagination = document.createElement("div");

@@ -41,7 +41,7 @@
       get("projects"),
     ]);
     if (!W.isCurrent(seq)) return;
-    const theme = W.saved("ws:theme", "light");
+    const theme = W.saved("ws:theme", "dark");
     $("#view").innerHTML =
       `<section class="settings-section"><h2>Проекты и источники</h2><p>Сначала синхронизируйте чат в разделе «Переписка», затем назначьте его темы проекту. Уже назначенные темы можно перенести.</p><button class="button primary" id="setup-project">${icon("plus")}Подключить проект</button><div class="cluster section-gap">${projects.items.map((p) => `<button class="button" data-setup-project="${esc(p.name)}">${esc(p.name)}</button>`).join("")}</div></section>
       <section class="settings-section"><h2>Люди и роли</h2><p>Связи задаются вручную. Имя в переписке не считается подтверждённой личностью или исполнителем в 101.</p><div id="people-list" class="stack">${people.items.length ? people.items.map((p, i) => `<div class="attention-row"><div class="row-body"><strong>${esc(p.display_name || p.owner)}</strong><div class="row-meta">${esc(p.owner)}${p.role ? " · " + esc(p.role) : ""} · ${p.mapped ? "Связь задана" : "Без ручной связи"}</div></div><button class="button" data-person="${i}">Настроить</button></div>`).join("") : W.empty("Люди пока не определены", "Они появятся после извлечения ответственных из переписки.")}</div></section>

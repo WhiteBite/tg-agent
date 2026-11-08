@@ -1,47 +1,57 @@
 # TG Agent Workspace
 
 ## 1. Atmosphere and identity
-A project-control desk, not another messenger. Light paper surfaces, deep ink headings,
-restrained teal controls, compact readable registers. The signature is a continuous
-attention ledger that opens evidence beside the work rather than replacing it.
-The existing Telegram browser remains an explicit Correspondence destination.
+A dark-first control desk wearing the visual language of a modern Telegram client
+(Telegram Desktop / AyuGram): a near-dark desaturated canvas, soft elevated
+surfaces, rounded 12-16px components, and a correspondence pane that reads like a
+real messenger with message bubbles. One named accent — Telegram Blue — carries
+links, active navigation and primary actions. The workspace is still a
+project-control desk, not a chat client: the attention ledger, registers and
+evidence drawer remain the product; only the skin is messenger-grade.
 
-References: existing ui.html and its watch/message workflows; frontend redesign-skill,
-layout-skill and design-system-architecture references. This is a redesign, not an
-exact clone or generated-image implementation. No marketing illustration or hero.
+References: AyuGram Desktop demo screenshots (public repo) for the vibe — dark
+canvas, grouped settings rows, rounded toggles, blue section headers — not for
+pixels. No marketing illustration, no hero, no external assets.
 
 ## 2. Color
-| Role | Token | Light | Dark |
+Dark is the default theme; light remains available in settings and via the system
+preference. One accent: Telegram Blue #3390EC.
+
+| Role | Token | Dark (default) | Light |
 |---|---|---|---|
-| Canvas | --canvas | #f5f5f0 | #171c1b |
-| Navigation | --nav | #eeefe8 | #1c2321 |
-| Surface | --surface | #ffffff | #222b28 |
-| Soft surface | --soft | #f5f7f3 | #293330 |
-| Ink | --ink | #202d28 | #ecf0eb |
-| Secondary text | --muted | #58665e | #aebbb2 |
-| Rules | --rule | #d9dfd6 | #3e4c45 |
-| Accent | --accent | #17654e | #83c9ac |
-| Accent background | --accent-soft | #e1efe6 | #293f34 |
-| Accent control ink | --on-accent | #ffffff | #14251b |
-| Danger | --danger | #a63131 | #ffb2aa |
-| Danger background | --danger-soft | #fbebe6 | #422b28 |
-| Warning | --warning | #825817 | #edce85 |
-| Warning background | --warning-soft | #f6eedc | #3e3726 |
-| Scrim | --scrim | #18282055 | #070d0a88 |
-Neutral hairlines separate register rows. No decorative accent stripes, accent
-card outlines, or gradients. Status always has text as well as color.
+| Canvas | --canvas | #0e1621 | #ffffff |
+| Navigation | --nav | #17212b | #ffffff |
+| Surface | --surface | #1c2733 | #ffffff |
+| Soft surface | --soft | #232e3c | #f1f4f7 |
+| Ink | --ink | #f5f7fa | #0f1720 |
+| Secondary text | --muted | #8a9baa | #5c6b7a |
+| Rules | --rule | #26333f | #e3e8ed |
+| Edge (control border) | --edge | #3a4a5a | #c9d3dc |
+| Accent | --accent | #3390ec | #3390ec |
+| Accent strong (filled controls) | --accent-strong | #2c74b8 | #1f6fb2 |
+| Accent background | --accent-soft | #1e3a5f | #e3f0fd |
+| Accent control ink | --on-accent | #ffffff | #ffffff |
+| Danger | --danger | #ff7a7a | #c0392b |
+| Danger background | --danger-soft | #3a2226 | #fce9e9 |
+| Warning | --warning | #f0b429 | #8a6100 |
+| Warning background | --warning-soft | #3a3220 | #fbf0d9 |
+| Scrim | --scrim | #00000099 | #0f172055 |
+
+Message bubbles carry a per-sender tint (six neutral steps, --bubble-0..5) derived
+from a hash of the sender name, so a group chat reads as distinct voices without
+avatars. Neutral hairlines separate register rows. No decorative accent stripes,
+accent card outlines or gradients. Status always has text as well as color.
 
 ## 3. Typography
-Body uses locally available Segoe UI Variable / Segoe UI / sans-serif so private
-project data does not require external font requests. Page titles use Georgia / serif
-for an editorial ledger identity. Exactly two families. Numbers use tabular figures.
+One family: locally available Segoe UI Variable / Segoe UI / sans-serif, so private
+project data needs no external font request. No serif. Numbers use tabular figures.
 Scale: --text-xs 12px (metadata only), --text-sm 14px, --text-base 15px,
---text-lg 18px, --text-title clamp(26px,3vw,34px). Mobile body 17px, secondary 15px.
-Weights 400/500/600/700; body line-height 1.5; headings 1.15. Prose max 70ch.
+--text-lg 18px, --text-title clamp(22px,2.4vw,28px). Mobile body 17px, secondary
+15px. Weights 400/500/600/700; body line-height 1.5; headings 1.2. Prose max 70ch.
 
 ## 4. Spacing and layout
 Four-pixel base: --s1 4px, --s2 8px, --s3 12px, --s4 16px, --s5 20px,
---s6 24px, --s8 32px, --s10 40px. Radii: --r1 6px, --r2 10px, --r3 16px.
+--s6 24px, --s8 32px, --s10 40px. Radii: --r1 8px, --r2 12px, --r3 16px.
 Desktop labelled sidebar --sidebar 224px, fluid main content max 1500px.
 Main owns vertical scroll; shell bounded to 100dvh. Drawer owns a separate scroll.
 At 900px nav becomes an explicit menu; at 600px registers become stacked rows and
@@ -50,14 +60,20 @@ No permanent chat/topic/message columns. Correspondence has one source tree and
 a fluid message panel, single pane on mobile. Drawer width min(520px,100vw).
 
 ## 5. Components and states
-- App shell: labelled nav links, current wash + aria-current, header, main and skip link.
-- Page header: breadcrumb/back, editorial title, short explanation and one primary action.
+- App shell: labelled nav links, current item a filled accent pill + aria-current,
+  header, main and skip link.
+- Page header: breadcrumb/back, title, short explanation and one primary action.
 - Register: semantic table, sortable headers, clickable title buttons, owner/due/status,
   source and review/integration labels. Mobile uses the same content in a stacked grid.
 - Filters: visible labels, project/owner/status/type/date selectors, search scope visible.
-- Status badge: compact rounded rectangle, localized text; open/in progress/blocked/done.
-- Buttons: primary teal, secondary neutral, tertiary text, destructive red; 44px mobile.
-  Always hover, pressed, disabled, focus-visible and busy states; no hover-only actions.
+- Status badge: compact rounded pill, localized text; open/in progress/blocked/done.
+- Buttons: primary filled accent-strong, secondary neutral surface, tertiary text,
+  destructive red; 44px mobile. Always hover, pressed, disabled, focus-visible and
+  busy states; no hover-only actions.
+- Correspondence: source tree of chats/topics; message pane of bubbles. Each bubble
+  has an initials circle, sender name in accent, body and a time/actions foot.
+  Consecutive messages from one sender collapse the avatar and name. Selection is a
+  tonal wash plus an explicit action label, never an accent outline.
 - Entity drawer: modal dialog, explicit close, Escape, initial heading focus, trap tab,
   return focus on close, audit timeline, source quotations, review fields and errors.
 - Evidence block: author/date, escaped quote, missing/deleted marker, open-source control.
@@ -70,7 +86,7 @@ a fluid message panel, single pane on mobile. Drawer width min(520px,100vw).
 - Search view: separate entity/message results and pagination, context navigation.
 - Chat analysis view: one topic scoped summary — watch/project line, latest digests,
   kind counts, entity register reusing the shared drawer, gaps with reasons, recent
-  messages; deep-linked by chat_id and topic_id for external clients.
+  messages as bubbles; deep-linked by chat_id and topic_id for external clients.
 
 Primitives are shared CSS classes and JS renderers under ui_assets, not parallel
 framework components. SVG line icons use one 24x24 viewBox and 1.75 stroke,
@@ -85,8 +101,10 @@ storage; human entity review and project review cursors persist in SQLite metada
 ## 7. Accessibility
 Named inputs and icon controls, semantic landmarks/table/dialog, visible 2px focus
 ring, Escape dismissal and focus restoration, 44px touch controls, selectable evidence,
-overflow-wrap:anywhere for long source strings. Light default; dark and system available
-in settings. Do not express urgency only through red ink. No external script/CDN assets.
+overflow-wrap:anywhere for long source strings. Dark is the default theme; light and
+system remain available in settings. Body text meets 4.5:1 on both themes; filled
+controls use the accent-strong step so their white label also clears 4.5:1. Do not
+express urgency only through red ink. No external script/CDN/font/image assets.
 
 ## 8. Constraints and accepted debt
 Keep stdlib HTTP, existing guards, masking, MCP and Telegram functions. Existing
@@ -100,6 +118,6 @@ Full 101 task field/status/project/assignee mapping still requires a real contra
 
 ## QA contract
 Attention/project/list/detail/evidence/review/search/setup and 101 preview on seeded
-database; empty/missing/deleted/long content; 390px and 1440px light/dark; keyboard;
+database; empty/missing/deleted/long content; 390px and 1440px dark/light; keyboard;
 existing correspondence pagination/FTS/watch/alias/pins/copy/sync; HTTP guards and
 redaction. Screenshots and independent review are required, not just test counts.
