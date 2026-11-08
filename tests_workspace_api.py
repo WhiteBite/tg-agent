@@ -273,6 +273,33 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(d["topic"]["topic_id"], 1)
 
+    def test_bulk_close_stale_trials_only(self):
+        with DB(self.db_path) as db:
+            for eid, kind, due in ((7, "trial", self.now - 40 * 86400),
+                                   (8, "trial", self.now - 5 * 86400),
+                                   (9, "task", self.now - 40 * 86400)):
+                db.conn.execute(
+                    "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,owner,due_ts,project,created_ts,updated_ts) "
+                    "VALUES(?, 'services', -100111, 1, ?, ?, 'open', 'Иван', ?, 'А', ?, ?)",
+                    (eid, kind, f"Запись {eid}", due, self.now - 500, self.now - 100))
+            db.conn.commit()
+        status, d = self.request("entity/bulk_close", {"older_than_days": 30})
+        self.assertEqual(status, 200)
+        self.assertEqual(d["closed"], 1)
+        with DB(self.db_path) as db:
+            rows = {r["id"]: dict(r) for r in db.conn.execute(
+                "SELECT id,status,closed_ts FROM entities WHERE id IN (7,8,9)")}
+            self.assertEqual(rows[7]["status"], "done")
+            self.assertIsNotNone(rows[7]["closed_ts"])
+            self.assertEqual(rows[8]["status"], "open")
+            self.assertEqual(rows[9]["status"], "open")
+            ev = db.conn.execute(
+                "SELECT op,quote FROM entity_events WHERE entity_id=7 ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual(ev["op"], "human_edit")
+            self.assertIn("протухших", ev["quote"])
+        self.assertEqual(self.request("entity/bulk_close", {"older_than_days": 0})[0], 400)
+        self.assertEqual(self.request("entity/bulk_close", {"kinds": ["nope"]})[0], 400)
+
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})
         self.assertEqual(status, 409)

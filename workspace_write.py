@@ -89,6 +89,38 @@ def entity_edit(db: DB, body: dict) -> dict:
     return {"ok": True, "id": e["id"], "revision": revision(db, e["id"]), "changed": [c[0] for c in changes]}
 
 
+def bulk_close(db: DB, body: dict) -> dict:
+    try:
+        days = int(body.get("older_than_days", 30))
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceError("older_than_days должен быть числом") from exc
+    if not 1 <= days <= 3650:
+        raise WorkspaceError("older_than_days от 1 до 3650")
+    kinds = body.get("kinds") or ["trial"]
+    if not isinstance(kinds, list) or not kinds or any(k not in KINDS for k in kinds):
+        raise WorkspaceError("Неизвестные типы записей")
+    cutoff = int(time.time()) - days * 86400
+    closed = []
+    with db.conn:
+        db.conn.execute("BEGIN IMMEDIATE")
+        marks = ",".join("?" for _ in kinds)
+        rows = db.conn.execute(
+            "SELECT id,status FROM entities WHERE closed_ts IS NULL AND due_ts IS NOT NULL "
+            f"AND due_ts < ? AND kind IN ({marks}) ORDER BY updated_ts LIMIT 500",
+            [cutoff, *kinds]).fetchall()
+        now = int(time.time())
+        for r in rows:
+            db.conn.execute(
+                "UPDATE entities SET status='done', closed_ts=?, updated_ts=? WHERE id=?",
+                (now, now, r["id"]))
+            human_event(db, r["id"], "human_edit", "status", r["status"], "done",
+                        "массовое закрытие протухших")
+            put_meta(db, f"ws:review:{r['id']}",
+                     {"state": "pending", "revision": revision(db, r["id"])})
+            closed.append(r["id"])
+    return {"ok": True, "closed": len(closed), "older_than_days": days}
+
+
 def project_review(db: DB, body: dict) -> dict:
     project = body.get("project")
     try:

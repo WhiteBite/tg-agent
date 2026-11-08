@@ -81,7 +81,11 @@
         "Измените фильтры или подключите темы проекта.",
         '<a class="button" href="#settings">Настроить проект</a>',
       );
-    return `<div class="panel"><table class="register"><thead><tr><th class="title-col"><button data-sort="title" style="display:inline-flex;align-items:center;gap:var(--s1)">Название ${sortGlyph}</button></th><th>Ответственный</th><th><button data-sort="due_ts" style="display:inline-flex;align-items:center;gap:var(--s1)">Срок ${sortGlyph}</button></th><th>Статус</th><th class="optional">Проверка</th><th class="optional">101</th></tr></thead><tbody>${items.map((e) => `<tr data-entity="${e.id}"><td><button class="row-title">${esc(e.title)}</button><small>${esc(e.project || "Без проекта")} · ${esc(kinds[e.kind] || e.kind)}</small></td><td data-label="Ответственный">${esc(e.owner || "Не определён")}</td><td data-label="Срок"><span class="${e.due_ts && !e.closed_ts && e.due_ts < Date.now() / 1000 ? "row-due" : ""}">${date(e.due_ts)}</span></td><td data-label="Статус">${badge(e.status)}</td><td data-label="Проверка" class="optional">${badge(e.review_state || "pending", reviews[e.review_state || "pending"])}</td><td data-label="101" class="optional"><small>${e.external_id ? "Есть локальная запись" : "Нет локальной записи"}</small></td></tr>`).join("")}</tbody></table></div>`;
+    const row_actions = (e) =>
+      e.closed_ts
+        ? "<td></td>"
+        : `<td class="row-actions optional" data-label="Действия"><button class="icon-button" data-row-action="approve" data-id="${e.id}" aria-label="Отметить проверенной" title="Проверено">${icon("check")}</button><button class="icon-button" data-row-action="close" data-id="${e.id}" aria-label="Закрыть запись" title="Закрыть">${icon("close")}</button><button class="icon-button" data-row-action="defer" data-id="${e.id}" aria-label="Отложить на неделю" title="Отложить">${icon("clock")}</button></td>`;
+    return `<div class="panel"><table class="register"><thead><tr><th class="title-col"><button data-sort="title" style="display:inline-flex;align-items:center;gap:var(--s1)">Название ${sortGlyph}</button></th><th>Ответственный</th><th><button data-sort="due_ts" style="display:inline-flex;align-items:center;gap:var(--s1)">Срок ${sortGlyph}</button></th><th>Статус</th><th class="optional">Проверка</th><th class="optional">101</th><th class="optional">Действия</th></tr></thead><tbody>${items.map((e) => `<tr data-entity="${e.id}"><td><button class="row-title">${esc(e.title)}</button><small>${esc(e.project || "Без проекта")} · ${esc(kinds[e.kind] || e.kind)}</small></td><td data-label="Ответственный">${esc(e.owner || "Не определён")}</td><td data-label="Срок"><span class="${e.due_ts && !e.closed_ts && e.due_ts < Date.now() / 1000 ? "row-due" : ""}">${date(e.due_ts)}</span></td><td data-label="Статус">${badge(e.status)}</td><td data-label="Проверка" class="optional">${badge(e.review_state || "pending", reviews[e.review_state || "pending"])}</td><td data-label="101" class="optional"><small>${e.external_id ? "Есть локальная запись" : "Нет локальной записи"}</small></td>${row_actions(e)}</tr>`).join("")}</tbody></table></div>`;
   }
   async function entities(params, seq) {
     const forced = { decisions: "decision", questions: "question" }[
@@ -105,7 +109,7 @@
       (e) => (e.review_state || "pending") === "pending",
     );
     $("#view").innerHTML =
-      `${filterHtml}<div class="cluster" style="margin-bottom:var(--s4)"><span class="muted">${data.total} записей</span>${params.get("review_state") === "pending" ? `<button class="button saved-view" id="clear-review-filter">Только непроверенные ${icon("close")}</button>` : ""}${pending.length ? '<button class="button" id="bulk-approve">Проверить все показанные</button>' : ""}<button class="text-button" id="save-view">Сохранить представление</button><span class="cluster" id="save-view-form" hidden><input id="save-view-name" placeholder="Название представления" size="18"><button class="button" type="button" id="save-view-confirm">Сохранить</button><button class="text-button" type="button" id="save-view-cancel">Отменить</button></span>${saved.map(({ view, index }) => `<button class="button saved-view" data-saved-view="${index}">${esc(view.name)}</button><button class="icon-button" data-delete-view="${index}" aria-label="Удалить представление ${esc(view.name)}">${icon("close")}</button>`).join("")}</div>${register(data.items)}<div class="pagination"><span>${data.total ? Number(data.offset) + 1 : 0}–${Math.min(Number(data.offset) + data.items.length, data.total)} из ${data.total}</span><div class="cluster"><button class="button" id="prev-page" ${!Number(data.offset) ? "disabled" : ""}>Назад</button><button class="button" id="next-page" ${Number(data.offset) + data.items.length >= data.total ? "disabled" : ""}>Далее</button></div></div>`;
+      `${filterHtml}<div class="cluster" style="margin-bottom:var(--s4)"><span class="muted">${data.total} записей</span>${params.get("review_state") === "pending" ? `<button class="button saved-view" id="clear-review-filter">Только непроверенные ${icon("close")}</button>` : ""}${pending.length ? '<button class="button" id="bulk-approve">Проверить все показанные</button>' : ""}${W.route.name === "tasks" ? '<button class="button" id="bulk-close-rotten">Закрыть протухшие триалы</button>' : ""}<button class="text-button" id="save-view">Сохранить представление</button><span class="cluster" id="save-view-form" hidden><input id="save-view-name" placeholder="Название представления" size="18"><button class="button" type="button" id="save-view-confirm">Сохранить</button><button class="text-button" type="button" id="save-view-cancel">Отменить</button></span>${saved.map(({ view, index }) => `<button class="button saved-view" data-saved-view="${index}">${esc(view.name)}</button><button class="icon-button" data-delete-view="${index}" aria-label="Удалить представление ${esc(view.name)}">${icon("close")}</button>`).join("")}</div>${register(data.items)}<div class="pagination"><span>${data.total ? Number(data.offset) + 1 : 0}–${Math.min(Number(data.offset) + data.items.length, data.total)} из ${data.total}</span><div class="cluster"><button class="button" id="prev-page" ${!Number(data.offset) ? "disabled" : ""}>Назад</button><button class="button" id="next-page" ${Number(data.offset) + data.items.length >= data.total ? "disabled" : ""}>Далее</button></div></div>`;
     $("#entity-filters").onsubmit = (e) => {
       e.preventDefault();
       pageLink(params, {
@@ -165,6 +169,19 @@
       btn.outerHTML = W.error(conflict, "reload");
       const reload = document.querySelector("[data-action='reload']");
       if (reload) reload.textContent = "Перезагрузить список";
+    });
+    $("#bulk-close-rotten")?.addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        const r = await post("entity/bulk_close", { older_than_days: 30, kinds: ["trial"] });
+        W.toast(r.closed ? `Закрыто протухших триалов: ${r.closed}` : "Протухших триалов нет");
+        if (r.closed) W.render();
+        else btn.disabled = false;
+      } catch (err) {
+        W.toast(err?.message || "Не удалось закрыть");
+        btn.disabled = false;
+      }
     });
     $("#save-view").onclick = () => {
       $("#save-view-form").hidden = false;
@@ -429,7 +446,36 @@
   drawer.addEventListener("close", () => {
     guard = null;
   });
+  async function rowAction(action, id) {
+    const item = lastRegister.find((x) => Number(x.id) === id);
+    const expected = item?.last_event_id || 0;
+    try {
+      if (action === "approve") {
+        await post("entity/review", { id, state: "approved", expected_revision: expected });
+        W.toast("Проверка сохранена");
+      } else if (action === "close") {
+        await post("entity/edit", { id, expected_revision: expected, fields: { status: "done" } });
+        W.toast("Запись закрыта");
+      } else {
+        await post("entity/edit", {
+          id,
+          expected_revision: expected,
+          fields: { due_ts: Math.floor(Date.now() / 1000) + 7 * 86400 },
+        });
+        W.toast("Срок отложен на неделю");
+      }
+      W.render();
+    } catch (err) {
+      W.toast(err?.message || "Не удалось выполнить действие");
+      if (String(err?.message || "").startsWith("Запись изменилась")) W.render();
+    }
+  }
   document.addEventListener("click", (e) => {
+    const act = e.target.closest("[data-row-action]");
+    if (act) {
+      rowAction(act.dataset.rowAction, Number(act.dataset.id));
+      return;
+    }
     const close = e.target.closest("[data-close-drawer]");
     if (close) {
       if (warnUnsaved(closeDrawer)) return;
