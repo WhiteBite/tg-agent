@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Автономный конвейер: sync (watch) -> media -> extract -> fuzzy -> export -> digest -> monitor.
+"""Автономный конвейер: sync (watch) -> media -> extract -> alerts -> fuzzy -> export -> digest -> monitor.
 
     python3 pipeline.py                      # полный прогон по watch-листу
     python3 pipeline.py --pack services      # один пакет извлечения
@@ -42,6 +42,7 @@ import fuzzy_dedup as fuzzy_mod  # noqa: E402
 import export as export_mod  # noqa: E402
 import digest as digest_mod  # noqa: E402
 import monitor as monitor_mod  # noqa: E402
+import entity_alerts as entity_alerts_mod  # noqa: E402
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -133,6 +134,13 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         }
     except Exception as exc:
         report["extract"] = _step_err(exc, budget)
+    try:
+        al = await asyncio.wait_for(
+            _call_step(entity_alerts_mod.run, db_path, send=send),
+            timeout=budget)
+        report["alerts"] = {"ok": True, **al}
+    except Exception as exc:
+        report["alerts"] = _step_err(exc, budget)
     if not skip_fuzzy:
         try:
             fz = await asyncio.wait_for(

@@ -890,6 +890,71 @@ def test_live_alerts() -> None:
         alerts_mod._cooldown.clear()
 
 
+def test_entity_alerts() -> None:
+    print("=== alerts: сущностные алерты после extract — виды, курсор, dry-run/отправка ===")
+    import entity_alerts as ea
+    import notify as notify_mod
+
+    db_path = TMP / "entity_alerts.sqlite"
+    now = int(time.time())
+    with DB(db_path) as db:
+        for eid, pack, kind, title, due in (
+                (1, "services", "trial", "Триал Acme", now + 30 * 86400),
+                (2, "construction", "task", "Задача X", None)):
+            db.conn.execute(
+                "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,due_ts,created_ts,updated_ts) "
+                "VALUES(?,?,-100111,1,?,?,'open',?,?,?)",
+                (eid, pack, kind, title, due, now, now))
+        db.conn.execute("INSERT INTO entity_events(entity_id,ts,op,field,to_val,quote) "
+                        "VALUES(1,?,'new','kind','trial','триал')", (now,))
+        db.conn.execute("INSERT INTO entity_events(entity_id,ts,op,field,to_val,quote) "
+                        "VALUES(2,?,'new','kind','task','задача')", (now,))
+        db.conn.commit()
+
+    saved = {k: os.environ.get(k) for k in
+             ("TG_ENTITY_ALERTS", "TG_ENTITY_ALERT_KINDS", "TG_ALLOW_SEND")}
+    os.environ.pop("TG_ENTITY_ALERTS", None)
+    saved_t = notify_mod._telegram_send
+    try:
+        res = ea.run(db_path, send=False)
+        check(res.get("skipped") is True,
+              "сущностные алерты: без TG_ENTITY_ALERTS шаг пропускается")
+
+        os.environ["TG_ENTITY_ALERTS"] = "1"
+        res = ea.run(db_path, send=False)
+        joined = "\n".join(res["lines"])
+        check(res["new"] == 1 and "Триал Acme" in joined and "Задача X" not in joined,
+              "сущностные алерты: только виды из списка", joined)
+        with DB(db_path) as db:
+            check(db.get_meta(ea.CURSOR_KEY) is None,
+                  "сущностные алерты: dry-run не двигает курсор")
+
+        calls: list[list[str]] = []
+
+        async def fake_transport(messages, to="me"):
+            calls.append(list(messages))
+            return len(messages), []
+
+        notify_mod._telegram_send = fake_transport
+        os.environ["TG_ALLOW_SEND"] = "1"
+        res = ea.run(db_path, send=True)
+        check(res["new"] == 1 and len(calls) == 1,
+              "сущностные алерты: реальная отправка при TG_ALLOW_SEND=1", str(res))
+        with DB(db_path) as db:
+            check(db.get_meta(ea.CURSOR_KEY) is not None,
+                  "сущностные алерты: после отправки курсор сдвинут")
+        res2 = ea.run(db_path, send=True)
+        check(res2["new"] == 0 and len(calls) == 1,
+              "сущностные алерты: повторный прогон не шлёт то же снова")
+    finally:
+        notify_mod._telegram_send = saved_t
+        for key, val in saved.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
+
 def main() -> int:
     try:
         test_notify_event_loop()
@@ -908,6 +973,7 @@ def main() -> int:
         test_doctor_cost()
         test_digest_bound()
         test_loop_until_done_false()
+        test_entity_alerts()
         test_live_alerts()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
