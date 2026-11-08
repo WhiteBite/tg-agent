@@ -12,14 +12,15 @@ import json
 import re
 import sqlite3
 import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
-from sanitize import sanitize_name, sanitize_user_content
 from redact import redact
+from sanitize import sanitize_name, sanitize_user_content
 
 
-def clean_text(text: Optional[str], max_chars: int = 4096) -> Optional[str]:
+def clean_text(text: str | None, max_chars: int = 4096) -> str | None:
     """redact (secrets) + sanitize (control/invisible chars) — in this order:
     сначала маскируем, потом обрезаем, чтобы обрезка не оголила хвост секрета."""
     if not text:
@@ -401,7 +402,7 @@ class DB:
         self.conn.commit()
         self.conn.close()
 
-    def __enter__(self) -> "DB":
+    def __enter__(self) -> DB:
         return self
 
     def __exit__(self, *_exc) -> None:
@@ -644,7 +645,7 @@ class DB:
         )
         self.conn.commit()
 
-    def get_meta(self, key: str) -> Optional[str]:
+    def get_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
 
@@ -697,8 +698,8 @@ class DB:
             [(chat_id, msg_id, k, v) for k, v in refs],
         )
 
-    def transcripts(self, chat_id: Optional[int] = None, status: Optional[str] = None,
-                    query: Optional[str] = None, limit: int = 50) -> list[dict]:
+    def transcripts(self, chat_id: int | None = None, status: str | None = None,
+                    query: str | None = None, limit: int = 50) -> list[dict]:
         sql = "SELECT chat_id, msg_id, kind, status, engine, ts, text FROM media_assets WHERE 1=1"
         args: list[Any] = []
         if chat_id is not None:
@@ -716,9 +717,9 @@ class DB:
 
     def refs_summary(
         self,
-        chat_id: Optional[int] = None,
-        chat_ids: Optional[list[int]] = None,
-        since_ts: Optional[int] = None,
+        chat_id: int | None = None,
+        chat_ids: list[int] | None = None,
+        since_ts: int | None = None,
         limit: int = 25,
     ) -> dict[str, Any]:
         """Топ ссылок/упоминаний по чату или набору чатов (для watch-листа).
@@ -797,9 +798,9 @@ class DB:
     def invite_refs(
         self,
         limit: int = 50,
-        chat_id: Optional[int] = None,
-        chat_ids: Optional[list[int]] = None,
-        since_ts: Optional[int] = None,
+        chat_id: int | None = None,
+        chat_ids: list[int] | None = None,
+        since_ts: int | None = None,
     ) -> list[dict]:
         """Различные инвайты из refs, свежие первыми: value, n, last_ts."""
         sql = """
@@ -834,12 +835,12 @@ class DB:
         self,
         value: str,
         status: str,
-        title: Optional[str] = None,
-        participants: Optional[int] = None,
-        is_channel: Optional[bool] = None,
-        request_needed: Optional[bool] = None,
-        error: Optional[str] = None,
-        checked_ts: Optional[int] = None,
+        title: str | None = None,
+        participants: int | None = None,
+        is_channel: bool | None = None,
+        request_needed: bool | None = None,
+        error: str | None = None,
+        checked_ts: int | None = None,
     ) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO invite_status(value, status, title, participants, "
@@ -854,11 +855,11 @@ class DB:
     def _url_refs(
         self,
         like: str,
-        extract: Callable[[str], Optional[str]],
+        extract: Callable[[str], str | None],
         limit: int = 50,
-        chat_id: Optional[int] = None,
-        chat_ids: Optional[list[int]] = None,
-        since_ts: Optional[int] = None,
+        chat_id: int | None = None,
+        chat_ids: list[int] | None = None,
+        since_ts: int | None = None,
     ) -> list[dict]:
         """Различные ссылки одного хоста из refs (kind='url'), свежие первыми.
 
@@ -892,9 +893,9 @@ class DB:
     def mega_refs(
         self,
         limit: int = 50,
-        chat_id: Optional[int] = None,
-        chat_ids: Optional[list[int]] = None,
-        since_ts: Optional[int] = None,
+        chat_id: int | None = None,
+        chat_ids: list[int] | None = None,
+        since_ts: int | None = None,
     ) -> list[dict]:
         """Различные mega.nz/mega.co.nz-ссылки из refs, свежие первыми."""
         return self._url_refs(
@@ -905,9 +906,9 @@ class DB:
     def mailru_refs(
         self,
         limit: int = 50,
-        chat_id: Optional[int] = None,
-        chat_ids: Optional[list[int]] = None,
-        since_ts: Optional[int] = None,
+        chat_id: int | None = None,
+        chat_ids: list[int] | None = None,
+        since_ts: int | None = None,
     ) -> list[dict]:
         """Различные cloud.mail.ru-ссылки из refs, свежие первыми."""
         return self._url_refs(
@@ -930,12 +931,12 @@ class DB:
         host: str,
         value: str,
         status: str,
-        kind: Optional[str] = None,
-        title: Optional[str] = None,
-        size: Optional[int] = None,
-        nodes: Optional[int] = None,
-        error: Optional[str] = None,
-        checked_ts: Optional[int] = None,
+        kind: str | None = None,
+        title: str | None = None,
+        size: int | None = None,
+        nodes: int | None = None,
+        error: str | None = None,
+        checked_ts: int | None = None,
     ) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO link_status(host, value, kind, status, title, "
@@ -945,8 +946,8 @@ class DB:
         )
         self.conn.commit()
 
-    def digests_list(self, chat_id: Optional[int] = None,
-                     topic_id: Optional[int] = None, limit: int = 10) -> list[dict]:
+    def digests_list(self, chat_id: int | None = None,
+                     topic_id: int | None = None, limit: int = 10) -> list[dict]:
         sql = (
             "SELECT d.*, w.alias FROM digests d LEFT JOIN watch w "
             "  ON w.chat_id = d.chat_id "
@@ -963,8 +964,8 @@ class DB:
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args)]
 
-    def insert_pin(self, chat_id: int, msg_id: int, topic_id: Optional[int],
-                   ts: Optional[int], sender_name: Optional[str], text: Optional[str]) -> None:
+    def insert_pin(self, chat_id: int, msg_id: int, topic_id: int | None,
+                   ts: int | None, sender_name: str | None, text: str | None) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO pins(chat_id, msg_id, topic_id, ts, sender_name, text) "
             "VALUES(?,?,?,?,?,?)",
@@ -972,7 +973,7 @@ class DB:
              clean_text(text) if text else None),
         )
 
-    def pins(self, chat_id: int, topic_id: Optional[int] = None, limit: int = 5) -> list[dict]:
+    def pins(self, chat_id: int, topic_id: int | None = None, limit: int = 5) -> list[dict]:
         sql = "SELECT * FROM pins WHERE chat_id = ?"
         args: list[Any] = [chat_id]
         if topic_id is not None:
@@ -988,12 +989,12 @@ class DB:
         self,
         chat_id: int,
         title: str,
-        username: Optional[str],
+        username: str | None,
         kind: str,
         is_forum: bool,
-        members: Optional[int],
-        created_by_me: Optional[int] = None,
-        my_role: Optional[str] = None,
+        members: int | None,
+        created_by_me: int | None = None,
+        my_role: str | None = None,
     ) -> None:
         # SQLite проверяет NOT NULL на предлагаемом ряду даже в пути ON CONFLICT — NULL не должен доезжать до VALUES
         self.conn.execute(
@@ -1015,8 +1016,8 @@ class DB:
         topic_id: int,
         title: str,
         closed: bool = False,
-        messages: Optional[int] = None,
-        last_ts: Optional[int] = None,
+        messages: int | None = None,
+        last_ts: int | None = None,
     ) -> None:
         self.conn.execute(
             "INSERT INTO topics(chat_id, topic_id, title, closed, messages, last_ts) "
@@ -1028,8 +1029,8 @@ class DB:
             (chat_id, topic_id, title, int(closed), messages, last_ts),
         )
 
-    def chat_set_manage_fields(self, chat_id: int, created_by_me: Optional[int] = None,
-                               my_role: Optional[str] = None) -> bool:
+    def chat_set_manage_fields(self, chat_id: int, created_by_me: int | None = None,
+                               my_role: str | None = None) -> bool:
         sets = []
         params: list[Any] = []
         if created_by_me is not None:
@@ -1046,8 +1047,8 @@ class DB:
         self.conn.commit()
         return cur.rowcount > 0
 
-    def invite_link_add(self, chat_id: int, link: str, title: Optional[str] = None,
-                        expires_at: Optional[int] = None, usage_limit: Optional[int] = None,
+    def invite_link_add(self, chat_id: int, link: str, title: str | None = None,
+                        expires_at: int | None = None, usage_limit: int | None = None,
                         request_needed: bool = False, revoked: bool = False) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO invite_links(chat_id, link, title, expires_at, "
@@ -1056,7 +1057,7 @@ class DB:
              int(request_needed), int(revoked), int(time.time())))
         self.conn.commit()
 
-    def invite_links_list(self, chat_id: Optional[int] = None) -> list[dict]:
+    def invite_links_list(self, chat_id: int | None = None) -> list[dict]:
         if chat_id is not None:
             rows = self.conn.execute(
                 "SELECT * FROM invite_links WHERE chat_id = ? ORDER BY created_at DESC",
@@ -1066,16 +1067,16 @@ class DB:
                 "SELECT * FROM invite_links ORDER BY created_at DESC")
         return [dict(r) for r in rows]
 
-    def post_add(self, chat_id: int, msg_id: int, topic_id: Optional[int] = None,
-                 kind: Optional[str] = None, product: Optional[str] = None,
-                 tpl_hash: Optional[str] = None) -> None:
+    def post_add(self, chat_id: int, msg_id: int, topic_id: int | None = None,
+                 kind: str | None = None, product: str | None = None,
+                 tpl_hash: str | None = None) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO posts(chat_id, msg_id, topic_id, kind, product, "
             "tpl_hash, ts) VALUES(?,?,?,?,?,?,?)",
             (chat_id, msg_id, topic_id, kind, product, tpl_hash, int(time.time())))
         self.conn.commit()
 
-    def posts_list(self, chat_id: Optional[int] = None) -> list[dict]:
+    def posts_list(self, chat_id: int | None = None) -> list[dict]:
         if chat_id is not None:
             rows = self.conn.execute(
                 "SELECT * FROM posts WHERE chat_id = ? ORDER BY ts DESC", (chat_id,))
@@ -1083,7 +1084,7 @@ class DB:
             rows = self.conn.execute("SELECT * FROM posts ORDER BY ts DESC")
         return [dict(r) for r in rows]
 
-    def post_get(self, chat_id: int, msg_id: int) -> Optional[dict]:
+    def post_get(self, chat_id: int, msg_id: int) -> dict | None:
         row = self.conn.execute(
             "SELECT * FROM posts WHERE chat_id = ? AND msg_id = ?",
             (chat_id, msg_id)).fetchone()
@@ -1194,7 +1195,7 @@ class DB:
         self.conn.commit()
         return True
 
-    def _record_dirty(self, chat_id: int, topic_id: Optional[int], msg_id: int) -> None:
+    def _record_dirty(self, chat_id: int, topic_id: int | None, msg_id: int) -> None:
         # extract.py читает и гасит ключ dirty:{chat}:{topic} после перепрогона
         if topic_id is None:
             return
@@ -1215,7 +1216,7 @@ class DB:
             (key, json.dumps(ids[-200:])),
         )
 
-    def set_topic_counters(self, chat_id: int, topic_id: int, messages: int, last_ts: Optional[int]) -> None:
+    def set_topic_counters(self, chat_id: int, topic_id: int, messages: int, last_ts: int | None) -> None:
         self.conn.execute(
             "UPDATE topics SET messages=?, last_ts=? WHERE chat_id=? AND topic_id=?",
             (messages, last_ts, chat_id, topic_id),
@@ -1243,7 +1244,7 @@ class DB:
 
     # ---------------- read (используют server.py / sql.py) ----------------
 
-    def chats(self, query: Optional[str] = None, limit: int = 50) -> list[dict]:
+    def chats(self, query: str | None = None, limit: int = 50) -> list[dict]:
         sql = """
             SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS msg_count
             FROM chats c
@@ -1285,14 +1286,14 @@ class DB:
     def history(
         self,
         chat_id: int,
-        topic_id: Optional[int] = None,
+        topic_id: int | None = None,
         limit: int = 100,
-        since_ts: Optional[int] = None,
-        sender: Optional[str] = None,
+        since_ts: int | None = None,
+        sender: str | None = None,
         max_chars: int = 1200,
-        before_id: Optional[int] = None,
-        date_from: Optional[int] = None,
-        date_to: Optional[int] = None,
+        before_id: int | None = None,
+        date_from: int | None = None,
+        date_to: int | None = None,
     ) -> list[dict]:
         sql = "SELECT * FROM messages WHERE chat_id = ? AND deleted = 0"
         args: list[Any] = [chat_id]
@@ -1332,11 +1333,11 @@ class DB:
     def search(
         self,
         query: str,
-        chat_id: Optional[int] = None,
-        topic_id: Optional[int] = None,
+        chat_id: int | None = None,
+        topic_id: int | None = None,
         limit: int = 40,
         context: int = 0,
-        chat_ids: Optional[list[int]] = None,
+        chat_ids: list[int] | None = None,
     ) -> list[dict]:
         sql = """
             SELECT m.*, c.title AS chat_title FROM messages m
@@ -1386,8 +1387,8 @@ class DB:
     def stats(
         self,
         chat_id: int,
-        topic_id: Optional[int] = None,
-        since_ts: Optional[int] = None,
+        topic_id: int | None = None,
+        since_ts: int | None = None,
         top: int = 10,
     ) -> dict:
         where = "WHERE chat_id = ?"
@@ -1473,8 +1474,8 @@ class DB:
 
     # ---------------- watch-лист (то, за чем следит агент) ----------------
 
-    def watch_add(self, chat_id: int, topic_id: int, alias: Optional[str] = None,
-                  pinned: bool = False, project: Optional[str] = None) -> None:
+    def watch_add(self, chat_id: int, topic_id: int, alias: str | None = None,
+                  pinned: bool = False, project: str | None = None) -> None:
         # 0 и 1 — это одно и то же: General / группа без тем. Храним канонически 1.
         topic_id = 1 if topic_id in (0, 1) else topic_id
         self.conn.execute(
@@ -1486,7 +1487,7 @@ class DB:
         )
         self.conn.commit()
 
-    def watch_set_project(self, chat_id: int, topic_id: int, project: Optional[str]) -> bool:
+    def watch_set_project(self, chat_id: int, topic_id: int, project: str | None) -> bool:
         topic_id = 1 if topic_id in (0, 1) else topic_id
         row = self.conn.execute(
             "SELECT project FROM watch WHERE chat_id = ? AND topic_id = ?",
@@ -1520,7 +1521,7 @@ class DB:
         return {(r["chat_id"], r["topic_id"]) for r in self.conn.execute(
             "SELECT chat_id, topic_id FROM watch")}
 
-    def watch_list(self, chat_id: Optional[int] = None) -> list[dict]:
+    def watch_list(self, chat_id: int | None = None) -> list[dict]:
         sql = """
             SELECT w.*, c.title AS chat_title, c.username, c.is_forum,
                    (SELECT title FROM topics t
@@ -1597,10 +1598,10 @@ class DB:
 
     # ---------------- сущности, извлечённые из переписки (читает агент) ----------------
 
-    def entities_list(self, pack: Optional[str] = None, kind: Optional[str] = None,
-                      status: Optional[str] = None, project: Optional[str] = None,
-                      owner: Optional[str] = None, chat_id: Optional[int] = None,
-                      query: Optional[str] = None, limit: int = 100) -> list[dict]:
+    def entities_list(self, pack: str | None = None, kind: str | None = None,
+                      status: str | None = None, project: str | None = None,
+                      owner: str | None = None, chat_id: int | None = None,
+                      query: str | None = None, limit: int = 100) -> list[dict]:
         sql = "SELECT * FROM entities WHERE 1=1"
         args: list[Any] = []
         if pack is not None:
@@ -1631,7 +1632,7 @@ class DB:
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args)]
 
-    def entity_get(self, entity_id: int) -> Optional[dict]:
+    def entity_get(self, entity_id: int) -> dict | None:
         row = self.conn.execute("SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone()
         if row is None:
             return None
@@ -1676,8 +1677,7 @@ class DB:
         updated = keeper["updated_ts"] or keeper["created_ts"] or now
         for d in donors:
             ts = d["updated_ts"] or d["created_ts"] or now
-            if ts > updated:
-                updated = ts
+            updated = max(updated, ts)
         self.conn.execute(
             "UPDATE entities SET body=?, owner=?, due_ts=?, project=?, attrs_json=?, "
             "confidence=?, updated_ts=? WHERE id=?",
@@ -1746,7 +1746,7 @@ class DB:
             (entity_id,)).fetchone()
         return has_src is None and row["chat_id"] in ids
 
-    def entity_overdue(self, project: Optional[str] = None, days_ahead: int = 0,
+    def entity_overdue(self, project: str | None = None, days_ahead: int = 0,
                        limit: int = 100) -> list[dict]:
         sql = "SELECT * FROM entities WHERE closed_ts IS NULL AND due_ts IS NOT NULL AND due_ts <= ?"
         args: list[Any] = [int(time.time()) + days_ahead * 86400]
@@ -1757,8 +1757,8 @@ class DB:
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args)]
 
-    def entity_changes(self, since_ts: int, pack: Optional[str] = None,
-                       project: Optional[str] = None, limit: int = 500) -> dict:
+    def entity_changes(self, since_ts: int, pack: str | None = None,
+                       project: str | None = None, limit: int = 500) -> dict:
         filt = ""
         args: list[Any] = []
         if pack is not None:
@@ -1785,7 +1785,7 @@ class DB:
             items.append(d)
         return {"since_ts": since_ts, "count": count, "items": items}
 
-    def project_brief(self, project: str, pack: Optional[str] = None) -> dict:
+    def project_brief(self, project: str, pack: str | None = None) -> dict:
         where = " WHERE e.project = ?"
         args: list[Any] = [project]
         if pack is not None:
@@ -1836,7 +1836,7 @@ class DB:
             "last_event_ts": last_event_ts,
         }
 
-    def project_gaps(self, pack: Optional[str] = None, project: Optional[str] = None,
+    def project_gaps(self, pack: str | None = None, project: str | None = None,
                      limit: int = 100) -> dict:
         where = (" WHERE closed_ts IS NULL AND (kind = 'question'"
                  " OR (kind = 'promise' AND due_ts IS NULL)"
@@ -1860,9 +1860,9 @@ class DB:
 
     # ---------------- полнотекстовый поиск по истории ----------------
 
-    def search_fts(self, query: str, chat_id: Optional[int] = None,
-                   topic_id: Optional[int] = None, limit: int = 40,
-                   chat_ids: Optional[list[int]] = None) -> dict:
+    def search_fts(self, query: str, chat_id: int | None = None,
+                   topic_id: int | None = None, limit: int = 40,
+                   chat_ids: list[int] | None = None) -> dict:
         """FTS5-поиск; при любой ошибке синтаксиса/доступности падает на LIKE."""
         words = [w for w in re.split(r"\s+", query.strip()) if w]
         if not words:
@@ -1937,7 +1937,7 @@ _MEGA_RE = re.compile(
     re.IGNORECASE)
 
 
-def extract_refs(text: Optional[str], fwd_channel_id: Optional[int] = None) -> list[tuple[str, str]]:
+def extract_refs(text: str | None, fwd_channel_id: int | None = None) -> list[tuple[str, str]]:
     """Вытаскивает из текста сообщения все ссылки: @юзернеймы, публичные t.me,
     приватные инвайты, произвольные URL; плюс канал-источник пересланного."""
     t = text or ""
@@ -1955,7 +1955,7 @@ def extract_refs(text: Optional[str], fwd_channel_id: Optional[int] = None) -> l
     return out
 
 
-def mega_link(text: Optional[str]) -> Optional[tuple[str, str]]:
+def mega_link(text: str | None) -> tuple[str, str] | None:
     """(kind, handle) из ссылки mega.nz любого формата или текста вокруг неё;
     None — мега-ссылки нет. Хэндл без домена и ключа. Домен требует точку
     перед mega.nz — xmega.nz и прочие подделки не распознаются."""
@@ -1976,7 +1976,7 @@ _MAILRU_RE = re.compile(
     re.IGNORECASE)
 
 
-def cloudmail_link(text: Optional[str]) -> Optional[str]:
+def cloudmail_link(text: str | None) -> str | None:
     """Веблинк публичного облака cloud.mail.ru из ссылки или текста вокруг неё
     (id/ключ без домена, например AbCd12/EfGh34); None — не облачная ссылка."""
     if not text:
@@ -1985,19 +1985,19 @@ def cloudmail_link(text: Optional[str]) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def _mega_value(url: str) -> Optional[str]:
+def _mega_value(url: str) -> str | None:
     ml = mega_link(url)
     return ml[1] if ml else None
 
 
 # реестр http-хостов ссылочных валидаторов: (host в link_status, извлечение хэндла)
-_LINK_HOSTS: tuple[tuple[str, Callable[[str], Optional[str]]], ...] = (
+_LINK_HOSTS: tuple[tuple[str, Callable[[str], str | None]], ...] = (
     ("mega", _mega_value),
     ("mailru", cloudmail_link),
 )
 
 
-def split_links(items: Optional[list[str]]) -> dict[str, list[str]]:
+def split_links(items: list[str] | None) -> dict[str, list[str]]:
     """Разложить ссылки/тексты по видам для валидаторов: invite | mega | mailru
     | rest. Текст с несколькими ссылками попадает в каждую подходящую корзину —
     каждый валидатор выцепит своё."""

@@ -38,11 +38,11 @@ from typing import Any
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-import sync as sync_mod  # noqa: E402
+import sync as sync_mod
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -273,6 +273,7 @@ async def topic_create(client: Any, ref: Any, title: str, *,
     if not getattr(ent, "forum", False):
         return {"ok": False, "error": "темы только у форума"}
     import random
+
     from telethon.tl import functions
     req = functions.messages.CreateForumTopicRequest(
         peer=ent, title=title, icon_color=icon_color,
@@ -308,8 +309,8 @@ async def topic_edit(client: Any, ref: Any, topic_id: int, *,
     ent = await _resolve(client, ref)
     if not getattr(ent, "forum", False):
         return {"ok": False, "error": "темы только у форума"}
-    from telethon.tl import functions
     from telethon.errors import BadRequestError
+    from telethon.tl import functions
     try:
         await client(functions.messages.EditForumTopicRequest(
             peer=ent, topic_id=topic_id, title=title, closed=closed))

@@ -24,7 +24,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
@@ -161,13 +161,13 @@ def run_checks(live: bool = False, providers: bool = False) -> list[dict]:
     add("python >= 3.10", v >= (3, 10), f"{v.major}.{v.minor}.{v.micro}")
 
     try:
-        import telethon  # noqa
+        import telethon
         add("telethon", True, telethon.__version__)
     except Exception as exc:
         add("telethon", False, f"не установлен: {exc}")
 
     try:
-        import mcp  # noqa
+        import mcp
         add("mcp", True, getattr(mcp, "__version__", "ok"))
     except Exception as exc:
         add("mcp", False, f"не установлен: {exc}")

@@ -23,14 +23,21 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-from db import DB  # noqa: E402
-import jobs  # noqa: E402
-import sources  # noqa: E402
-from modules.downloads import ROOT, run_async, status, files, forwards, plan_job  # noqa: E402
+import jobs
+import sources
+from db import DB
+from modules.downloads import (
+    ROOT,
+    files,
+    forwards,
+    plan_job,
+    run_async,
+    status,
+)
 
 
 def main() -> None:

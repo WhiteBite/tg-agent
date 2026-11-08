@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional
 
 from db import DB
 
@@ -40,7 +39,7 @@ def progress_counts(db: DB, job_id: int) -> dict:
     return counts
 
 
-def job_get(db: DB, job_id: int) -> Optional[dict]:
+def job_get(db: DB, job_id: int) -> dict | None:
     row = db.conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     if row is None:
         return None
@@ -52,7 +51,7 @@ def job_get(db: DB, job_id: int) -> Optional[dict]:
     return job
 
 
-def job_list(db: DB, kind: Optional[str] = None, limit: int = 50) -> list[dict]:
+def job_list(db: DB, kind: str | None = None, limit: int = 50) -> list[dict]:
     sql, args = "SELECT id FROM jobs", []
     if kind:
         sql += " WHERE kind=?"
@@ -106,7 +105,7 @@ def is_active(db: DB, job_id: int) -> bool:
     return row is not None and row["state"] == "running"
 
 
-def item_next(db: DB, job_id: int) -> Optional[dict]:
+def item_next(db: DB, job_id: int) -> dict | None:
     row = db.conn.execute(
         "SELECT chat_id, msg_id FROM job_items WHERE job_id=? AND state='planned' "
         "ORDER BY chat_id, msg_id LIMIT 1", (job_id,)).fetchone()
@@ -114,7 +113,7 @@ def item_next(db: DB, job_id: int) -> Optional[dict]:
 
 
 def mark_item(db: DB, job_id: int, chat_id: int, msg_id: int,
-              state: str, detail: Optional[str] = None) -> None:
+              state: str, detail: str | None = None) -> None:
     if state not in ITEM_STATES:
         raise ValueError(f"неизвестное состояние пункта: {state!r}")
     db.conn.execute(
@@ -134,8 +133,8 @@ def retry_failed(db: DB, job_id: int) -> int:
     return cur.rowcount
 
 
-def finish(db: DB, job_id: int, state: str, error: Optional[str] = None,
-           result: Optional[dict] = None) -> None:
+def finish(db: DB, job_id: int, state: str, error: str | None = None,
+           result: dict | None = None) -> None:
     db.conn.execute(
         "UPDATE jobs SET state=?, finished_ts=?, updated_ts=?, error=?, "
         "result_json=? WHERE id=?",

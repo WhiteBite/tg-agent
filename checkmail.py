@@ -24,18 +24,19 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-from db import DB, cloudmail_link  # noqa: E402
-from checkmega import _fmt_size  # noqa: E402
+from checkmega import _fmt_size
+from db import DB, cloudmail_link
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -47,7 +48,7 @@ _RETRY_HTTP = (429, 500, 502, 503, 504)
 Transport = Callable[[str], Any]
 
 
-def _api_call(weblink: str, transport: Optional[Transport] = None) -> Any:
+def _api_call(weblink: str, transport: Transport | None = None) -> Any:
     """GET api/v2/folder по веблинку; тело 404 несёт not_exists, поэтому
     ошибочный статус возвращается как разобранный JSON, а не исключение."""
     url = API_URL + "?weblink=" + urllib.parse.quote("/" + weblink, safe="")
@@ -81,7 +82,7 @@ def _parse_result(res: Any) -> dict:
 
 
 def check_one(weblink: str, attempts: int = 3, retry_wait: float = 2.0,
-              transport: Optional[Transport] = None) -> dict:
+              transport: Transport | None = None) -> dict:
     """Одна живая проверка; 429/5xx спят и повторяют, удалённое (not_exists) —
     терминальное, прочие сбои — error без падения прогона."""
     for attempt in range(1, attempts + 1):
@@ -104,9 +105,9 @@ def check_mailru(
     max_age_days: float = 7.0,
     force: bool = False,
     delay: float = 0.6,
-    live_cap: Optional[int] = None,
-    exclude_chat_id: Optional[int] = None,
-    transport: Optional[Transport] = None,
+    live_cap: int | None = None,
+    exclude_chat_id: int | None = None,
+    transport: Transport | None = None,
 ) -> dict:
     """Проверить список ссылок/текстов с кэшем link_status (host='mailru').
 

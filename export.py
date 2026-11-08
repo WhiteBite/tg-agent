@@ -45,11 +45,11 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-from db import DB  # noqa: E402
+from db import DB
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 

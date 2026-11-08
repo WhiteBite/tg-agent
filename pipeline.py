@@ -29,20 +29,21 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-import proclock  # noqa: E402
-from db import DB  # noqa: E402
-import sync as sync_mod  # noqa: E402
-import media as media_mod  # noqa: E402
-import extract as extract_mod  # noqa: E402
-import fuzzy_dedup as fuzzy_mod  # noqa: E402
-import export as export_mod  # noqa: E402
-import digest as digest_mod  # noqa: E402
-import monitor as monitor_mod  # noqa: E402
-import entity_alerts as entity_alerts_mod  # noqa: E402
+import digest as digest_mod
+import entity_alerts as entity_alerts_mod
+import export as export_mod
+import extract as extract_mod
+import fuzzy_dedup as fuzzy_mod
+import monitor as monitor_mod
+import proclock
+import sync as sync_mod
+from db import DB
+
+import media as media_mod
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 

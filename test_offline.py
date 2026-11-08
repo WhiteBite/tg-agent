@@ -10,8 +10,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import asyncio
 import json
 import os
@@ -24,14 +22,15 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 # тесты герметичны: пользовательский .env (реальные ключи) не читается ни здесь, ни в подпроцессах
 os.environ["TG_ENV_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from db import DB, SCHEMA_VERSION, run_sql  # noqa: E402
-import sync as sync_mod  # noqa: E402
+import sync as sync_mod
+from db import DB, SCHEMA_VERSION, run_sql
 
 NOW = datetime.now(timezone.utc)
 FAILURES: list[str] = []
@@ -1904,9 +1903,10 @@ def test_media(db_path: Path) -> None:
     md_db = db_path.parent / "media.sqlite"
     if md_db.exists():
         md_db.unlink()
-    import live as live_mod
-    import media as media_mod
     import extract as extract_mod
+    import live as live_mod
+
+    import media as media_mod
 
     users = {1: User(1, "Иван")}
     group = Channel(-100600, "Голосовая", None, forum=False)
@@ -2732,7 +2732,7 @@ def test_ui_security(db_path: Path) -> None:
         check(code == 403, "ui: чужой Host -> 403", str(code))
 
         # POST не-JSON (form) — как из чужой формы в браузере
-        data = "chat_id=-100222&topic_id=1".encode()
+        data = b"chat_id=-100222&topic_id=1"
         req2 = urlreq.Request(f"http://127.0.0.1:{port}/api/watch", data=data,
                               headers={"Content-Type": "application/x-www-form-urlencoded"})
         try:
@@ -3012,6 +3012,7 @@ def test_env_loader(db_path: Path) -> None:
 
         # бутстрап логина: спросил один раз -> записал -> больше не спрашивает
         import builtins
+
         import login as login_mod
         bs = db_path.parent / "test_bootstrap.env"
         bs.write_text("OTHER=1\n", encoding="utf-8")
@@ -3036,6 +3037,7 @@ def test_env_loader(db_path: Path) -> None:
               "login: модуль импортируется офлайн (без сети)")
 
         import io as _io
+
         from env import harden_stdio
         saved_out = sys.stdout
         buf = _io.TextIOWrapper(_io.BytesIO(), encoding="cp1251", errors="strict")
@@ -3439,8 +3441,11 @@ class FakeCheckClient:
 def test_checklinks(db_path: Path) -> None:
     print("=== checklinks: статус инвайт-ссылок через checkChatInvite ===")
     import checklinks as chk
-    from telethon.errors import (FloodWaitError, InviteHashExpiredError,
-                                 InviteHashInvalidError)
+    from telethon.errors import (
+        FloodWaitError,
+        InviteHashExpiredError,
+        InviteHashInvalidError,
+    )
 
     check(chk.invite_hash("https://t.me/+AbCdEf") == "AbCdEf"
           and chk.invite_hash("t.me/joinchat/QwErTy") == "QwErTy"
@@ -4217,6 +4222,7 @@ def test_llm_extra_body(db_path: Path) -> None:
     import http.server
     import threading
     import urllib.request as urlreq
+
     from llm_http import post
 
     class Handler400(http.server.BaseHTTPRequestHandler):
@@ -4299,8 +4305,9 @@ def test_extract_telemetry(db_path: Path) -> None:
                 "VALUES(-100561, ?, 1, ?, ?, 1, 'А', 0, ?)",
                 (mid, ts, datetime.fromtimestamp(ts, timezone.utc).isoformat(), text))
         db.conn.commit()
-    import io
     import contextlib
+    import io
+
     import extract as extract_mod
     from packs import PACKS
 
@@ -4437,7 +4444,7 @@ def test_extract_bisection(db_path: Path) -> None:
         db.conn.commit()
 
     def trunc_prov(prompt, pack):
-        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.MULTILINE)]
         if len(ids) > 2:
             raise extract_mod.ResponseTruncated("finish_reason=length")
         ops = [{"op": "new", "kind": "task", "title": f"Задача {i}", "entity_id": None,
@@ -4538,7 +4545,7 @@ def test_extract_scoping(db_path: Path) -> None:
     svc = PACKS["services"]
 
     def count_prov(prompt, pack):
-        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.MULTILINE)]
         ops = [{"op": "new", "kind": "service", "title": f"Сервис {i}",
                 "entity_id": None, "body": None, "owner": None, "due_text": None,
                 "due_ts": None, "confidence": 0.9,
@@ -4686,7 +4693,7 @@ def test_extract_moderation(db_path: Path) -> None:
     def poisoned(prompt, pack):
         if "неприличное" in prompt:
             raise extract_mod.ModerationBlocked("data_inspection_failed")
-        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.MULTILINE)]
         ops = [{"op": "new", "kind": "service", "title": f"Сервис {i}",
                 "entity_id": None, "body": None, "owner": None, "due_text": None,
                 "due_ts": None, "confidence": 0.9,
@@ -4770,7 +4777,7 @@ def test_extract_fault_tolerance(db_path: Path) -> None:
         attempts["n"] += 1
         if attempts["n"] <= 2:
             raise OSError("соединение сброшено")
-        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.MULTILINE)]
         ops = [{"op": "new", "kind": "service", "title": f"Сервис {i}",
                 "entity_id": None, "body": None, "owner": None, "due_text": None,
                 "due_ts": None, "confidence": 0.9,
@@ -4915,7 +4922,7 @@ def test_global_dedup(db_path: Path) -> None:
 
     def xprov(prompt, pack):
         chat_id = int(re.search(r"чат (-?\d+)", prompt).group(1))
-        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.MULTILINE)]
         return {"ops": [{
             "op": "new", "kind": "service", "title": f"Сервис {chat_id}",
             "entity_id": None, "body": "тело из Б" if chat_id == -100902 else None,
@@ -5164,6 +5171,7 @@ def test_key_fallback(db_path: Path) -> None:
     print("=== llm_http: ротация ключей при 401/403 ===")
     import http.server
     import threading
+
     from llm_http import key_list, post_json_keys
 
     check(key_list("sk-a, sk-b") == ["sk-a", "sk-b"],
@@ -5312,7 +5320,7 @@ def test_extract_windows(db_path: Path) -> None:
     base = "extract:-100586:1:services"
 
     def wprov(prompt, pack):
-        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.M)]
+        ids = [int(m.group(1)) for m in re.finditer(r"^\[(\d+)\]", prompt, re.MULTILINE)]
         ops = [{"op": "new", "kind": "service", "title": f"Сервис win{i}",
                 "entity_id": None, "body": None, "owner": None, "due_text": None,
                 "due_ts": None, "confidence": 0.9, "dedup_hint": f"win{i}.com",
@@ -5571,6 +5579,7 @@ def test_window_transient(db_path: Path) -> None:
         db.conn.commit()
 
     import sqlite3 as sqlite3_mod
+
     import extract as extract_mod
     from packs import PACKS
     svc = PACKS["services"]
@@ -5616,8 +5625,8 @@ def test_window_transient(db_path: Path) -> None:
 
 def test_live_reconnect_hardening(db_path: Path) -> None:
     print("=== live: реконнекты без предела (connection_retries=None) ===")
-    import telethon
     import live as live_mod
+    import telethon
     captured: dict = {}
 
     class FakeTgClient:

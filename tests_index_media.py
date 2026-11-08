@@ -27,10 +27,11 @@ os.environ["TG_ENV_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from db import DB  # noqa: E402
-import sync as sync_mod  # noqa: E402
-import media as media_mod  # noqa: E402
-import live as live_mod  # noqa: E402
+import live as live_mod
+import sync as sync_mod
+from db import DB
+
+import media as media_mod
 
 NOW = datetime.now(timezone.utc)
 FAILURES: list[str] = []

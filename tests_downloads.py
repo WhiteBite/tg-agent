@@ -18,13 +18,13 @@ os.environ["TG_ENV_FILE"] = ""
 os.environ["TG_DOWNLOADS_DIR"] = os.environ.get("TEST_TMP_DIR", "") or str(
     Path(tempfile.mkdtemp(prefix="tg_downloads_")))
 
-from db import DB, SCHEMA_VERSION  # noqa: E402
-import jobs  # noqa: E402
-import modules  # noqa: E402
-import modules.downloads as dl  # noqa: E402
-import sources  # noqa: E402
-from telethon.errors import ChatForwardsRestrictedError, FloodWaitError  # noqa: E402
-from workspace_api import dispatch  # noqa: E402
+import jobs
+import modules
+import modules.downloads as dl
+import sources
+from db import DB, SCHEMA_VERSION
+from telethon.errors import ChatForwardsRestrictedError, FloodWaitError
+from workspace_api import dispatch
 
 HERE = Path(__file__).parent
 TMP = Path(os.environ["TG_DOWNLOADS_DIR"])

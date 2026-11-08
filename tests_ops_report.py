@@ -27,7 +27,7 @@ os.environ.pop("TG_NOTIFY_ROUTES", None)
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from db import DB  # noqa: E402
+from db import DB
 
 NOW = datetime.now(timezone.utc)
 FAILURES: list[str] = []

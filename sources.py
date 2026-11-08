@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 from db import DB
 
@@ -60,7 +59,7 @@ def collection_delete(db: DB, name: str) -> bool:
     return True
 
 
-def _chat_ref(ref: str) -> Optional[int]:
+def _chat_ref(ref: str) -> int | None:
     try:
         return int(ref)
     except ValueError:
@@ -107,8 +106,8 @@ def resolve(db: DB, spec: str) -> list[dict]:
                 raise ValueError(f"чат не найден в индексе: {ref!r}")
         else:
             raise ValueError(
-                "неизвестный источник: {!r} (watch | all | folder:<id> | "
-                "collection:<имя> | chat:<id|@username>)".format(tok))
+                f"неизвестный источник: {tok!r} (watch | all | folder:<id> | "
+                "collection:<имя> | chat:<id|@username>)")
         for r in rows:
             out.setdefault(r["chat_id"], {"chat_id": r["chat_id"], "title": r["title"]})
     return sorted(out.values(), key=lambda r: r["chat_id"])

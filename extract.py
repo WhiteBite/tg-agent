@@ -40,14 +40,20 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-from db import DB  # noqa: E402
-from packs import PACKS  # noqa: E402
-import media as media_mod  # noqa: E402
-from llm_http import call_with_deadline, extra_body, key_list, post_json_keys  # noqa: E402
+from db import DB
+from llm_http import (
+    call_with_deadline,
+    extra_body,
+    key_list,
+    post_json_keys,
+)
+from packs import PACKS
+
+import media as media_mod
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 

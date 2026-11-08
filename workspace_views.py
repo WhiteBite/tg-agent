@@ -4,10 +4,17 @@ import json
 import os
 import time
 
-from alerts import config as alerts_config
 import engine as engine_mod
+from alerts import config as alerts_config
 from db import DB
-from workspace_store import REVIEW_JOINS, REVIEW_STATE_SQL, WorkspaceError, metadata, page, review
+from workspace_store import (
+    REVIEW_JOINS,
+    REVIEW_STATE_SQL,
+    WorkspaceError,
+    metadata,
+    page,
+    review,
+)
 from workspace_write import autoclose_stale_trials
 
 

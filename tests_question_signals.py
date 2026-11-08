@@ -8,8 +8,8 @@ from pathlib import Path
 
 os.environ["TG_ENV_FILE"] = ""
 
-from db import DB
 import extract
+from db import DB
 from packs import PACKS
 
 

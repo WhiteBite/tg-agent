@@ -29,7 +29,7 @@ DB_PATH = HERE / "db.py"
 
 def _make_db(db_path: Path) -> None:
     sys.path.insert(0, str(HERE))
-    from db import DB  # noqa: E402
+    from db import DB
 
     now = int(time.time())
     with DB(db_path) as db:

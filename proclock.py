@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import IO, Optional
+from typing import IO
 
 
-def acquire_instance_lock(path: str | Path) -> Optional[IO]:
+def acquire_instance_lock(path: str | Path) -> IO | None:
     """Открытый lock-файл при успешном захвате, None если блокировка занята."""
     fh = open(path, "a+")
     try:

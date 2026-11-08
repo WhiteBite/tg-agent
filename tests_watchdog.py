@@ -21,7 +21,7 @@ os.environ["MEDIA_PROVIDER"] = "stub"
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from db import DB  # noqa: E402
+from db import DB
 
 KEY = "pipeline:last_ok_ts"
 FAILURES: list[str] = []

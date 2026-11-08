@@ -18,17 +18,17 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-import sync as sync_mod  # noqa: E402
-from db import DB  # noqa: E402
+import sync as sync_mod
+from db import DB
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -47,7 +47,7 @@ async def folder_edit(
     folder_id: int,
     chats: list[str],
     mode: str = "add",
-    db_path: Optional[str] = None,
+    db_path: str | None = None,
 ) -> dict:
     """add/remove чатов в папке по id или @username. Возвращает отчёт;
     при db_path обновляет и локальную копию состава (folder_chats)."""
@@ -94,7 +94,7 @@ async def folder_edit(
     target.include_peers = peers
     await client(functions.messages.UpdateDialogFilterRequest(
         id=folder_id, filter=target))
-    refreshed: Optional[list[dict]] = None
+    refreshed: list[dict] | None = None
     if db_path:
         try:
             refreshed = await sync_mod.fetch_folders(client)

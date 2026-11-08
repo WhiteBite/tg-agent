@@ -20,7 +20,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # Zero-width and invisible Unicode characters that can be used to hide content
 _INVISIBLE_CHARS = re.compile(
@@ -45,7 +45,7 @@ _EXCESSIVE_NEWLINES = re.compile(r"\n{3,}")
 
 
 def sanitize_user_content(
-    text: Optional[str], max_length: int = 4096, *, preserve_emoji: bool = False
+    text: str | None, max_length: int = 4096, *, preserve_emoji: bool = False
 ) -> str:
     """Sanitize user-controlled text content before returning in tool results.
 
@@ -67,9 +67,7 @@ def sanitize_user_content(
     for ch in text:
         cat = unicodedata.category(ch)
         if cat in ("Cc", "Cf"):
-            if ch in ("\n", "\t"):
-                cleaned.append(ch)
-            elif preserve_emoji and (ch == "\u200d" or "\U000e0020" <= ch <= "\U000e007f"):
+            if ch in ("\n", "\t") or preserve_emoji and (ch == "\u200d" or "\U000e0020" <= ch <= "\U000e007f"):
                 cleaned.append(ch)
             # else: drop the character
         else:
@@ -97,7 +95,7 @@ def sanitize_user_content(
     return result
 
 
-def sanitize_name(text: Optional[str], max_length: int = 256) -> str:
+def sanitize_name(text: str | None, max_length: int = 256) -> str:
     """Sanitize a display name (username, chat title, sender name).
 
     Names should be single-line, so newlines are stripped entirely
@@ -136,8 +134,8 @@ def _json_default(obj: Any) -> Any:
 
 
 def format_tool_result(
-    records: List[Dict[str, Any]],
-    metadata: Optional[Dict[str, Any]] = None,
+    records: list[dict[str, Any]],
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Format tool output as a JSON string.
 
@@ -145,7 +143,7 @@ def format_tool_result(
     this formatter. The JSON structure provides an unambiguous boundary
     between trusted field names and untrusted user-generated values.
     """
-    payload: Dict[str, Any] = {"results": records}
+    payload: dict[str, Any] = {"results": records}
     if metadata:
         payload.update(metadata)
     return json.dumps(payload, ensure_ascii=False, default=_json_default)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 from db import DB
-from workspace_store import WorkspaceError, entities, timestamp, page
+from workspace_store import WorkspaceError, entities, page, timestamp
 
 
 def search(db: DB, params: dict) -> dict:

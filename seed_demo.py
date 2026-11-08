@@ -16,12 +16,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from test_offline import (  # noqa: E402
-    Channel, FakeClient, ForumTopicsRes, MessageActionTopicCreate, Reactions,
-    MessageMediaPhoto, MessageReplyHeader, MessageServiceMsg, Msg, Topic, User,
+import sync as sync_mod
+from db import DB
+from test_offline import (
+    Channel,
+    FakeClient,
+    MessageActionTopicCreate,
+    MessageMediaPhoto,
+    MessageReplyHeader,
+    MessageServiceMsg,
+    Msg,
+    Reactions,
+    Topic,
+    User,
 )
-import sync as sync_mod  # noqa: E402
-from db import DB  # noqa: E402
 
 NOW = datetime.now(timezone.utc)
 R = random.Random(42)

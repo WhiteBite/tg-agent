@@ -20,16 +20,16 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-import sync as sync_mod  # noqa: E402
+import sync as sync_mod
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -48,7 +48,7 @@ def _marked(ch: Any) -> int:
 
 
 async def search_global(client: Any, query: str, limit: int = 20,
-                        kind: Optional[str] = None) -> list[dict]:
+                        kind: str | None = None) -> list[dict]:
     """Публичные чаты и пользователи по ключевому слову.
 
     kind: 'channel' (каналы-вещания), 'group' (группы/супергруппы),

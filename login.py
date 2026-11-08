@@ -18,8 +18,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from env import load_env, write_env  # noqa: E402
-from sync import start_kwargs  # noqa: E402
+from env import load_env, write_env
+from sync import start_kwargs
 
 load_env()
 

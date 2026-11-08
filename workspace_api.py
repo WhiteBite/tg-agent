@@ -1,14 +1,35 @@
 from __future__ import annotations
 
 from modules import workspace_routes
-from workspace_store import WorkspaceError, changes, entities, entity, scrub
-from workspace_views import (alert_settings, catalog, chat_analysis, engine_view,
-                             home, integration_preview, integration_status, links,
-                             media_view, notification_preview, people, projects)
-from workspace_write import (bulk_close, catalog_star, engine_start, engine_stop,
-                             entity_edit, entity_review, person, project_review,
-                             project_topics, set_alerts, visit)
 from workspace_search import search
+from workspace_store import WorkspaceError, changes, entities, entity, scrub
+from workspace_views import (
+    alert_settings,
+    catalog,
+    chat_analysis,
+    engine_view,
+    home,
+    integration_preview,
+    integration_status,
+    links,
+    media_view,
+    notification_preview,
+    people,
+    projects,
+)
+from workspace_write import (
+    bulk_close,
+    catalog_star,
+    engine_start,
+    engine_stop,
+    entity_edit,
+    entity_review,
+    person,
+    project_review,
+    project_topics,
+    set_alerts,
+    visit,
+)
 
 _MODULE_ROUTES = workspace_routes()
 

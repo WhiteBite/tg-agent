@@ -19,13 +19,12 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-from db import DB  # noqa: E402
-import login as login_mod  # noqa: E402
-import sync as sync_mod  # noqa: E402
+import login as login_mod
+import sync as sync_mod
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 UI_PORT = os.environ.get("PORT", "8899")
@@ -62,7 +61,7 @@ def parse_pick(text: str, chats: list[dict]) -> list[str]:
 
 def print_choices(chats: list[dict], total: int | None = None) -> None:
     total = total or len(chats)
-    head = f"Что можно слить (группы — с темами, каналы — лентой)"
+    head = "Что можно слить (группы — с темами, каналы — лентой)"
     if total > len(chats):
         head += f" — показаны {len(chats)} из {total}; любой другой чат вводи как @username"
     print(f"\n{head}:")

@@ -23,20 +23,21 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any
 
 from db import DB, clean_text, extract_refs
-from sanitize import sanitize_name
 from env import load_env
+from sanitize import sanitize_name
+
 import media as media_mod
 
 load_env()
 
 try:  # Telethon нужен только для реального прогона, не для офлайн-тестов
     from telethon import TelegramClient
+    from telethon.sessions import StringSession
     from telethon.tl import functions
     from telethon.tl.types import MessageService
-    from telethon.sessions import StringSession
     HAVE_TELETHON = True
 except ImportError:  # pragma: no cover
     HAVE_TELETHON = False
@@ -154,7 +155,7 @@ async def list_chat_choices(client: Any) -> list[dict]:
     return out
 
 
-def topic_of_message(msg: Any) -> Optional[int]:
+def topic_of_message(msg: Any) -> int | None:
     """Определяет id темы сообщения.
 
     Telegram хранит темы как треды: у сообщения внутри темы reply_to ведёт на
@@ -178,7 +179,7 @@ def topic_of_message(msg: Any) -> Optional[int]:
     return None
 
 
-def sender_name(msg: Any, client: Any) -> Optional[str]:
+def sender_name(msg: Any, client: Any) -> str | None:
     """Имя автора из кэша Telethon рядом с сообщением; сети не зовём."""
     if getattr(msg, "out", False):
         return "me"
@@ -209,14 +210,14 @@ def marked_id(entity: Any) -> int:
     return eid
 
 
-def media_of(msg: Any) -> Optional[str]:
+def media_of(msg: Any) -> str | None:
     media = getattr(msg, "media", None)
     if media is None:
         return None
     return MEDIA_LABELS.get(_label(media), _label(media).replace("MessageMedia", "").lower())
 
 
-def message_row(msg: Any, chat_id: int, topic_id: Optional[int], client: Any) -> dict[str, Any]:
+def message_row(msg: Any, chat_id: int, topic_id: int | None, client: Any) -> dict[str, Any]:
     date = getattr(msg, "date", None)
     ts = int(date.timestamp()) if date is not None else None
     # сервисное сообщение: у него есть action и нет текста
@@ -271,7 +272,7 @@ def message_row(msg: Any, chat_id: int, topic_id: Optional[int], client: Any) ->
 async def list_topics(client: Any, entity: Any) -> list[dict]:
     """Список тем форума через messages.GetForumTopics (в Telethon нет обёртки)."""
     topics: list[dict] = []
-    offset_date: Optional[datetime] = None
+    offset_date: datetime | None = None
     offset_id = offset_topic = 0
     while True:
         res = await client(
@@ -318,9 +319,9 @@ async def pull_chat(
     chat_id: int,
     *,
     forum: bool,
-    limit: Optional[int],
+    limit: int | None,
     min_id: int,
-    since_ts: Optional[int],
+    since_ts: int | None,
     dry_run: bool,
 ) -> dict:
     """Один проход по группе сверху вниз; тема определяется по каждому сообщению.
@@ -389,7 +390,7 @@ async def pull_chat(
             "max_id": max_id, "per_topic": total_per_topic}
 
 
-def _peer_marked(p: Any) -> Optional[int]:
+def _peer_marked(p: Any) -> int | None:
     """PeerChannel/PeerChat/PeerUser -> «помеченный» id как в диалогах."""
     ch = getattr(p, "channel_id", None)
     if ch is not None:
@@ -445,8 +446,8 @@ async def sync_chat(
     db: DB,
     dialog_or_chat: Any,
     *,
-    limit: Optional[int],
-    days: Optional[int],
+    limit: int | None,
+    days: int | None,
     dry_run: bool,
 ) -> dict:
     entity = getattr(dialog_or_chat, "entity", dialog_or_chat)
@@ -518,7 +519,7 @@ async def backfill(
     start_id: int = 0,
     chunk_size: int = 3000,
     sleep: float = 0.5,
-    max_messages: Optional[int] = None,
+    max_messages: int | None = None,
     dry_run: bool = False,
     entity: Any = None,
 ) -> dict:
@@ -686,8 +687,8 @@ async def sync_watched(
     client: Any,
     db: DB,
     *,
-    limit: Optional[int] = None,
-    days: Optional[int] = None,
+    limit: int | None = None,
+    days: int | None = None,
     backfill_chunk: int = 0,
     dry_run: bool = False,
 ) -> list[dict]:
@@ -717,9 +718,9 @@ async def sync_watched(
 
 
 async def select_chats(
-    client: Any, names: list[str], pattern: Optional[str], forums_only: bool = False,
-    folder: Optional[int] = None, include_channels: bool = False,
-    folder_peers: Optional[list[int]] = None,
+    client: Any, names: list[str], pattern: str | None, forums_only: bool = False,
+    folder: int | None = None, include_channels: bool = False,
+    folder_peers: list[int] | None = None,
 ) -> list[Any]:
     """folder: id папки Telegram — отбор «как я накликал в приложении».
 
@@ -788,12 +789,12 @@ async def run(
     *,
     db_path: str,
     client: Any = None,
-    names: Optional[list[str]] = None,
-    pattern: Optional[str] = None,
+    names: list[str] | None = None,
+    pattern: str | None = None,
     topics_only: bool = False,
-    folder: Optional[int] = None,
-    limit: Optional[int] = None,
-    days: Optional[int] = None,
+    folder: int | None = None,
+    limit: int | None = None,
+    days: int | None = None,
     backfill_chunk: int = 0,
     backfill_days: int = 0,
     watched_only: bool = False,

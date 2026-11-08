@@ -14,7 +14,7 @@ os.environ["TG_ENV_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import packs  # noqa: E402
+import packs
 
 FAILURES: list[str] = []
 

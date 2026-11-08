@@ -23,17 +23,17 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-import sync as sync_mod  # noqa: E402
-from db import DB  # noqa: E402
+import sync as sync_mod
+from db import DB
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover
 TERMINAL = ("expired", "invalid")
 
 
-def invite_hash(link: str) -> Optional[str]:
+def invite_hash(link: str) -> str | None:
     """Хэш инвайта из любого вида: t.me/+AbCd, t.me/joinchat/AbCd, +AbCd,
     joinchat/AbCd, сырой AbCd, ссылка внутри произвольного текста."""
     if not link:
@@ -122,8 +122,8 @@ async def check_invites(
     max_age_days: float = 7.0,
     force: bool = False,
     delay: float = 0.6,
-    live_cap: Optional[int] = None,
-    exclude_chat_id: Optional[int] = None,
+    live_cap: int | None = None,
+    exclude_chat_id: int | None = None,
 ) -> dict:
     """Проверить список ссылок/хэшей с кэшем invite_status.
 

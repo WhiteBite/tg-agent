@@ -33,18 +33,16 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
+from env import load_env
 from telethon.errors import ChatForwardsRestrictedError, FloodWaitError
-
-from env import load_env  # noqa: E402
 
 load_env()
 
-import jobs  # noqa: E402
-import sources  # noqa: E402
-from db import DB  # noqa: E402
-from workspace_store import WorkspaceError  # noqa: E402
+import jobs
+import sources
+from db import DB
+from workspace_store import WorkspaceError
 
 HERE = Path(__file__).resolve().parent.parent
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
@@ -113,7 +111,7 @@ def ensure_schema(conn) -> None:
     conn.executescript(SCHEMA_SQL)
 
 
-def _max_mb(override: Optional[int] = None) -> int:
+def _max_mb(override: int | None = None) -> int:
     if override is not None:
         return max(0, int(override))
     return max(0, int(os.environ.get("TG_DOWNLOADS_MAX_MB") or 2000))
@@ -135,7 +133,7 @@ def _parse_kinds(kinds) -> tuple[str, ...]:
 
 
 def plan_job(db: DB, sources_spec: str = "watch", kinds: str = "video",
-             days: int = 0, max_mb: Optional[int] = None,
+             days: int = 0, max_mb: int | None = None,
              include_downloaded: bool = False, mode: str = "download",
              to: str = "") -> dict:
     """Создать задание: выбрать сообщения по источникам/kinds/окну и снять snapshot."""
@@ -170,12 +168,12 @@ def plan_job(db: DB, sources_spec: str = "watch", kinds: str = "video",
     return {"job_id": job_id, "items": len(items), "chats": chats, "params": params}
 
 
-async def run_async(db_path: str = DB_PATH, job_id: Optional[int] = None, *,
+async def run_async(db_path: str = DB_PATH, job_id: int | None = None, *,
                     sources_spec: str = "watch", kinds: str = "video",
-                    days: int = 0, max_mb: Optional[int] = None,
+                    days: int = 0, max_mb: int | None = None,
                     include_downloaded: bool = False, mode: str = "download",
                     to: str = "",
-                    root: Optional[Path] = None, client=None,
+                    root: Path | None = None, client=None,
                     force: bool = False, retry: bool = False) -> dict:
     """Исполнить задание: claim -> пункты по одному -> отчёт. Идемпотентно."""
     claimed = False
@@ -264,7 +262,7 @@ async def _resolve_target(client, to: str):
     return entity, int(target_id)
 
 
-def _file_info(msg) -> Optional[dict]:
+def _file_info(msg) -> dict | None:
     media = getattr(msg, "media", None)
     doc = getattr(media, "document", None)
     if doc is None:
@@ -295,10 +293,10 @@ def _file_info(msg) -> Optional[dict]:
 
 async def _process(db: DB, client, job_id: int, item: dict,
                    kind_set: set, limit_mb: int, root: Path,
-                   fwd: Optional[tuple] = None) -> None:
+                   fwd: tuple | None = None) -> None:
     chat_id, msg_id = int(item["chat_id"]), int(item["msg_id"])
 
-    def mark(state: str, detail: Optional[str] = None) -> None:
+    def mark(state: str, detail: str | None = None) -> None:
         jobs.mark_item(db, job_id, chat_id, msg_id, state, detail)
 
     try:
@@ -384,7 +382,7 @@ async def _process_forward(db: DB, client, chat_id: int, msg_id: int,
     mark("done")
 
 
-def _known_file(db: DB, doc_id: str) -> Optional[int]:
+def _known_file(db: DB, doc_id: str) -> int | None:
     row = db.conn.execute(
         "SELECT id AS file_id FROM media_files WHERE doc_id=? "
         "UNION ALL SELECT file_id FROM media_doc_alias WHERE doc_id=? LIMIT 1",
@@ -392,7 +390,7 @@ def _known_file(db: DB, doc_id: str) -> Optional[int]:
     return row["file_id"] if row is not None else None
 
 
-def _file_by_sha(db: DB, sha: str) -> Optional[int]:
+def _file_by_sha(db: DB, sha: str) -> int | None:
     row = db.conn.execute("SELECT id FROM media_files WHERE sha256=?",
                           (sha,)).fetchone()
     return row["id"] if row is not None else None
@@ -422,7 +420,7 @@ def _insert_file(db: DB, sha: str, info: dict, rel_path: str) -> int:
     return int(cur.lastrowid)
 
 
-def _known_forward(db: DB, doc_id: str, target_chat_id: int) -> Optional[int]:
+def _known_forward(db: DB, doc_id: str, target_chat_id: int) -> int | None:
     row = db.conn.execute(
         "SELECT target_msg_id FROM forward_files "
         "WHERE doc_id=? AND target_chat_id=?", (doc_id, target_chat_id)).fetchone()
@@ -493,7 +491,7 @@ def _forwards_summary(db: DB) -> dict:
     return {"count": row["n"], "by_target": by_target}
 
 
-def files(db: DB, chat_id: Optional[int] = None, limit: int = 100) -> list[dict]:
+def files(db: DB, chat_id: int | None = None, limit: int = 100) -> list[dict]:
     sql = ("SELECT f.id, f.sha256, f.kind, f.filename, f.size, f.path, "
            "f.created_ts, "
            "(SELECT COUNT(*) FROM media_file_sources s WHERE s.file_id=f.id) "
@@ -508,7 +506,7 @@ def files(db: DB, chat_id: Optional[int] = None, limit: int = 100) -> list[dict]
     return [dict(r) for r in db.conn.execute(sql, args)]
 
 
-def forwards(db: DB, chat_id: Optional[int] = None, limit: int = 100) -> list[dict]:
+def forwards(db: DB, chat_id: int | None = None, limit: int = 100) -> list[dict]:
     sql = ("SELECT f.doc_id, f.target_chat_id, f.target_msg_id, f.kind, f.size, "
            "f.created_ts, "
            "(SELECT COUNT(*) FROM forward_sources s WHERE s.doc_id=f.doc_id) "
@@ -547,7 +545,7 @@ def _int_or(data: dict, name: str) -> int:
         raise WorkspaceError(f"{name} должен быть числом") from None
 
 
-def _optional_int(value) -> Optional[int]:
+def _optional_int(value) -> int | None:
     if value in (None, ""):
         return None
     try:

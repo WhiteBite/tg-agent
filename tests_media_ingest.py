@@ -22,8 +22,9 @@ os.environ["TG_ENV_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from db import DB  # noqa: E402
-import media as media_mod  # noqa: E402
+from db import DB
+
+import media as media_mod
 
 FAILURES: list[str] = []
 

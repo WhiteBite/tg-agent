@@ -24,9 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import sys
 from datetime import datetime, timezone
-from typing import Optional
 
 from db import DB
 from env import load_env
@@ -34,7 +32,7 @@ from env import load_env
 load_env()
 
 
-def _fmt_ts(ts: Optional[int]) -> str:
+def _fmt_ts(ts: int | None) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d") if ts else "—"
 
 
@@ -65,7 +63,7 @@ async def cmd_topics(args) -> None:
         for t in sorted(topics, key=lambda x: -(x["top_message"] or 0)):
             print(f"{t['topic_id']:>10}  {t['top_message'] or 0:>9}  "
                   f"{'закрыта' if t['closed'] else '':>10}  {t['title']}")
-        print(f"\n      1  (General: сообщения без темы — всегда есть)")
+        print("\n      1  (General: сообщения без темы — всегда есть)")
     else:
         print("\nГруппа без тем. Добавляй как псевдотему 0:")
         print(f"  python3 watch.py add --chat {args.chat} --topic 0")
@@ -118,7 +116,7 @@ def cmd_remove(args) -> None:
         print("- убрано" if ok else "! не было в списке")
 
 
-def _print_watch(db: DB, chat_id: Optional[int] = None) -> None:
+def _print_watch(db: DB, chat_id: int | None = None) -> None:
     rows = db.watch_list(chat_id)
     if not rows:
         print("(watch-лист пуст)")

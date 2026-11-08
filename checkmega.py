@@ -24,17 +24,18 @@ import os
 import sys
 import time
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-from db import DB, mega_link  # noqa: E402
+from db import DB, mega_link
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -46,8 +47,8 @@ _RETRY_CODES = (-3, -4)  # EAGAIN, ERATELIMIT — повторить позже
 Transport = Callable[[str, dict], Any]
 
 
-def _api_call(payload: dict, n: Optional[str] = None,
-              transport: Optional[Transport] = None) -> Any:
+def _api_call(payload: dict, n: str | None = None,
+              transport: Transport | None = None) -> Any:
     """POST к g.api.mega.co.nz/cs; у папок хэндл идёт query-параметром n=."""
     url = API_URL + "?id=0" + (f"&n={n}" if n else "")
     if transport is not None:
@@ -79,7 +80,7 @@ def _parse_result(res: Any) -> dict:
 
 
 def check_one(kind: str, handle: str, attempts: int = 3, retry_wait: float = 2.0,
-              transport: Optional[Transport] = None) -> dict:
+              transport: Transport | None = None) -> dict:
     """Одна живая проверка; EAGAIN/ERATELIMIT спят и повторяют, несуществующее
     (-9) и снятое по жалобе (-16) — терминальные статусы, прочие сбои — error
     без падения прогона."""
@@ -106,9 +107,9 @@ def check_megas(
     max_age_days: float = 7.0,
     force: bool = False,
     delay: float = 0.6,
-    live_cap: Optional[int] = None,
-    exclude_chat_id: Optional[int] = None,
-    transport: Optional[Transport] = None,
+    live_cap: int | None = None,
+    exclude_chat_id: int | None = None,
+    transport: Transport | None = None,
 ) -> dict:
     """Проверить список ссылок/текстов с кэшем link_status.
 
@@ -185,7 +186,7 @@ _STATUS_RU = {
 }
 
 
-def _fmt_size(size: Optional[int]) -> Optional[str]:
+def _fmt_size(size: int | None) -> str | None:
     if size is None:
         return None
     val = float(size)

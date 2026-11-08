@@ -10,7 +10,6 @@ redact() возвращает (маскированный_текст, [найд�
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 _PATTERNS: list[tuple[str, re.Pattern]] = [
     ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----")),
@@ -36,7 +35,7 @@ _COMBINED = re.compile(
 )
 
 
-def redact(text: Optional[str]) -> tuple[str, list[str]]:
+def redact(text: str | None) -> tuple[str, list[str]]:
     """Заменяет похожее на секрет на [скрыто: тип]."""
     if not text:
         return text or "", []

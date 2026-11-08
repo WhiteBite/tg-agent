@@ -7,7 +7,8 @@ import queue
 import threading
 import urllib.error
 import urllib.request
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 def post(req: urllib.request.Request, timeout: float) -> Any:
@@ -37,7 +38,7 @@ def post_json_keys(url: str, keys: list[str | None], payload: dict,
     мёртвый первый ключ не оплачивает 401 на каждый вызов."""
     keys = list(keys or [None])
     start = _key_cache.get(tuple(keys), 0)
-    order = list(range(start, len(keys))) + list(range(0, start))
+    order = list(range(start, len(keys))) + list(range(start))
     data = json.dumps(payload).encode()
     last: Exception | None = None
     for i in order:

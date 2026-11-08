@@ -25,12 +25,12 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-from db import DB  # noqa: E402
-from packs import PACKS  # noqa: E402
+from db import DB
+from packs import PACKS
 
 _RICH_FIELDS = ("title", "body", "owner", "due_ts", "project", "attrs_json")
 

@@ -8,15 +8,15 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from urllib.parse import quote
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import quote
 
 os.environ["TG_ENV_FILE"] = ""
 
-from db import DB
 import ui
+from db import DB
 
 
 class WorkspaceHTTPTests(unittest.TestCase):

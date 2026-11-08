@@ -26,16 +26,16 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from env import load_env  # noqa: E402
+from env import load_env
 
 load_env()
 
-import sync as sync_mod  # noqa: E402
+import sync as sync_mod
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -50,7 +50,7 @@ def _blocked() -> dict:
     return {"ok": False, "error": "announce заблокирован: нужен TG_ALLOW_MANAGE=1"}
 
 
-def load_org(path: Optional[str] = None) -> dict:
+def load_org(path: str | None = None) -> dict:
     import yaml
     p = Path(path) if path else HERE / "org.yaml"
     return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
@@ -77,6 +77,7 @@ def _wrap(d: Any, text: str, font: Any, max_w: int) -> list:
 
 def render_banner(spec: dict, out: Path) -> Path:
     import random
+
     from PIL import Image, ImageDraw, ImageFont
 
     def font(size: int) -> Any:
@@ -128,7 +129,7 @@ def render_banner(spec: dict, out: Path) -> Path:
     return out
 
 
-def compose_text(tpl: dict, org: dict, links_product: Optional[str] = None) -> str:
+def compose_text(tpl: dict, org: dict, links_product: str | None = None) -> str:
     text = (f"{tpl.get('badge', '📦')} {tpl.get('title', '')}\n\n"
             f"⚪ ЧТО ЭТО\n{tpl.get('what', '')}\n\n"
             f"⚪ ЧТО ВНУТРИ\n" + "\n".join("• " + x for x in tpl.get("inside") or []))
@@ -149,10 +150,10 @@ def compose_text(tpl: dict, org: dict, links_product: Optional[str] = None) -> s
     return text
 
 
-async def post(client: Any, tpl: dict, chat: Any, *, topic_id: Optional[int] = None,
-               also: tuple = (), react: Optional[str] = None, pin: bool = False,
-               links_product: Optional[str] = None, db_path: Optional[str] = None,
-               org: Optional[dict] = None) -> dict:
+async def post(client: Any, tpl: dict, chat: Any, *, topic_id: int | None = None,
+               also: tuple = (), react: str | None = None, pin: bool = False,
+               links_product: str | None = None, db_path: str | None = None,
+               org: dict | None = None) -> dict:
     if not _allowed():
         return _blocked()
     org = org if org is not None else load_org()
@@ -183,10 +184,10 @@ async def post(client: Any, tpl: dict, chat: Any, *, topic_id: Optional[int] = N
     return {"ok": True, "msg_id": msg.id, "chat_id": chat_id, "banner": str(banner)}
 
 
-async def post_file(tpl_path: str, chat: Any, *, topic_id: Optional[int] = None,
-                    also: tuple = (), react: Optional[str] = None, pin: bool = False,
-                    links_product: Optional[str] = None, db_path: Optional[str] = None,
-                    org: Optional[dict] = None, send: bool = False) -> dict:
+async def post_file(tpl_path: str, chat: Any, *, topic_id: int | None = None,
+                    also: tuple = (), react: str | None = None, pin: bool = False,
+                    links_product: str | None = None, db_path: str | None = None,
+                    org: dict | None = None, send: bool = False) -> dict:
     tpl = _load_tpl(tpl_path)
     org = org if org is not None else load_org()
     if not send:
@@ -205,8 +206,8 @@ async def post_file(tpl_path: str, chat: Any, *, topic_id: Optional[int] = None,
 
 
 async def readme(client: Any, ref: str, org: dict, chat: Any, *,
-                 topic_id: Optional[int] = None, send: bool = False,
-                 db_path: Optional[str] = None) -> dict:
+                 topic_id: int | None = None, send: bool = False,
+                 db_path: str | None = None) -> dict:
     tpl = readme_tpl(ref, org)
     if tpl is None:
         return {"ok": False, "error": f"нет в org.yaml продукта или темы: {ref!r}"}
@@ -216,7 +217,7 @@ async def readme(client: Any, ref: str, org: dict, chat: Any, *,
                       db_path=db_path, org=org)
 
 
-def readme_tpl(ref: str, org: dict) -> Optional[dict]:
+def readme_tpl(ref: str, org: dict) -> dict | None:
     products = org.get("products") or {}
     topic_products = org.get("topic_products") or {}
     if ref in products:
@@ -238,8 +239,8 @@ def readme_tpl(ref: str, org: dict) -> Optional[dict]:
                        "handle": org.get("forum")}}
 
 
-def draft(repo_path: Path, tag: Optional[str], org: dict,
-          product_key: Optional[str] = None) -> dict:
+def draft(repo_path: Path, tag: str | None, org: dict,
+          product_key: str | None = None) -> dict:
     changelog = Path(repo_path) / "CHANGELOG.md"
     if not changelog.is_file():
         return {"ok": False, "error": f"нет CHANGELOG.md в {repo_path}"}
@@ -270,8 +271,8 @@ def draft(repo_path: Path, tag: Optional[str], org: dict,
 
 
 async def update(client: Any, tpl: dict, chat: Any, msg_id: int, *,
-                 links_product: Optional[str] = None,
-                 org: Optional[dict] = None) -> dict:
+                 links_product: str | None = None,
+                 org: dict | None = None) -> dict:
     if not _allowed():
         return _blocked()
     org = org if org is not None else load_org()

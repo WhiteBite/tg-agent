@@ -18,7 +18,7 @@ os.environ["TG_ENV_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from db import DB, SCHEMA_VERSION  # noqa: E402
+from db import DB, SCHEMA_VERSION
 
 FAILURES: list[str] = []
 
