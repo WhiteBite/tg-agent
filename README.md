@@ -846,7 +846,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 1319 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс пятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1355 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс пятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -910,7 +910,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **1319 проверок: свои проверки плюс пятнадцать suites
+`python3 test_offline.py` — **1355 проверок: свои проверки плюс пятнадцать suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
