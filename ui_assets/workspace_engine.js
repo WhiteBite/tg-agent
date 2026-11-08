@@ -3,8 +3,34 @@
   const W = window.WS,
     { $, get, post, badge } = W;
   const LABELS = { pipeline: "Цикл конвейера", live: "Приём сообщений (live)" };
+  const MEDIA_LABEL = {
+    pending: "в очереди",
+    done: "готово",
+    skipped: "пропущено",
+    failed: "ошибка",
+    missing: "сообщение удалено",
+  };
+  function mediaSection(m) {
+    const counts = m.counts || {};
+    const rows = Object.keys(counts).map(
+      (k) =>
+        `<div class="attention-row"><div class="row-body"><strong>${
+          MEDIA_LABEL[k] || k
+        }</strong><div class="row-meta">${counts[k]}</div></div></div>`,
+    );
+    return `<section class="panel panel-pad stack section-gap"><div class="section-heading"><h2>Транскрипция аудио</h2><span class="muted">всего ${
+      m.total || 0
+    }</span></div>${
+      rows.length
+        ? rows.join("")
+        : W.empty(
+            "Очередь пуста",
+            "Голосовые и аудио попадают сюда после синхронизации.",
+          )
+    }</section>`;
+  }
   async function engine(params, seq) {
-    const d = await get("engine");
+    const [d, media] = await Promise.all([get("engine"), get("media")]);
     if (!W.isCurrent(seq)) return;
     const card = (name) => {
       const e = d.engines[name] || {};
@@ -32,7 +58,7 @@
         d.enabled
           ? "Пуск и остановка выполняются локально на этой машине. Стоп завершает процесс по записанному pid."
           : "Панель показывает состояние. Запуск и остановка требуют TG_ALLOW_ENGINE=1 на сервере."
-      }</div>${card("pipeline")}${card("live")}</section>`;
+      }</div>${card("pipeline")}${card("live")}</section>` + mediaSection(media);
     document
       .querySelectorAll("[data-engine-start]")
       .forEach(

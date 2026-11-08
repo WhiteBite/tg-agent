@@ -449,6 +449,32 @@ class WorkspaceHTTPTests(unittest.TestCase):
         status, err = self.request("engine/stop", {"engine": "live"})
         self.assertEqual(status, 403)
 
+    def test_links_view_and_media(self):
+        with DB(self.db_path) as db:
+            db.conn.execute("INSERT INTO refs(chat_id,msg_id,kind,value) "
+                            "VALUES(-100111,10,'invite','+AbCdEf')")
+            db.conn.execute("INSERT INTO refs(chat_id,msg_id,kind,value) "
+                            "VALUES(-100111,12,'url','https://mega.nz/file/AbC#k')")
+            db.conn.execute("INSERT INTO media_assets(chat_id,msg_id,kind,status,ts) "
+                            "VALUES(-100111,10,'voice','done',?)", (self.now,))
+            db.conn.execute("INSERT INTO media_assets(chat_id,msg_id,kind,status,ts) "
+                            "VALUES(-100111,11,'voice','pending',?)", (self.now,))
+            db.conn.commit()
+        status, d = self.request("links")
+        self.assertEqual(status, 200)
+        self.assertIn("invite", d["groups"])
+        status, m = self.request("media")
+        self.assertEqual(status, 200)
+        self.assertEqual(m["counts"].get("done"), 1)
+        self.assertEqual(m["counts"].get("pending"), 1)
+        self.assertEqual(m["total"], 2)
+
+    def test_global_search_gate(self):
+        status, d = self.request_api_get("search_global?q=test")
+        self.assertEqual(status, 200)
+        self.assertFalse(d["ok"])
+        self.assertIn("TG_ALLOW_LIVE", d["error"])
+
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})
         self.assertEqual(status, 409)

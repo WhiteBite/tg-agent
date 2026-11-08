@@ -310,3 +310,37 @@ def alert_settings(db: DB) -> dict:
 
 def engine_view(db: DB) -> dict:
     return engine_mod.status(db.path)
+
+
+def links(db: DB, params: dict) -> dict:
+    try:
+        limit = min(max(int(params.get("limit") or 25), 1), 100)
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceError("limit: число") from exc
+    since = None
+    if params.get("days"):
+        try:
+            since = int(time.time()) - int(params["days"]) * 86400
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceError("days: число дней") from exc
+    chat_id = params.get("chat_id")
+    if chat_id:
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceError("chat_id: число") from exc
+        groups = db.refs_summary(chat_id=chat_id, since_ts=since, limit=limit)
+    else:
+        ids = [w["chat_id"] for w in db.watch_list()]
+        groups = db.refs_summary(chat_ids=ids or [-1], since_ts=since, limit=limit)
+    return {"groups": groups,
+            "chats": [{"id": c["id"], "title": c["title"]} for c in db.chats(limit=2000)]}
+
+
+def media_view(db: DB) -> dict:
+    counts = {r["status"]: r["n"] for r in db.conn.execute(
+        "SELECT status, COUNT(*) n FROM media_assets GROUP BY status")}
+    recent = [dict(r) for r in db.conn.execute(
+        "SELECT chat_id, msg_id, kind, status, engine, ts FROM media_assets "
+        "WHERE status IN ('done', 'failed') ORDER BY ts DESC LIMIT 20")]
+    return {"counts": counts, "total": sum(counts.values()), "recent": recent}

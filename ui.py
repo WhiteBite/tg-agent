@@ -198,6 +198,38 @@ def tg_chats() -> dict:
     return data
 
 
+def tg_search_global(query: str, kind: str | None = None, limit: int = 20) -> dict:
+    """Глобальный поиск публичных чатов Telegram (гейт TG_ALLOW_LIVE)."""
+    if os.environ.get("TG_ALLOW_LIVE", "").strip().lower() not in ("1", "true", "yes"):
+        return {"ok": False, "error": "глобальный поиск выключен: нужен TG_ALLOW_LIVE=1"}
+    if not (query or "").strip():
+        return {"ok": False, "error": "нужен поисковый запрос"}
+    if not (os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH")):
+        return {"ok": False, "error": "нет ключей Telegram: запусти python start.py"}
+    if kind not in (None, "", "channel", "group", "user"):
+        return {"ok": False, "error": "тип: channel, group или user"}
+    limit = min(max(int(limit or 20), 1), 50)
+
+    async def _run() -> dict:
+        import search as search_mod
+        client = sync_mod.make_client()
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                return {"ok": False, "error": "нет сессии: запусти python start.py"}
+            rows = await search_mod.search_global(client, query, limit=limit, kind=kind or None)
+        finally:
+            await client.disconnect()
+        return {"ok": True, "results": rows}
+
+    try:
+        return asyncio.run(_run())
+    except SystemExit as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"telegram: {exc}"}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -247,7 +279,8 @@ class Handler(BaseHTTPRequestHandler):
             name = u.path.removeprefix("/assets/")
             allowed = {"workspace.css", "workspace.js", "workspace_entities.js", "workspace_projects.js",
                        "workspace_messages.js", "workspace_analysis.js", "workspace_catalog.js",
-                       "workspace_settings.js", "workspace_downloads.js", "workspace_engine.js"}
+                       "workspace_settings.js", "workspace_downloads.js", "workspace_engine.js",
+                       "workspace_links.js", "workspace_global.js"}
             if name not in allowed:
                 self._json({"error": "not found"}, 404)
                 return
@@ -365,6 +398,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"projects": out})
         elif u.path == "/api/available":
             self._json(tg_chats())
+        elif u.path == "/api/search_global":
+            q = parse_qs(u.query)
+            try:
+                limit = int((q.get("limit") or ["20"])[0])
+            except (TypeError, ValueError):
+                limit = 20
+            self._json(tg_search_global((q.get("q") or [""])[0],
+                                        (q.get("kind") or [None])[0], limit))
         else:
             self._json({"error": "not found"}, 404)
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 from modules import workspace_routes
 from workspace_store import WorkspaceError, changes, entities, entity, scrub
 from workspace_views import (alert_settings, catalog, chat_analysis, engine_view,
-                             home, integration_preview, integration_status,
-                             notification_preview, people, projects)
+                             home, integration_preview, integration_status, links,
+                             media_view, notification_preview, people, projects)
 from workspace_write import (bulk_close, catalog_star, engine_start, engine_stop,
                              entity_edit, entity_review, person, project_review,
                              project_topics, set_alerts, visit)
@@ -48,6 +48,10 @@ def get(db, path: str, params: dict):
             return alert_settings(db)
         case "engine":
             return engine_view(db)
+        case "links":
+            return links(db, params)
+        case "media":
+            return media_view(db)
         case _:
             fn = _MODULE_ROUTES.get(("GET", path))
             if fn is None:
