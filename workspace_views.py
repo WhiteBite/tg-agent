@@ -138,6 +138,58 @@ def chat_analysis(db: DB, params: dict) -> dict:
     }
 
 
+def catalog(db: DB, params: dict) -> dict:
+    offset, limit = page(params)
+    status = params.get("status") or "all"
+    if status not in ("all", "active", "expired"):
+        raise WorkspaceError("Фильтр каталога: all, active или expired")
+    where, args = "WHERE e.pack='services'", []
+    if params.get("q"):
+        like = "%" + params["q"] + "%"
+        where += " AND (e.title LIKE ? OR e.body LIKE ? OR e.dedup_key LIKE ?)"
+        args += [like, like, like]
+    rows = [dict(r) for r in db.conn.execute(
+        "SELECT e.* FROM entities e " + where + " ORDER BY e.updated_ts DESC, e.id DESC", args)]
+    chat_titles = {r["id"]: r["title"] for r in db.conn.execute("SELECT id,title FROM chats")}
+    sources_pairs: dict[int, set[tuple[int, int]]] = {}
+    sources_chats: dict[int, set[int]] = {}
+    for s in db.conn.execute("SELECT entity_id,chat_id,topic_id FROM entity_sources"):
+        sources_pairs.setdefault(s["entity_id"], set()).add((s["chat_id"], s["topic_id"]))
+        sources_chats.setdefault(s["entity_id"], set()).add(s["chat_id"])
+    now = int(time.time())
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+    for e in rows:
+        key = e.get("dedup_key") or f"id:{e['id']}"
+        g = groups.get(key)
+        if g is None:
+            g = {"key": key, "title": e["title"], "entity_id": e["id"], "kinds": [],
+                 "count": 0, "open_count": 0, "next_due": None, "last_seen": 0,
+                 "chats": set(), "status": "expired"}
+            groups[key] = g
+            order.append(key)
+        g["count"] += max(1, len(sources_pairs.get(e["id"], ())))
+        if e["kind"] not in g["kinds"]:
+            g["kinds"].append(e["kind"])
+        if e["closed_ts"] is None:
+            g["open_count"] += 1
+            g["status"] = "active"
+            if e["due_ts"] and e["due_ts"] > now and (g["next_due"] is None or e["due_ts"] < g["next_due"]):
+                g["next_due"] = e["due_ts"]
+        g["last_seen"] = max(g["last_seen"], e["updated_ts"] or 0)
+        g["chats"] |= {e["chat_id"], *sources_chats.get(e["id"], set())}
+    items = [groups[k] for k in order]
+    if status != "all":
+        items = [g for g in items if g["status"] == status]
+    items.sort(key=lambda g: (g["status"] != "active", g["next_due"] or now + 10 ** 9, -g["last_seen"]))
+    total = len(items)
+    for g in items:
+        g["chats"] = [chat_titles.get(c) or str(c) for c in sorted(g["chats"])]
+        g["chat_count"] = len(g["chats"])
+    return {"items": items[offset:offset + limit], "total": total,
+            "offset": offset, "limit": limit}
+
+
 def projects(db: DB) -> dict:
     names = [r[0] for r in db.conn.execute(
         "SELECT project FROM watch WHERE project IS NOT NULL AND project!='' UNION "

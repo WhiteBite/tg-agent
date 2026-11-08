@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from modules import workspace_routes
 from workspace_store import WorkspaceError, changes, entities, entity, scrub
-from workspace_views import (chat_analysis, home, integration_preview,
+from workspace_views import (catalog, chat_analysis, home, integration_preview,
                              integration_status, notification_preview, people,
                              projects)
 from workspace_write import (bulk_close, entity_edit, entity_review, person,
@@ -27,6 +27,8 @@ def get(db, path: str, params: dict):
             return item
         case "entities":
             return entities(db, params)
+        case "catalog":
+            return catalog(db, params)
         case "entity":
             return entity(db, int(params.get("id", 0)))
         case "changes":

@@ -350,6 +350,44 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertIn(9, [e["id"] for e in d["attention"]])
         self.assertGreaterEqual(d["counts"]["review_pending"], 4)
 
+    def test_catalog_rollup_by_dedup_key(self):
+        with DB(self.db_path) as db:
+            db.upsert_chat(-100222, "Второй чат", None, "supergroup", False, 3)
+            rows = [
+                (20, "trial", "VPN Example", self.now + 5 * 86400, self.now - 100, "vpn.example", "open", None),
+                (21, "trial", "Старый триал", self.now - 2 * 86400, self.now - 90, None, "done", self.now),
+                (22, "trial", "Сосед", None, self.now - 80, None, "open", None),
+            ]
+            for eid, kind, title, due, upd, dk, status, closed in rows:
+                db.conn.execute(
+                    "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,owner,due_ts,dedup_key,created_ts,updated_ts,closed_ts) "
+                    "VALUES(?, 'services', -100111, 1, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+                    (eid, kind, title, status, due, dk, self.now - 500, upd, closed))
+            for src_chat in (-100111, -100222):
+                db.conn.execute(
+                    "INSERT INTO entity_sources(entity_id,chat_id,topic_id,first_seen_ts,last_seen_ts) "
+                    "VALUES(20, ?, 1, ?, ?)", (src_chat, self.now - 100, self.now - 50))
+            db.conn.commit()
+        status, d = self.request("catalog")
+        self.assertEqual(status, 200)
+        vpn = next(g for g in d["items"] if g["key"] == "vpn.example")
+        self.assertEqual(vpn["count"], 2)
+        self.assertEqual(vpn["open_count"], 1)
+        self.assertEqual(vpn["status"], "active")
+        self.assertEqual(vpn["next_due"], self.now + 5 * 86400)
+        self.assertEqual(vpn["entity_id"], 20)
+        self.assertEqual(vpn["title"], "VPN Example")
+        self.assertEqual(vpn["chat_count"], 2)
+        self.assertIn("Второй чат", vpn["chats"])
+        self.assertIn("Объект", vpn["chats"])
+        _, expired = self.request("catalog?status=expired")
+        self.assertEqual([g["title"] for g in expired["items"]], ["Старый триал"])
+        _, active = self.request("catalog?status=active")
+        self.assertEqual({g["key"] for g in active["items"]}, {"vpn.example", "id:22"})
+        _, q = self.request("catalog?q=vpn")
+        self.assertEqual([g["key"] for g in q["items"]], ["vpn.example"])
+        self.assertEqual(self.request("catalog?status=nope")[0], 400)
+
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})
         self.assertEqual(status, 409)
