@@ -367,7 +367,6 @@ main {
 .freshness,
 .view {
   max-width: 1500px;
-  margin-inline: auto;
 }
 .page-heading {
   display: flex;
