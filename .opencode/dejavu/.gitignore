@@ -1,0 +1,4 @@
+# dejavu: gates.json is committable (shared repo gotchas); runtime files are not.
+*
+!gates.json
+!.gitignore

@@ -24,6 +24,11 @@ Thumbs.db
 
 # локальный tooling агента
 .omo/
-.opencode/
 .playwright-mcp/
 catalog_*.md
+
+# из .opencode/ в git идут только проектные скиллы и гейт-конфиг dejavu
+.opencode/*
+!.opencode/skills/
+!.opencode/skill/
+!.opencode/dejavu/

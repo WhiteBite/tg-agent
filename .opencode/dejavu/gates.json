@@ -1,0 +1,1517 @@
+{
+  "version": 1,
+  "gates": [
+    {
+      "key": "8c278d10d5c0",
+      "signature": "bash:python test_offline.py <n> >& <n> | select-object -last <n>",
+      "tool": "bash",
+      "status": "blocking",
+      "count": 5,
+      "sessions": [
+        "ses_ed080d41affeXGY4gR70hABfqJ",
+        "ses_ecb5d1797ffeJVyZB92syf4xT7",
+        "ses_ec8774d35ffe3YamvnFRqsiBwE",
+        "ses_ea5479a2bffem1fx0fru1znwEf"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-12T10:39:51.327Z",
+      "lastSeen": "2026-10-20T23:40:00.916Z",
+      "snippet": "print(f\"{'ok  ' if cond else 'FAIL'}  {label}\" + (f\"  -> {extra}\" if extra else \"\"))",
+      "remindedCount": 3,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 2,
+      "succeededAfterGate": 0,
+      "promotionCount": 1,
+      "iteratedVersion": 25,
+      "movedOn": 3,
+      "correction": "Last error: \"print(f\"{'ok  ' if cond else 'FAIL'}  {label}\" + (f\"  -> {extra}\" if extra else \"\"))\" — address that specific error before retrying this exact call.",
+      "correctionOrigin": "machine",
+      "review": true,
+      "overrideSessions": [
+        "ses_ecb5d1797ffeJVyZB92syf4xT7"
+      ],
+      "retireBaseline": {
+        "count": 3
+      }
+    },
+    {
+      "key": "f9708d163114",
+      "signature": "bash:$env:pythonioencoding= <str> ; python test_offline.py <n> >& <n> | select-object -last <n>",
+      "tool": "bash",
+      "status": "blocking",
+      "count": 19,
+      "sessions": [
+        "ses_ed080d41affeXGY4gR70hABfqJ",
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-12T10:42:09.456Z",
+      "lastSeen": "2026-11-08T05:11:33.405Z",
+      "snippet": "AttributeError: module 'login' has no attribute '_password_hint'. Did you mean: '_password_flow'?",
+      "remindedCount": 1,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 5,
+      "succeededAfterGate": 0,
+      "promotionCount": 1,
+      "iteratedVersion": 118,
+      "movedOn": 13,
+      "correction": "Last error: \"AttributeError: module 'login' has no attribute '_password_hint'. Did you mean: '_password_flow'?\" — address that specific error before retrying this exact call.",
+      "correctionOrigin": "machine",
+      "review": true,
+      "overrideSessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "retireBaseline": {
+        "count": 19
+      },
+      "remindedSessions": {
+        "ses_e61e9d121ffeWnrew3cgar6uem": 1794114759674
+      }
+    },
+    {
+      "key": "a00840020274",
+      "signature": "bash:$env:pythonioencoding= <str> ; python test_offline.py <n> >& <n> | select-string -pattern <str>",
+      "tool": "bash",
+      "status": "blocking",
+      "count": 22,
+      "sessions": [
+        "ses_ed080d41affeXGY4gR70hABfqJ",
+        "ses_ec58efb3effePzYjUdi1VWjyEC"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-12T10:56:37.314Z",
+      "lastSeen": "2026-10-14T13:20:00.511Z",
+      "snippet": "FAIL  ui /api/messages: сырой текст замаскирован  -> 8",
+      "remindedCount": 1,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "promotionCount": 1,
+      "iteratedVersion": 117,
+      "movedOn": 20,
+      "correction": "Last error: \"FAIL  ui /api/messages: сырой текст замаскирован  -> 8\" — address that specific error before retrying this exact call.",
+      "correctionOrigin": "machine",
+      "review": true,
+      "retireBaseline": {
+        "count": 22
+      }
+    },
+    {
+      "key": "005f6afc50a1",
+      "signature": "edit:db.py",
+      "tool": "edit",
+      "status": "watching",
+      "count": 8,
+      "sessions": [
+        "ses_ed080d41affeXGY4gR70hABfqJ",
+        "ses_ea9fa6920ffeQpU2kvFWyUiHkY",
+        "ses_ea531f4c0ffeHxEPMnH65DbQOn",
+        "ses_e852daf51ffe6KpE8e38CHyZlL",
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-12T11:05:28.659Z",
+      "lastSeen": "2026-11-08T05:04:07.975Z",
+      "snippet": "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 96,
+      "movedOn": 4
+    },
+    {
+      "key": "360514a1749a",
+      "signature": "edit:test_offline.py",
+      "tool": "edit",
+      "status": "watching",
+      "count": 6,
+      "sessions": [
+        "ses_ed080d41affeXGY4gR70hABfqJ",
+        "ses_ec58efb3effePzYjUdi1VWjyEC"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-12T11:22:51.069Z",
+      "lastSeen": "2026-10-14T20:42:38.754Z",
+      "snippet": "No changes to apply: oldString and newString are identical.",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 57,
+      "movedOn": 2
+    },
+    {
+      "key": "2be63226993f",
+      "signature": "edit:ui.py",
+      "tool": "edit",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_ed080d41affeXGY4gR70hABfqJ"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-12T12:10:33.668Z",
+      "lastSeen": "2026-10-12T12:10:58.695Z",
+      "snippet": "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 72
+    },
+    {
+      "key": "5a8ae23b068b",
+      "signature": "bash:$env:pythonioencoding= <str> ; python doctor.py <n> >& <n> | select-object -last <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_ed080d41affeXGY4gR70hABfqJ"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-12T12:43:56.699Z",
+      "lastSeen": "2026-10-12T12:44:05.471Z",
+      "snippet": "ЕСТЬ ОШИБКИ — см. ❌ выше",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 109
+    },
+    {
+      "key": "9dbf632aabd6",
+      "signature": "bash:$env:pythonioencoding= <str> ; python test_offline.py <n> >& <n> | select-string -pattern <str> ; python test_offline.py <n> >& <n> | select-string -pattern <str> | select-object -first <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_ed080d41affeXGY4gR70hABfqJ"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-12T13:08:19.847Z",
+      "lastSeen": "2026-10-13T09:35:59.578Z",
+      "snippet": "File \"D:\\Sources\\WhiteBite\\tg-agent\\test_offline.py\", line 1310, in test_build_state_last",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 2
+    },
+    {
+      "key": "c23c58d0e653",
+      "signature": "bash:python test_offline.py <n> >& <n> | tee-object -filepath <str> | select-object -last <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_ec88e3378ffe1VCzrlt4f0JX5T"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-13T22:49:48.587Z",
+      "lastSeen": "2026-10-13T22:52:49.525Z",
+      "snippet": "FAIL  entities: три таблицы в схеме  -> ['entities', 'entity_events', 'extraction_runs']",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 161,
+      "movedOn": 1
+    },
+    {
+      "key": "b44fed5f0bed",
+      "signature": "read:packs.py",
+      "tool": "read",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_ec6465d42ffeopK65tHIUWZUU8",
+        "ses_ec62bc8ddffeHQ7vwuZc51UtWC"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-14T09:24:25.884Z",
+      "lastSeen": "2026-10-14T09:53:45.605Z",
+      "snippet": "File not found: D:\\Sources\\WhiteBite\\tg-agent\\packs.py\n\nDid you mean one of these?\nD:\\Sources\\WhiteBite\\tg-agent\\packs",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 30,
+      "movedOn": 1
+    },
+    {
+      "key": "cb2e0270ce4c",
+      "signature": "edit:extract.py",
+      "tool": "edit",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_ec58efb3effePzYjUdi1VWjyEC"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-14T13:15:43.489Z",
+      "lastSeen": "2026-10-15T07:18:34.586Z",
+      "snippet": "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 183,
+      "movedOn": 1
+    },
+    {
+      "key": "45f941c1385b",
+      "signature": "bash:$env:pythonioencoding= <str> ; python folders.py add --folder <n> --chat - <hash> --chat - <hash> --chat - <hash> --chat - <hash>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_ec58efb3effePzYjUdi1VWjyEC"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-14T19:14:40.897Z",
+      "lastSeen": "2026-10-14T19:18:39.434Z",
+      "snippet": "sqlite3.OperationalError: database is locked",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 29,
+      "movedOn": 1
+    },
+    {
+      "key": "098df4db2062",
+      "signature": "bash:$env:pythonioencoding= <str> ; python -x utf8 -c <code:26d1150b> <n> >& <n> | select-object -last <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_ec58efb3effePzYjUdi1VWjyEC"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-15T18:19:37.882Z",
+      "lastSeen": "2026-10-15T18:20:11.149Z",
+      "snippet": "=== глобальный дедуп: миграция, кросс-скоуп, membership, reopen, race ===",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 28,
+      "movedOn": 1
+    },
+    {
+      "key": "0fd1c16656ce",
+      "signature": "edit:media.py",
+      "tool": "edit",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_eab9a5b4cffehZkXWmPbjHsvcI"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-19T13:56:19.548Z",
+      "lastSeen": "2026-10-19T13:56:37.083Z",
+      "snippet": "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 23
+    },
+    {
+      "key": "27ceee18034f",
+      "signature": "bash:python tests_packs_semantics.py",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_eab9a30e2ffe9pywCbjnR9fYlY"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-19T13:56:24.673Z",
+      "lastSeen": "2026-10-19T13:58:14.086Z",
+      "snippet": "TypeError: 'NoneType' object is not subscriptable",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 34,
+      "movedOn": 1
+    },
+    {
+      "key": "64b3d7f782b4",
+      "signature": "bash:python -x utf8 tests_index_media.py",
+      "tool": "bash",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_eab9a5b4cffehZkXWmPbjHsvcI"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-19T14:05:22.840Z",
+      "lastSeen": "2026-10-19T14:09:34.650Z",
+      "snippet": "FAIL  sync: рескан — новое и правка считаются раздельно  -> {'new_messages': 0, 'edited_messages': 1}",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 42,
+      "movedOn": 2
+    },
+    {
+      "key": "b60f32daccda",
+      "signature": "bash:$env:temp=$env:tmp= <str> ; new-item -itemtype directory -force -path $env:temp | out-null; python -x utf8 test_offline.py",
+      "tool": "bash",
+      "status": "watching",
+      "count": 4,
+      "sessions": [
+        "ses_eab0bea4effeHY2UvbeEGRpzVg",
+        "ses_eaaf5b7b0ffePAmE620oV01LEA",
+        "ses_eaac68e4cffe7WR6ExqYL0IR5b",
+        "ses_ea9fa9890ffeVNcOpjEC0ZC7wj"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-19T16:34:51.663Z",
+      "lastSeen": "2026-10-19T21:23:33.233Z",
+      "snippet": "FAIL  extract: (b) owner обновлён  -> Иван",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 336,
+      "movedOn": 3
+    },
+    {
+      "key": "0097293a9433",
+      "signature": "bash:python -x utf8 tests_ops_report.py",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_eab04e55cffewoV65C6vIoEq29",
+        "ses_ea456637dffe1QGHyQEZ5Qh6wt"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-19T16:46:34.761Z",
+      "lastSeen": "2026-10-20T23:39:54.448Z",
+      "snippet": "FAIL  doctor --quality: заполненность полей по пакету  -> n=3: owner 33%, due 66%, body 33%",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 25,
+      "movedOn": 1
+    },
+    {
+      "key": "f9589c4de8f9",
+      "signature": "bash:python -x utf8 tests_packs_semantics.py <n> >& <n> | select-string -pattern <str> | foreach-object { $_.line }",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_eab0c0960ffe7FOR91Coy0YKWa"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-19T16:52:20.963Z",
+      "lastSeen": "2026-10-19T16:57:07.861Z",
+      "snippet": "=== due_text: фолбэк и no-downgrade в _apply_new/_apply_update ===",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 141,
+      "movedOn": 1
+    },
+    {
+      "key": "3dc4e5d25957",
+      "signature": "bash:python -x utf8 tests_packs_semantics.py <n> >& <n> | select-object -last <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_eab0c0960ffe7FOR91Coy0YKWa",
+        "ses_eaa0690c9ffeNQa7mo6RsVQ1wf"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-19T16:52:38.092Z",
+      "lastSeen": "2026-10-19T21:06:18.316Z",
+      "snippet": "FAIL  auto_close: вопрос закрыт ответом другого отправителя  -> open/None",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 293,
+      "movedOn": 1
+    },
+    {
+      "key": "c02e34f54dd6",
+      "signature": "bash:python -x utf8 tests_db_core.py",
+      "tool": "bash",
+      "status": "blocking",
+      "count": 3,
+      "sessions": [
+        "ses_eaad30614ffevmFmrjY3fEaf4M",
+        "ses_ea456637dffe1QGHyQEZ5Qh6wt"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-19T17:30:26.848Z",
+      "lastSeen": "2026-10-20T23:36:14.166Z",
+      "snippet": "sqlite3.OperationalError: no such column: sender_id",
+      "remindedCount": 1,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 1,
+      "promotionCount": 1,
+      "iteratedVersion": 19,
+      "movedOn": 1,
+      "correction": "Last error: \"sqlite3.OperationalError: no such column: sender_id\" — address that specific error before retrying this exact call.",
+      "correctionOrigin": "machine",
+      "review": true,
+      "retireBaseline": {
+        "count": 3
+      }
+    },
+    {
+      "key": "4dc553cae94d",
+      "signature": "bash:python -x utf8 tests_ui_projects.py",
+      "tool": "bash",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_ea9f19919ffe4uQhmjhaYcTzbw"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-19T21:27:26.972Z",
+      "lastSeen": "2026-10-19T21:29:09.579Z",
+      "snippet": "FAIL  HTML: index.html содержит api/projects",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 353,
+      "movedOn": 2
+    },
+    {
+      "key": "1bdd1671e7a1",
+      "signature": "bash:set-content -literalpath <str> -value @ <str> @; python <str> <n> >& <n> | out-string -width <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 4,
+      "sessions": [
+        "ses_ea53bcbf5ffeOIcA6dBq9mCdOh"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-20T19:24:15.621Z",
+      "lastSeen": "2026-10-20T19:27:43.729Z",
+      "snippet": "ImportError: cannot import name 'ChatFull' from 'telethon.tl.types.channels' (D:\\SDKs\\Python\\Python312\\Lib\\site-packages\\telethon\\tl\\types\\channels.py)",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 404
+    },
+    {
+      "key": "79793841429d",
+      "signature": "bash:python -x utf8 tests_manage.py",
+      "tool": "bash",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_ea531f4c0ffeHxEPMnH65DbQOn",
+        "ses_ea5240b79ffe3vs4aQaPaU5rvK",
+        "ses_ea513eb2affeuDR9CV6SPJNpau"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-20T19:39:11.682Z",
+      "lastSeen": "2026-10-20T20:16:19.412Z",
+      "snippet": "FAIL  test_settings_title: AttributeError  -> module 'manage' has no attribute 'set_title'",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 420,
+      "movedOn": 2
+    },
+    {
+      "key": "bd97fd83d5d6",
+      "signature": "bash:python tests_manage.py <n> >& <n> | select-string -pattern <str>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_ea4fc92d7ffeU5QjEEVNXcw1oP"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-20T20:39:45.156Z",
+      "lastSeen": "2026-10-20T20:40:34.966Z",
+      "snippet": "FAIL  export link: ��� ���������� -> ���������� ������  -> {'ok': False, 'error': '������ �� ������ ������: SimpleNames",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 446
+    },
+    {
+      "key": "75ecdad83a53",
+      "signature": "bash:python -c <code:c5aaa133>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_ea456290dffephGRlbkCutMIcY"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-20T23:34:03.043Z",
+      "lastSeen": "2026-10-20T23:34:12.764Z",
+      "snippet": "in \"org.yaml\", line 44, column 25",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 3,
+      "movedOn": 1
+    },
+    {
+      "key": "573556b6296b",
+      "signature": "bash:$root= <str> ; $env:tg_env_file= <str> ; $env:temp=$root; $env:tmp=$root; python -x utf8 -m unittest tests_workspace_api -v",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_eabb4d4caffeCgxuocS0eQQV26"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-24T01:31:32.807Z",
+      "lastSeen": "2026-10-24T01:35:51.706Z",
+      "snippet": "test_search_excludes_other_project_and_deleted (tests_workspace_api.WorkspaceHTTPTests.test_search_excludes_other_project_and_deleted) ... FAIL",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 18,
+      "movedOn": 1
+    },
+    {
+      "key": "a5a9081f761e",
+      "signature": "bash:python -x utf8 -c <code:ba6db0b1>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_e94b39bcbffeBDSjSHZrztzLxv"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-24T01:38:58.733Z",
+      "lastSeen": "2026-10-24T01:41:22.854Z",
+      "snippet": "FAIL  checklinks: refs_summary джойнит статус инвайта  -> {'+live1': 'error', '+dead1': 'expired', 'joinchat/live2': 'unknown'}",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 28,
+      "movedOn": 2
+    },
+    {
+      "key": "c67b64aa03ba",
+      "signature": "bash:python -x utf8 tests_downloads.py",
+      "tool": "bash",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_e852daf51ffe6KpE8e38CHyZlL"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-27T01:49:06.943Z",
+      "lastSeen": "2026-10-27T01:57:51.744Z",
+      "snippet": "FAIL  runner: без кредов задание помечено failed, не зависает  -> state=planned error=None",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 32,
+      "movedOn": 2
+    },
+    {
+      "key": "110bf2e07b7a",
+      "signature": "read:skill.md",
+      "tool": "read",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_e7268804effeEv6rfNILv8PR9M",
+        "ses_e705341e6ffeaTITK2Vjq499pq",
+        "ses_e702b50aeffeWp1UEjUvJnTLip"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-30T16:14:46.614Z",
+      "lastSeen": "2026-10-31T02:40:49.745Z",
+      "snippet": "The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"action\":\"allow\",\"pattern\":\"*\"},{\"permission\":\"external_dire",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 206,
+      "movedOn": 2
+    },
+    {
+      "key": "036d5aa14a46",
+      "signature": "read:manifest.json",
+      "tool": "read",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_e7268804effeEv6rfNILv8PR9M"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-30T16:14:47.555Z",
+      "lastSeen": "2026-10-30T16:15:20.299Z",
+      "snippet": "The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"action\":\"allow\",\"pattern\":\"*\"},{\"permission\":\"external_dire",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 113
+    },
+    {
+      "key": "d28e937f99db",
+      "signature": "bash:@ <str> @ | node -",
+      "tool": "bash",
+      "status": "watching",
+      "count": 3,
+      "sessions": [
+        "ses_e7053ee11ffeFkJgHyOkgFqxQ6"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-10-31T02:05:34.554Z",
+      "lastSeen": "2026-10-31T02:08:49.877Z",
+      "snippet": "TypeError: Cannot read properties of null (reading 'y0')",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 176,
+      "movedOn": 2
+    },
+    {
+      "key": "b95557809b98",
+      "signature": "bash:$env:ci= <str> ; $env:debian_frontend= <str> ; $env:git_terminal_prompt= <str> ; $env:gcm_interactive= <str> ; $env:homebrew_no_auto_update= <str> ; $env:git_editor= <str> ; $env:editor= <str> ; $env:visual= <str> ; $env:git_sequence_editor= <str> ; $env:git_merge_autoedit= <str> ; $env:git_pager= <str> ; $env:pager= <str> ; $env:npm_config_yes= <str> ; $env:pip_no_input= <str> ; $env:yarn_enable_immutable_installs= <str> ; git log --oneline - <n> && echo <str> && git log --oneline | wc -l && echo <str> && (get-item ui.html).length && echo <str> && get-childitem ui_assets | select-object name,length",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e7fa38ffeEKFYqHvRpiGOWc"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-02T21:09:43.662Z",
+      "lastSeen": "2026-11-02T21:09:43.662Z",
+      "snippet": "<unreadable: console codepage mojibake>",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 0
+    },
+    {
+      "key": "2c5013fe57cf",
+      "signature": "bash:echo <str> ; gh search code <str> --repo ayugram/ayugramdesktop --limit <n> --json path <n> >& <n> | head - <n> echo <str> echo <str> ; gh search code <str> --repo ayugram/ayugramdesktop --limit <n> --json path <n> >& <n> | head - <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e7fa30ffeY6YWBnq4pLDNxD"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-02T21:13:43.789Z",
+      "lastSeen": "2026-11-02T21:13:43.789Z",
+      "snippet": "<unreadable: console codepage mojibake>",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 0
+    },
+    {
+      "key": "bb8aa4eb56ff",
+      "signature": "bash:echo <str> ; foreach ($t in @( <str> , <str> , <str> , <str> , <str> <str> subprocess <str> [$t] -> $r\" }",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e7fa30ffeY6YWBnq4pLDNxD"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-02T21:20:13.847Z",
+      "lastSeen": "2026-11-02T21:20:13.847Z",
+      "snippet": "<unreadable: console codepage mojibake>",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 0
+    },
+    {
+      "key": "ebb849786a98",
+      "signature": "read:readers.py",
+      "tool": "read",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-03T00:45:43.521Z",
+      "lastSeen": "2026-11-03T00:45:43.521Z",
+      "snippet": "File not found: D:\\Sources\\WhiteBite\\tg-agent\\readers.py\n\nDid you mean one of these?\nD:\\Sources\\WhiteBite\\tg-agent\\tests_readers.py",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 0
+    },
+    {
+      "key": "5e2dca357eae",
+      "signature": "bash:$env:ci= <str> ; $env:debian_frontend= <str> ; $env:git_terminal_prompt= <str> ; $env:gcm_interactive= <str> ; $env:homebrew_no_auto_update= <str> ; $env:git_editor= <str> ; $env:editor= <str> ; $env:visual= <str> ; $env:git_sequence_editor= <str> ; $env:git_merge_autoedit= <str> ; $env:git_pager= <str> ; $env:pager= <str> ; $env:npm_config_yes= <str> ; $env:pip_no_input= <str> ; python -c <code:dbd9b657> && invoke-webrequest -uri <str> -usebasicparsing -timeoutsec <n> | foreach-object { $d = $_.content | convertfrom-json; <str> ; <str> ; <str> }",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-03T00:50:19.803Z",
+      "lastSeen": "2026-11-03T00:50:19.803Z",
+      "snippet": "sqlite3.OperationalError: 13 values for 12 columns",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 14
+    },
+    {
+      "key": "a843082cbd14",
+      "signature": "bash:ruff check checkmega.py db.py server.py test_offline.py <n> >& <n> ; ruff format --check checkmega.py db.py server.py test_offline.py <n> >& <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e6124ab20ffeXYTjq0QEJlEhOe"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-03T01:14:04.568Z",
+      "lastSeen": "2026-11-03T01:14:04.568Z",
+      "snippet": "4 files would be reformatted",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 32
+    },
+    {
+      "key": "16ff2dfb38cf",
+      "signature": "bash:$env:pythonioencoding= <str> ; python -x utf8 tests_db_core.py <n> >& <n> | select-string -pattern <str> -simplematch:$false | select-object -first <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e6124ab20ffeXYTjq0QEJlEhOe"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-03T01:17:07.906Z",
+      "lastSeen": "2026-11-03T01:17:07.906Z",
+      "snippet": "FAIL  v8: SCHEMA_VERSION = 8  -> 9",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 32
+    },
+    {
+      "key": "78728eadc6c6",
+      "signature": "bash:$env:pythonioencoding= <str> ; python -x utf8 tests_manage.py <n> >& <n> | select-string -pattern <str> | select-object -first <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e6124ab20ffeXYTjq0QEJlEhOe"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-03T01:17:34.008Z",
+      "lastSeen": "2026-11-03T01:17:34.008Z",
+      "snippet": "FAIL  MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 26 инструмента  -> ['tg_changes', 'tg_digests', 'tg",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 32
+    },
+    {
+      "key": "6d813fff2636",
+      "signature": "bash:$env:ci= <str> ; $env:debian_frontend= <str> ; $env:git_terminal_prompt= <str> ; $env:gcm_interactive= <str> ; $env:homebrew_no_auto_update= <str> ; $env:git_editor= <str> ; $env:editor= <str> ; $env:visual= <str> ; $env:git_sequence_editor= <str> ; $env:git_merge_autoedit= <str> ; $env:git_pager= <str> ; $env:pager= <str> ; $env:npm_config_yes= <str> ; $env:pip_no_input= <str> ; $env:yarn_enable_immutable_installs= <str> ; git add checkmega.py db.py server.py test_offline.py tests_db_core.py tests_manage.py tests_downloads.py readme.md changelog.md && git diff --cached | grep <str> | grep -e <str>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e6124ab20ffeXYTjq0QEJlEhOe"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-03T01:22:48.635Z",
+      "lastSeen": "2026-11-03T01:22:48.635Z",
+      "snippet": "<unreadable: console codepage mojibake>",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 41
+    },
+    {
+      "key": "d0087368ce53",
+      "signature": "bash:python -m py_compile checkmail.py checklinks.py checkmega.py db.py server.py test_offline.py tests_manage.py tests_ops_report.py && python -c <code:3d4f5241>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e6124ab20ffeXYTjq0QEJlEhOe"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-03T13:55:08.093Z",
+      "lastSeen": "2026-11-03T13:55:08.093Z",
+      "snippet": "SyntaxError: expected 'except' or 'finally' block",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 45
+    },
+    {
+      "key": "f335571ec605",
+      "signature": "edit:notify.py",
+      "tool": "edit",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e6124ab20ffeXYTjq0QEJlEhOe"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-03T13:59:12.694Z",
+      "lastSeen": "2026-11-03T13:59:12.694Z",
+      "snippet": "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 54
+    },
+    {
+      "key": "dcbe59cae3f1",
+      "signature": "bash:python -m py_compile notify.py && $env:pythonioencoding= <str> ; $out = python -x utf8 tests_manage.py <n> >& <n> ; write-host <str> ; $out | select-string -pattern <str> | select-object -first <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e6124ab20ffeXYTjq0QEJlEhOe"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-03T14:00:27.565Z",
+      "lastSeen": "2026-11-03T14:00:27.565Z",
+      "snippet": "<unreadable: console codepage mojibake>",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 55
+    },
+    {
+      "key": "aec94c8b257f",
+      "signature": "skill_mcp:arguments={arguments=<obj>,mcp_name=playwright,tool_name=browser_resize}",
+      "tool": "skill_mcp",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T02:11:14.671Z",
+      "lastSeen": "2026-11-08T02:11:14.671Z",
+      "snippet": "Missing operation. Exactly one of tool_name, resource_name, or prompt_name must be specified.\n\nExamples:\n  skill_mcp(mcp_name=\"sqlite\", tool_name=\"query\", arguments='{\"sql\": \"SELECT * FROM users\"}')\n ",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 0
+    },
+    {
+      "key": "42073494c981",
+      "signature": "read:.playwright-mcp/redesign/dark-home.png",
+      "tool": "read",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e470e51d1ffe2TPoslgeJCpNL9"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T02:19:49.113Z",
+      "lastSeen": "2026-11-08T02:19:49.113Z",
+      "snippet": "File not found: D:\\Sources\\WhiteBite\\tg-agent\\.playwright-mcp\\redesign\\dark-home.png",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 16
+    },
+    {
+      "key": "23be6a1df9e5",
+      "signature": "bash:cd <path> select-string -path extract.py -pattern <str> | foreach-object { $_.linenumber.tostring() + <str> + $_.line.trim() } | select-object -first <n> ; echo <str> ; python -c <code:bf8bf999> <n> >& <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e470e51d1ffe2TPoslgeJCpNL9"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T02:21:19.858Z",
+      "lastSeen": "2026-11-08T02:21:19.858Z",
+      "snippet": "sqlite3.OperationalError: no such column: scope",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 16
+    },
+    {
+      "key": "5ec952137ae1",
+      "signature": "bash:cd <path> python -c <code:720b6cdb>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e470e51d1ffe2TPoslgeJCpNL9"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T02:21:50.720Z",
+      "lastSeen": "2026-11-08T02:21:50.720Z",
+      "snippet": "sqlite3.OperationalError: no such column: review_state",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 16
+    },
+    {
+      "key": "21813da0ded6",
+      "signature": "edit:ui_assets/workspace_entities.js",
+      "tool": "edit",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T02:39:45.290Z",
+      "lastSeen": "2026-11-08T02:39:45.290Z",
+      "snippet": "No changes to apply: oldString and newString are identical.",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 21
+    },
+    {
+      "key": "da2f225a5320",
+      "signature": "bash:$env:ci= <str> ; $env:debian_frontend= <str> ; $env:git_terminal_prompt= <str> ; $env:gcm_interactive= <str> ; $env:homebrew_no_auto_update= <str> ; $env:git_editor= <str> ; $env:editor= <str> ; $env:visual= <str> ; $env:git_sequence_editor= <str> ; $env:git_merge_autoedit= <str> ; $env:git_pager= <str> ; $env:pager= <str> ; $env:npm_config_yes= <str> ; $env:pip_no_input= <str> ; python tests_workspace_api.py <n> >& <n> | select-string -pattern <str> -context <n> , <n> | select-object -first <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T02:41:47.919Z",
+      "lastSeen": "2026-11-08T02:44:42.410Z",
+      "snippet": "> FAILED (errors=1)",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 53,
+      "movedOn": 1
+    },
+    {
+      "key": "77b70455e4fa",
+      "signature": "bash:$env:ci= <str> ; $env:debian_frontend= <str> ; $env:git_terminal_prompt= <str> ; $env:gcm_interactive= <str> ; $env:homebrew_no_auto_update= <str> ; $env:git_editor= <str> ; $env:editor= <str> ; $env:visual= <str> ; $env:git_sequence_editor= <str> ; $env:git_merge_autoedit= <str> ; $env:git_pager= <str> ; $env:pager= <str> ; $env:npm_config_yes= <str> ; $env:pip_no_input= <str> ; $env:yarn_enable_immutable_installs= <str> ; $env:ci= <str> ; $env:git_pager= <str> ; git -c <str> grep -n -e <str>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e46ba1e97ffe7c2h1va49JTfgH"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T03:49:52.132Z",
+      "lastSeen": "2026-11-08T03:49:52.132Z",
+      "snippet": "fatal: command line, 'screens\\.|route\\.name|nav-|href=\\': Trailing backslash",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 69
+    },
+    {
+      "key": "32d846ad4dc8",
+      "signature": "bash:$env:ci= <str> ; $env:debian_frontend= <str> ; $env:git_terminal_prompt= <str> ; $env:gcm_interactive= <str> ; $env:homebrew_no_auto_update= <str> ; $env:git_editor= <str> ; $env:editor= <str> ; $env:visual= <str> ; $env:git_sequence_editor= <str> ; $env:git_merge_autoedit= <str> ; $env:git_pager= <str> ; $env:pager= <str> ; $env:npm_config_yes= <str> ; $env:pip_no_input= <str> ; $env:yarn_enable_immutable_installs= <str> ; $env:ci= <str> ; $env:git_pager= <str> ; git -c <str> grep -o -h -e <str> [a-z0-9_/]+\\ <str> [a-z0-9_/]+\\ <str> -- <str> | sort-object -unique",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e46ba1e97ffe7c2h1va49JTfgH"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T03:50:43.943Z",
+      "lastSeen": "2026-11-08T03:50:43.943Z",
+      "snippet": "<unreadable: console codepage mojibake>",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 69
+    },
+    {
+      "key": "0d17f773e061",
+      "signature": "bash:$env:pythonioencoding= <str> ; python tests_workspace_api.py <n> >& <n> | select-object -last <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T04:27:37.953Z",
+      "lastSeen": "2026-11-08T04:27:37.953Z",
+      "snippet": "FAIL: test_alerts_settings_roundtrip (__main__.WorkspaceHTTPTests.test_alerts_settings_roundtrip)",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 13
+    },
+    {
+      "key": "8ad37117d2ca",
+      "signature": "bash:$env:pythonioencoding= <str> ; $env:tg_env_file= <str> ; python test_offline.py <n> >& <n> | select-string -pattern <str> | select-object -last <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T05:06:59.561Z",
+      "lastSeen": "2026-11-08T05:09:09.217Z",
+      "snippet": "FAIL  MCP post: сервер жив после ошибок tg_manage_post",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 115
+    },
+    {
+      "key": "9de481c1cce1",
+      "signature": "bash:$env:pythonioencoding= <str> ; $env:tg_env_file= <str> ; python tests_announce.py <n> >& <n> | select-string -pattern <str> | select-object -last <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T05:09:16.093Z",
+      "lastSeen": "2026-11-08T05:09:16.093Z",
+      "snippet": "FAIL  MCP post: сервер жив после ошибок tg_manage_post",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 115
+    },
+    {
+      "key": "4eb5e3a3a36e",
+      "signature": "bash:$env:pythonioencoding= <str> ; $env:tg_env_file= <str> ; <str> ; python tests_manage.py <n> >& <n> | select-string -pattern <str> | foreach-object { $_.line.trim() }; <str> ; python tests_downloads.py <n> >& <n> | select-string -pattern <str> | foreach-object { $_.line.trim() }",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T05:11:38.320Z",
+      "lastSeen": "2026-11-08T05:11:38.320Z",
+      "snippet": "===== DOWNLOADS =====",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 118
+    },
+    {
+      "key": "17c81e020e11",
+      "signature": "bash:ls -la; echo <str> ; ls ui_assets <n> >/dev/null; echo <str> ; ls -la ui_assets <n> >/dev/null | head - <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e44c01000ffe6H8bdyjiilWC48"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T13:01:40.021Z",
+      "lastSeen": "2026-11-08T13:01:40.021Z",
+      "snippet": "Out-File: Could not find a part of the path 'D:\\dev\\null'.",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 140
+    },
+    {
+      "key": "a51ec002e6b1",
+      "signature": "bash:python -c <code:1259aa56>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e44bee1deffegtPsdC21F6N0No"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T13:17:03.143Z",
+      "lastSeen": "2026-11-08T13:17:03.143Z",
+      "snippet": "<unreadable: console codepage mojibake>",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 140
+    },
+    {
+      "key": "862c9c874931",
+      "signature": "edit:ui_assets/workspace_catalog.js",
+      "tool": "edit",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T14:54:37.665Z",
+      "lastSeen": "2026-11-08T14:54:37.665Z",
+      "snippet": "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 159
+    },
+    {
+      "key": "f253643aa8e5",
+      "signature": "bash:$env:pythonioencoding= <str> ; try { $c = invoke-webrequest -uri <str> -usebasicparsing -timeoutsec <n> ; <str> } catch { <str> }",
+      "tool": "bash",
+      "status": "watching",
+      "count": 2,
+      "sessions": [
+        "ses_e61e9d121ffeWnrew3cgar6uem"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T20:32:32.390Z",
+      "lastSeen": "2026-11-08T20:32:51.640Z",
+      "snippet": "(no output)",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 196
+    },
+    {
+      "key": "f720295fd5fc",
+      "signature": "bash:cd <path> && ls ui_assets/ && echo <str> && wc -l ui_assets/workspace.css ui.html ui_assets/workspace.js <n> >/dev/null",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e42dfa04cffexFLdJ8BKdySKEK"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T21:46:30.044Z",
+      "lastSeen": "2026-11-08T21:46:30.044Z",
+      "snippet": "<unreadable: console codepage mojibake>",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "succeededAfterGate": 0,
+      "iteratedVersion": 0
+    },
+    {
+      "key": "602d63c48e90",
+      "signature": "bash:$env:pythonioencoding= <str> ; python -m ruff --version <n> >& <n> ; <str> ; python -m ruff check --select e9,f . <n> >& <n> | select-object -last <n> ; <str> ; python -m ruff check . <n> >& <n> | select-object -last <n>",
+      "tool": "bash",
+      "status": "watching",
+      "count": 1,
+      "sessions": [
+        "ses_e42b79eeeffespWgQJCdUrcRdQ"
+      ],
+      "projects": [
+        "."
+      ],
+      "firstSeen": "2026-11-08T22:39:26.536Z",
+      "lastSeen": "2026-11-08T22:39:26.536Z",
+      "snippet": "[*] 13 fixable with the `--fix` option (14 hidden fixes can be enabled with the `--unsafe-fixes` option).",
+      "remindedCount": 0,
+      "blockedCount": 0,
+      "recurredAfterReminder": 0,
+      "recurredAfterGate": 0,
+      "overrideCount": 0,
+      "iteratedVersion": 17,
+      "succeededAfterGate": 0
+    }
+  ],
+  "migrated": "2.68.0",
+  "lastInitVersion": "2.68.0"
+}
