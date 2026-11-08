@@ -394,6 +394,7 @@ class Handler(BaseHTTPRequestHandler):
                         "in_progress": counts.get("in_progress", 0),
                         "blocked": counts.get("blocked", 0),
                         "done": counts.get("done", 0),
+                        "backlog": counts.get("backlog", 0),
                         "overdue": brief.get("overdue", 0),
                         "open_questions": brief.get("open_questions", 0),
                         "promises_no_due": brief.get("promises_no_due", 0),

@@ -120,6 +120,7 @@ window.WS = (() => {
     blocked: "Заблокировано",
     done: "Завершено",
     closed: "Завершено",
+    backlog: "К распределению",
   };
   const kinds = {
     task: "Задача",
@@ -129,6 +130,7 @@ window.WS = (() => {
     service: "Сервис",
     trial: "Пробный период",
     promo: "Предложение",
+    approval: "Согласование",
   };
   const badge = (value, text) =>
     `<span class="badge ${esc(value)}">${esc(text || statuses[value] || value)}</span>`;

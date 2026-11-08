@@ -146,6 +146,29 @@ class WorkspaceHTTPTests(unittest.TestCase):
         _, after = self.request("entity?id=1")
         self.assertEqual(d["revision"], after["revision"])
 
+    def test_edit_accepts_backlog_status(self):
+        _, d = self.request("entity?id=1")
+        body = {"id": 1, "expected_revision": d["revision"], "fields": {"status": "backlog"}}
+        self.assertEqual(self.request("entity/edit", body)[0], 200)
+        _, after = self.request("entity?id=1")
+        self.assertEqual(after["entity"]["status"], "backlog")
+
+    def test_approval_kind_is_first_class(self):
+        with DB(self.db_path) as db:
+            db.conn.execute(
+                "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,owner,project,created_ts,updated_ts) "
+                "VALUES(40,'construction',-100111,1,'approval','Согласовать смету','open','Иван','А',?,?)",
+                (self.now - 500, self.now - 100))
+            db.conn.commit()
+        status, d = self.request("entities?kind=approval")
+        self.assertEqual(status, 200)
+        self.assertEqual([e["id"] for e in d["items"]], [40])
+        _, e1 = self.request("entity?id=1")
+        body = {"id": 1, "expected_revision": e1["revision"], "fields": {"kind": "approval"}}
+        self.assertEqual(self.request("entity/edit", body)[0], 200)
+        _, after = self.request("entity?id=1")
+        self.assertEqual(after["entity"]["kind"], "approval")
+
     def test_project_review_cursor_independent(self):
         _, d = self.request("changes?project=А&limit=2")
         through = max(e["id"] for e in d["items"])

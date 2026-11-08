@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 
 from db import DB, clean_text
 
-KINDS = {"task", "promise", "question", "decision", "service", "trial", "promo"}
-STATUSES = {"open", "in_progress", "blocked", "done"}
+KINDS = {"task", "promise", "question", "decision", "service", "trial", "promo", "approval"}
+STATUSES = {"open", "in_progress", "blocked", "done", "backlog"}
 REVIEW_JOINS = (" FROM entities e LEFT JOIN (SELECT entity_id,MAX(id) AS last_event_id "
                 "FROM entity_events GROUP BY entity_id) recent ON recent.entity_id=e.id "
                 "LEFT JOIN meta rm ON rm.key='ws:review:'||e.id ")
