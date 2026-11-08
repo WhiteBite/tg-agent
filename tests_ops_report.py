@@ -955,6 +955,42 @@ def test_entity_alerts() -> None:
                 os.environ[key] = val
 
 
+def test_monitor_mine() -> None:
+    print("=== monitor: блок «моё» — сущности моего владельца ===")
+    import monitor as monitor_mod
+
+    db = TMP / "mine.sqlite"
+    _seed_watch_db(db, project="Стройка")
+    now = int(time.time())
+    with DB(db) as d:
+        d.conn.executemany(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, owner, due_ts, project, created_ts, updated_ts) "
+            "VALUES('construction', -100900, 1, 'task', ?, 'open', ?, ?, 'Стройка', ?, ?)",
+            [("Моя задача", "Иван", now + 2 * 86400, now, now),
+             ("Чужая задача", "Пётр", now + 2 * 86400, now, now),
+             ("Моя без срока", "Иван", None, now, now)])
+        d.conn.commit()
+
+    saved = os.environ.get("TG_ME_OWNERS")
+    os.environ["TG_ME_OWNERS"] = "Иван"
+    try:
+        s = monitor_mod.collect(str(db))
+        titles = [e["title"] for e in s["mine"]]
+        check(titles == ["Моя задача", "Моя без срока"],
+              "monitor: блок «моё» — только мой владелец, срок вперёд", str(titles))
+        lines = monitor_mod.format_report(s)
+        check(any("моё: 2" in ln for ln in lines)
+              and any(ln.startswith("  моё: [construction/task] Моя задача") for ln in lines),
+              "monitor: «моё» в заголовке и строках", "\n".join(lines)[:200])
+    finally:
+        if saved is None:
+            os.environ.pop("TG_ME_OWNERS", None)
+        else:
+            os.environ["TG_ME_OWNERS"] = saved
+    s2 = monitor_mod.collect(str(db))
+    check(s2["mine"] == [], "monitor: без TG_ME_OWNERS блок «моё» пуст", str(s2["mine"]))
+
+
 def main() -> int:
     try:
         test_notify_event_loop()
@@ -968,6 +1004,7 @@ def main() -> int:
         test_aging_questions()
         test_monitor_promise_gaps()
         test_monitor_stuck()
+        test_monitor_mine()
         test_extract_report_rejected()
         test_doctor_quality()
         test_doctor_cost()

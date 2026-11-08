@@ -209,6 +209,25 @@ def set_alerts(db: DB, body: dict) -> dict:
     return {"ok": True, "words": stored.get("words", []), "mentions": stored.get("mentions", [])}
 
 
+def catalog_star(db: DB, body: dict) -> dict:
+    key = body.get("key")
+    starred = body.get("starred")
+    if not isinstance(key, str) or not key.strip() or len(key) > 200:
+        raise WorkspaceError("Нужен ключ сервиса до 200 символов")
+    if not isinstance(starred, bool):
+        raise WorkspaceError("starred: true или false")
+    stored = metadata(db, "ws:catalog_stars", [])
+    stars = [str(s) for s in stored] if isinstance(stored, list) else []
+    key = key.strip()
+    if starred and key not in stars:
+        stars.append(key)
+    elif not starred and key in stars:
+        stars.remove(key)
+    with db.conn:
+        put_meta(db, "ws:catalog_stars", stars)
+    return {"ok": True, "key": key, "starred": starred}
+
+
 def project_topics(db: DB, body: dict) -> dict:
     project, topics = body.get("project"), body.get("topics")
     if not isinstance(project, str) or not project.strip() or len(project) > 120:

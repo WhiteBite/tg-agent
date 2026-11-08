@@ -160,6 +160,7 @@ def catalog(db: DB, params: dict) -> dict:
         sources_pairs.setdefault(s["entity_id"], set()).add((s["chat_id"], s["topic_id"]))
         sources_chats.setdefault(s["entity_id"], set()).add(s["chat_id"])
     now = int(time.time())
+    stars = set(metadata(db, "ws:catalog_stars", []) or [])
     groups: dict[str, dict] = {}
     order: list[str] = []
     for e in rows:
@@ -168,7 +169,7 @@ def catalog(db: DB, params: dict) -> dict:
         if g is None:
             g = {"key": key, "title": e["title"], "entity_id": e["id"], "kinds": [],
                  "count": 0, "open_count": 0, "next_due": None, "last_seen": 0,
-                 "chats": set(), "status": "expired"}
+                 "chats": set(), "status": "expired", "starred": key in stars}
             groups[key] = g
             order.append(key)
         g["count"] += max(1, len(sources_pairs.get(e["id"], ())))
@@ -190,7 +191,10 @@ def catalog(db: DB, params: dict) -> dict:
         horizon = now + 7 * 86400
         items = [g for g in items
                  if g["status"] == "active" and g["next_due"] and g["next_due"] <= horizon]
-    items.sort(key=lambda g: (g["status"] != "active", g["next_due"] or now + 10 ** 9, -g["last_seen"]))
+    if params.get("starred"):
+        items = [g for g in items if g["starred"]]
+    items.sort(key=lambda g: (not g["starred"], g["status"] != "active",
+                              g["next_due"] or now + 10 ** 9, -g["last_seen"]))
     total = len(items)
     for g in items:
         g["chats"] = [chat_titles.get(c) or str(c) for c in sorted(g["chats"])]

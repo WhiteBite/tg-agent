@@ -54,6 +54,11 @@ def _when(ts: int, now: int) -> str:
     return f"через {delta // 86400} дн."
 
 
+def _me_owners() -> set[str]:
+    raw = os.environ.get("TG_ME_OWNERS") or ""
+    return {o.strip().lower() for o in raw.split(",") if o.strip()}
+
+
 def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
             news_hours: int = 24) -> dict:
     now = int(time.time())
@@ -99,6 +104,12 @@ def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
             " ORDER BY created_ts LIMIT 500", proj_args)]
     overdue_ids = {e["id"] for e in overdue}
     upcoming = [e for e in window if e["id"] not in overdue_ids]
+    me_owners = _me_owners()
+    mine = ([e for e in open_rows
+             if (e["owner"] or "").lower() in me_owners
+             and (project is None or (e["project"] or NO_PROJECT) == project)]
+            if me_owners else [])
+    mine.sort(key=lambda e: (e["due_ts"] is None, e["due_ts"] or 0))
     projects: dict[str, dict] = {}
     for e in open_rows:
         name = e["project"] or NO_PROJECT
@@ -121,7 +132,7 @@ def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
             "questions": questions, "question_days": q_days,
             "ops_rejected": rej["r"], "ops_overflow": rej["o"],
             "stuck": stuck, "promises_no_due": promises_no_due,
-            "promises_no_owner": promises_no_owner}
+            "promises_no_owner": promises_no_owner, "mine": mine}
 
 
 def format_report(summary: dict) -> list[str]:
@@ -140,6 +151,8 @@ def format_report(summary: dict) -> list[str]:
         header += f", обещаний без срока: {len(summary['promises_no_due'])}"
     if summary.get("promises_no_owner"):
         header += f", обещаний без ответственного: {len(summary['promises_no_owner'])}"
+    if summary.get("mine"):
+        header += f", моё: {len(summary['mine'])}"
     if summary.get("stuck"):
         header += f", застряло: {len(summary['stuck'])}"
     lines = [header]
@@ -158,6 +171,9 @@ def format_report(summary: dict) -> list[str]:
                 if summary.get("ops_overflow") else "")
         lines.append(f"  извлечение: отклонено операций {summary['ops_rejected']}"
                      f" за {summary['news_hours']}ч{tail}")
+    for e in summary.get("mine") or []:
+        due = f" ({_when(e['due_ts'], now)})" if e["due_ts"] else ""
+        lines.append(f"  моё: [{e['pack']}/{e['kind']}] {e['title'][:120]}{due}")
     for name, p in sorted(summary["projects"].items()):
         parts = [f"{name}: открытых {p['open']}"]
         kinds = ", ".join(f"{k} {c}" for k, c in sorted(p["by_kind"].items()))
@@ -188,7 +204,8 @@ def _routes() -> dict[str, str] | None:
 def _has_content(summary: dict) -> bool:
     return bool(summary["projects"] or summary["overdue"] or summary["upcoming"]
                 or summary["news"] or summary["questions"] or summary["stuck"]
-                or summary["promises_no_due"] or summary["promises_no_owner"])
+                or summary["promises_no_due"] or summary["promises_no_owner"]
+                or summary.get("mine"))
 
 
 def _filter_routed(summary: dict, routed: set[str]) -> dict:
@@ -199,7 +216,7 @@ def _filter_routed(summary: dict, routed: set[str]) -> dict:
     out["projects"] = {name: p for name, p in summary["projects"].items()
                        if name not in routed}
     for key in ("overdue", "upcoming", "news", "questions", "stuck",
-                "promises_no_due", "promises_no_owner"):
+                "promises_no_due", "promises_no_owner", "mine"):
         out[key] = [e for e in summary[key] if keep(e)]
     return out
 
@@ -258,7 +275,7 @@ def _run_routed(db_path: str | Path, days_ahead: int, send: bool, dry_run: bool,
             "questions": summary["questions"], "stuck": summary["stuck"],
             "promises_no_due": summary["promises_no_due"],
             "promises_no_owner": summary["promises_no_owner"],
-            "lines": lines, "notify": result}
+            "mine": summary["mine"], "lines": lines, "notify": result}
 
 
 def run(db_path: str | Path = DB_PATH, days_ahead: int = 0, project: str | None = None,
@@ -291,7 +308,7 @@ def run(db_path: str | Path = DB_PATH, days_ahead: int = 0, project: str | None 
             "questions": summary["questions"], "stuck": summary["stuck"],
             "promises_no_due": summary["promises_no_due"],
             "promises_no_owner": summary["promises_no_owner"],
-            "lines": lines, "notify": result}
+            "mine": summary["mine"], "lines": lines, "notify": result}
 
 
 def _arg_value(args: list[str], name: str) -> str | None:

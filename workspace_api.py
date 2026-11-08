@@ -5,8 +5,8 @@ from workspace_store import WorkspaceError, changes, entities, entity, scrub
 from workspace_views import (alert_settings, catalog, chat_analysis, home,
                              integration_preview, integration_status,
                              notification_preview, people, projects)
-from workspace_write import (bulk_close, entity_edit, entity_review, person,
-                             project_review, project_topics, set_alerts, visit)
+from workspace_write import (bulk_close, catalog_star, entity_edit, entity_review,
+                             person, project_review, project_topics, set_alerts, visit)
 from workspace_search import search
 
 _MODULE_ROUTES = workspace_routes()
@@ -70,6 +70,8 @@ def post(db, path: str, body: dict):
             return person(db, body)
         case "settings/alerts":
             return set_alerts(db, body)
+        case "catalog/star":
+            return catalog_star(db, body)
         case _:
             fn = _MODULE_ROUTES.get(("POST", path))
             if fn is None:

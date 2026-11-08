@@ -418,6 +418,25 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("settings/alerts", {"words": ["ok", "x" * 61]})[0], 400)
         self.assertEqual(self.request("settings/alerts", {})[0], 400)
 
+    def test_catalog_star_roundtrip(self):
+        with DB(self.db_path) as db:
+            db.conn.execute(
+                "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,due_ts,dedup_key,created_ts,updated_ts) "
+                "VALUES(30,'services',-100111,1,'trial','Звёздный сервис','open',?, 'star.example', ?, ?)",
+                (self.now + 5 * 86400, self.now - 100, self.now - 50))
+            db.conn.commit()
+        status, d = self.request("catalog?starred=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(d["total"], 0)
+        self.assertEqual(self.request("catalog/star", {"key": "star.example", "starred": True})[0], 200)
+        status, d = self.request("catalog?starred=1")
+        self.assertEqual([g["key"] for g in d["items"]], ["star.example"])
+        self.assertTrue(d["items"][0]["starred"])
+        self.assertEqual(self.request("catalog/star", {"key": "star.example", "starred": False})[0], 200)
+        self.assertEqual(self.request("catalog?starred=1")[1]["total"], 0)
+        self.assertEqual(self.request("catalog/star", {"key": "x" * 201, "starred": True})[0], 400)
+        self.assertEqual(self.request("catalog/star", {"key": "star.example"})[0], 400)
+
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})
         self.assertEqual(status, 409)
