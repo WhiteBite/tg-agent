@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.18.0 — 2026-11-08
+Дрейф и мелочи покрытия MCP/CLI/UI:
+- `server.py`: новый read-only инструмент `tg_transcripts` — транскрипции аудио из `media_assets` (фильтры chat_id/status/query); базовый набор стал 17 инструментов (обновлены счётчики в `test_offline`/`tests_manage`/`tests_downloads`/`tests_announce`).
+- `server.py`: `tg_entities` отдаёт `starred` (из `ws:catalog_stars`); у `tg_live_check_invites/mega/mailru/links` появился параметр `limit` (дефолт 5, до 50) — паритет с CLI-лимитом.
+- `modules/downloads.py`: `tg_downloads_run` принимает `max_mb` и `include_downloaded` — как UI и CLI (раньше молча брал дефолты).
+- `people.py`: CLI справочника людей (`list`/`set`/`remove`) поверх `meta['ws:person:*']` — раньше справочник правился только из UI.
+- Тесты: `tests_ops_report.py` (+CLI людей), обновлены счётчики инструментов; полный офлайн-гейт зелёный.
+
 ## 0.17.0 — 2026-11-08
 Закрытие пробелов покрытия MCP/CLI/UI, найденных аудитом:
 - Экран «Ссылки»: офлайн-сводка `db.refs_summary` — топ упоминаний, публичных ссылок, инвайтов (со статусом из кэша checklinks) и mega/mailru (из кэша), с фильтром по чату и окну дней. Раньше это было доступно только MCP (`tg_links`) и CLI.

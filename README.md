@@ -171,6 +171,7 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_links` | Что шерили: топ @упоминаний, t.me, инвайтов (с пометкой жива/истекла из кэша checklinks), mega.nz (жива/удалена из кэша checkmega), URL и источников пересылок |
 | `tg_topics` | Структура индекса: чаты, а по chat_id — его темы со счётчиками |
 | `tg_digests` | Готовые выжимки новых сообщений (создаёт `digest.py`) |
+| `tg_transcripts` | Транскрипции аудио (голосовые/аудио-документы) из очереди `media.py`: chat_id, msg_id, status, text; фильтры chat_id/status/query |
 | `tg_entities` | Извлечённые сущности (задачи, решения, обещания, вопросы): project, kind, status, owner, due_ts; фильтры pack/kind/status/project/owner/chat_id и query — подстрока в title/body |
 | `tg_entity` | Одна сущность по id: все поля и история событий — какое поле менялось, когда и с каким доказательством из сообщения |
 | `tg_overdue` | Открытые сущности со сроком: просроченные (`days_ahead=0`) или на горизонте N дней, по возрастанию due_ts |
@@ -386,7 +387,7 @@ Messages).
 opencode mcp add telegram --global -- \
   ~/.venvs/tg-agent/bin/python ~/tg-agent/server.py
 opencode mcp list        # должно быть connected
-python3 server.py --list # проверить сервер отдельно: печатает 16 инструментов
+python3 server.py --list # проверить сервер отдельно: печатает 17 инструментов
 ```
 
 Файл `tg-agent.md` — пример промпта агента: порядок работы, требование начинать с
@@ -834,6 +835,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `services_report.py` | Каталог сервисов из сущностей: rollup по dedup_key, `--days/--query/--top/--hide-closed` |
 | `fuzzy_dedup.py` | Maintenance-проход: слияние дублей сущностей по нормализованному title (richer-keeper, cap, идемпотентный) |
 | `proclock.py` | Lockfile одиночного инстанса для демонов (pipeline --loop, live.py) |
+| `people.py` | CLI справочника людей: `list` / `set --key … --name … --ids …` / `remove` — тот же `meta['ws:person:*']`, что читает UI |
 | `engine.py` | Панель «Движок»: статус демонов по lockfile/`pipeline:last_ok_ts`, пуск/стоп за гейтом `TG_ALLOW_ENGINE=1` |
 | `ui.py` + `ui.html` + `ui_assets/` | Рабочее пространство в браузере: «Требует внимания», сущности, «Переписка», «Ссылки», «Поиск в Telegram», «Каталог», «Загрузки», «Движок», «Настройки»; раздаёт `/assets/*` и `/api/workspace/*` за общим токен-гейтом, синхронизацию можно отменить |
 | `workspace_store.py` / `workspace_views.py` / `workspace_write.py` / `workspace_search.py` / `workspace_api.py` | Бэкенд рабочего пространства: фильтры/сортировка/пагинация, поиск FTS5+LIKE-фоллбек, правка полей с аудитом (409 на устаревшую ревизию), проверка карточек, курсор просмотра проекта, привязка тем, справочник людей, локальные превью 101 и уведомлений |
@@ -946,14 +948,14 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 - **реакции в индексе**: `live.handle_reactions` + `db.update_reactions` (агрегатные счётчики)
 - **читалки агента**: изменения с прошлого раза, бриф проекта, пробелы (вопросы без
   ответа, обещания без срока/ответственного), фильтр по ответственному
-- **MCP**: 16 инструментов — `tg_changes` / `tg_project_brief` / `tg_gaps` + `owner` в `tg_entities`
+- **MCP**: 17 инструментов — `tg_transcripts` + `tg_changes` / `tg_project_brief` / `tg_gaps` + `owner` и `starred` в `tg_entities`
 - **маршрутизация сводок** по проектам (`TG_NOTIFY_ROUTES`, персональные хэш-ключи);
   `monitor` показывает обещания без срока/ответственного и «застряло» (blocked+просрочка)
 - **наблюдаемость**: `doctor --cost`, штамп `pipeline:last_ok_ts` + `watchdog.py`, UI-панель
   `/api/projects` с курсором визита проекта
 - **гигиена**: валидация схем паков на импорте, провайдеры экспорта из конфига (`TG_EXTRA_PROVIDERS`)
 - **настоящий `server.py` как подпроцесс по MCP stdio**: `initialize` →
-  `tools/list` (16 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
+  `tools/list` (17 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
   включая сценарий «прочитал → отметил → непрочитанного нет»; `tg_new` честно
   держит `truncated` при лимите; `tg_mark_read` отклоняет id выше максимума
   индекса темы; отдельный прогон с `TG_ALLOW_LIVE=1` —
