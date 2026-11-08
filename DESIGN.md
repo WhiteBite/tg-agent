@@ -41,6 +41,9 @@ Message bubbles carry a per-sender tint (six neutral steps, --bubble-0..5) deriv
 from a hash of the sender name, so a group chat reads as distinct voices without
 avatars. Neutral hairlines separate register rows. No decorative accent stripes,
 accent card outlines or gradients. Status always has text as well as color.
+Elevation is carried by tinted shadows, never heavier borders: --shadow-1 for raised
+chrome (topbar, toast), --shadow-2 for overlays (drawer, modal). Reply quotations and
+blockquotes use a neutral 2px rule in --edge, never the accent.
 
 ## 3. Typography
 One family: locally available Segoe UI Variable / Segoe UI / sans-serif, so private
