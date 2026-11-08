@@ -9,17 +9,30 @@
 том же session-файле конфликтовал бы его SQLite. Реальная отправка только
 при TG_ALLOW_SEND=1, иначе dry-run в лог. Пауза на пару (чат, причина),
 чтобы одно и то же правило не строчило потоком.
+
+    python3 alerts.py            # действующие правила (meta или окружение)
+    python3 alerts.py --text "нужна холява"   # какие правила сработают
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 import time
+from pathlib import Path
 
-from db import DB, clean_text, extract_refs
+HERE = Path(__file__).parent
+sys.path.insert(0, str(HERE))
 
+from env import load_env  # noqa: E402
+
+load_env()
+
+from db import DB, clean_text, extract_refs  # noqa: E402
+
+DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 ALLOWED = ("1", "true", "yes")
 _cooldown: dict[tuple[int, str], float] = {}
 
@@ -106,3 +119,24 @@ async def maybe_alert(client, db: DB, chat_id: int, topic_id: int,
         return fresh
     print(f"  алерт: {'; '.join(fresh)} -> Saved Messages ({chat_id})", flush=True)
     return fresh
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="живые алерты: показать действующие правила или проверить текст")
+    ap.add_argument("--text", help="проверить текст сообщения по текущим правилам")
+    ap.add_argument("--db", default=DB_PATH)
+    args = ap.parse_args()
+    with DB(args.db) as db:
+        cfg = config(db)
+    if args.text is None:
+        print(json.dumps({"gate": _gate_on(), "source": cfg["source"],
+                          "words": cfg["words"], "mentions": cfg["mentions"],
+                          "cooldown": cfg["cooldown"]}, ensure_ascii=False, indent=2))
+        return 0
+    print(json.dumps({"reasons": match(args.text, cfg)}, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

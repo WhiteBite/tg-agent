@@ -1049,6 +1049,33 @@ def test_engine_control() -> None:
             os.environ["TG_ALLOW_ENGINE"] = saved
 
 
+def test_alerts_cli() -> None:
+    print("=== alerts: CLI — показать правила и проверить текст ===")
+    repo = Path(__file__).parent
+    db_path = TMP / "alerts_cli.sqlite"
+    with DB(db_path):
+        pass
+    env = {**os.environ, "TG_ENV_FILE": "", "TG_DB": str(db_path),
+           "TG_ALERT_WORDS": "холява", "TG_ALERT_MENTIONS": "myname"}
+    out = subprocess.run([sys.executable, str(repo / "alerts.py")],
+                         capture_output=True, text=True, encoding="utf-8", env=env)
+    check(out.returncode == 0, "alerts CLI: --status выходит 0", out.stderr[:200])
+    try:
+        data = json.loads(out.stdout)
+        got = data.get("words") == ["холява"] and data.get("mentions") == ["myname"]
+    except (ValueError, TypeError):
+        got = False
+    check(got, "alerts CLI: печатает действующие правила", out.stdout[:200])
+    out2 = subprocess.run([sys.executable, str(repo / "alerts.py"), "--text", "нужна холява"],
+                          capture_output=True, text=True, encoding="utf-8", env=env)
+    try:
+        reasons = json.loads(out2.stdout).get("reasons")
+    except (ValueError, TypeError):
+        reasons = None
+    check(reasons == ["слово: холява"],
+          "alerts CLI: --text показывает сработавшие правила", out2.stdout[:200])
+
+
 def main() -> int:
     try:
         test_notify_event_loop()
@@ -1070,6 +1097,7 @@ def main() -> int:
         test_digest_bound()
         test_loop_until_done_false()
         test_entity_alerts()
+        test_alerts_cli()
         test_live_alerts()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
