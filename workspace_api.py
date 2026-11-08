@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from modules import workspace_routes
 from workspace_store import WorkspaceError, changes, entities, entity, scrub
-from workspace_views import (alert_settings, catalog, chat_analysis, home,
-                             integration_preview, integration_status,
+from workspace_views import (alert_settings, catalog, chat_analysis, engine_view,
+                             home, integration_preview, integration_status,
                              notification_preview, people, projects)
-from workspace_write import (bulk_close, catalog_star, entity_edit, entity_review,
-                             person, project_review, project_topics, set_alerts, visit)
+from workspace_write import (bulk_close, catalog_star, engine_start, engine_stop,
+                             entity_edit, entity_review, person, project_review,
+                             project_topics, set_alerts, visit)
 from workspace_search import search
 
 _MODULE_ROUTES = workspace_routes()
@@ -45,6 +46,8 @@ def get(db, path: str, params: dict):
             return notification_preview(db, params)
         case "alerts":
             return alert_settings(db)
+        case "engine":
+            return engine_view(db)
         case _:
             fn = _MODULE_ROUTES.get(("GET", path))
             if fn is None:
@@ -72,6 +75,10 @@ def post(db, path: str, body: dict):
             return set_alerts(db, body)
         case "catalog/star":
             return catalog_star(db, body)
+        case "engine/start":
+            return engine_start(db, body)
+        case "engine/stop":
+            return engine_stop(db, body)
         case _:
             fn = _MODULE_ROUTES.get(("POST", path))
             if fn is None:

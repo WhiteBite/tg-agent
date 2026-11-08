@@ -30,6 +30,8 @@ window.WS = (() => {
     integrations: '<path d="M8 3v5m8-5v5M6 8h12v4a6 6 0 0 1-12 0zm6 10v4"/>',
     settings:
       '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--surface)"/><circle cx="15" cy="17" r="3" fill="var(--surface)"/>',
+    engine:
+      '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M19 5l-2 2M7 17l-2 2"/>',
     search: '<circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/>',
     close: '<path d="m6 6 12 12M6 18 18 6"/>',
     arrow: '<path d="M5 12h14m-5-5 5 5-5 5"/>',
@@ -165,6 +167,7 @@ window.WS = (() => {
       "Интеграции",
       "Локальное состояние выгрузки и запросы-кандидаты.",
     ],
+    engine: ["Движок", "Фоновые демоны: статус, запуск и остановка."],
     settings: ["Настройки", "Проекты, люди, уведомления и внешний вид."],
     project: ["Проект", "Контроль проекта по переписке."],
     search: ["Поиск", "Задачи, решения и сообщения с контекстом."],
@@ -179,6 +182,7 @@ window.WS = (() => {
     ["messages", "Переписка"],
     ["downloads", "Загрузки"],
     ["integrations", "Интеграции"],
+    ["engine", "Движок"],
     ["settings", "Настройки"],
   ];
   let route = { name: "attention", params: new URLSearchParams() };

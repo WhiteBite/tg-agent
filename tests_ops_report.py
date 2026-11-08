@@ -991,6 +991,64 @@ def test_monitor_mine() -> None:
     check(s2["mine"] == [], "monitor: без TG_ME_OWNERS блок «моё» пуст", str(s2["mine"]))
 
 
+def test_engine_control() -> None:
+    print("=== engine: статус по lockfile, пуск/стоп за гейтом ===")
+    import engine as engine_mod
+    import proclock
+
+    db_path = TMP / "engine.sqlite"
+    with DB(db_path) as db:
+        db.set_meta("pipeline:last_ok_ts", str(int(time.time())))
+
+    s = engine_mod.status(db_path)
+    check(s["enabled"] is False and s["engines"]["pipeline"]["running"] is False
+          and s["engines"]["pipeline"]["stale"] is False,
+          "engine: статус — гейт выключен, демон не запущен, метка свежая", str(s))
+
+    held = proclock.acquire_instance_lock(str(db_path) + ".pipeline.lock")
+    try:
+        check(engine_mod.status(db_path)["engines"]["pipeline"]["running"] is True,
+              "engine: занятый lockfile = демон работает")
+    finally:
+        held.close()
+
+    saved = os.environ.get("TG_ALLOW_ENGINE")
+    os.environ.pop("TG_ALLOW_ENGINE", None)
+    try:
+        try:
+            engine_mod.start(db_path, "pipeline")
+            blocked = False
+        except PermissionError:
+            blocked = True
+        check(blocked, "engine: пуск без TG_ALLOW_ENGINE запрещён")
+
+        os.environ["TG_ALLOW_ENGINE"] = "1"
+        spawned: list = []
+
+        class FakeProc:
+            pid = 4321
+
+        saved_spawn, saved_term = engine_mod._spawn, engine_mod._terminate
+        engine_mod._spawn = lambda name, minutes: (spawned.append((name, minutes)), FakeProc())[1]
+        killed: list = []
+        engine_mod._terminate = lambda pid: killed.append(pid)
+        try:
+            res = engine_mod.start(db_path, "pipeline", 15)
+            check(res.get("ok") and res.get("pid") == 4321 and spawned == [("pipeline", 15)],
+                  "engine: пуск поднимает процесс и пишет pid", str(res))
+            check(engine_mod.stop(db_path, "pipeline").get("stopped") is True and killed == [4321],
+                  "engine: стоп завершает pid из meta", str(killed))
+            check(engine_mod.status(db_path)["engines"]["pipeline"]["pid"] is None,
+                  "engine: после стопа pid очищен")
+        finally:
+            engine_mod._spawn, engine_mod._terminate = saved_spawn, saved_term
+    finally:
+        if saved is None:
+            os.environ.pop("TG_ALLOW_ENGINE", None)
+        else:
+            os.environ["TG_ALLOW_ENGINE"] = saved
+
+
 def main() -> int:
     try:
         test_notify_event_loop()
@@ -1005,6 +1063,7 @@ def main() -> int:
         test_monitor_promise_gaps()
         test_monitor_stuck()
         test_monitor_mine()
+        test_engine_control()
         test_extract_report_rejected()
         test_doctor_quality()
         test_doctor_cost()

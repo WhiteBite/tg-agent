@@ -437,6 +437,18 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("catalog/star", {"key": "x" * 201, "starred": True})[0], 400)
         self.assertEqual(self.request("catalog/star", {"key": "star.example"})[0], 400)
 
+    def test_engine_view_and_gate(self):
+        status, d = self.request("engine")
+        self.assertEqual(status, 200)
+        self.assertIn("pipeline", d["engines"])
+        self.assertIn("live", d["engines"])
+        self.assertFalse(d["enabled"])
+        status, err = self.request("engine/start", {"engine": "pipeline"})
+        self.assertEqual(status, 403)
+        self.assertFalse(err["ok"])
+        status, err = self.request("engine/stop", {"engine": "live"})
+        self.assertEqual(status, 403)
+
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})
         self.assertEqual(status, 409)

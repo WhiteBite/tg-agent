@@ -5,6 +5,7 @@ import os
 import time
 
 from alerts import config as alerts_config
+import engine as engine_mod
 from db import DB
 from workspace_store import REVIEW_JOINS, REVIEW_STATE_SQL, WorkspaceError, metadata, page, review
 from workspace_write import autoclose_stale_trials
@@ -305,3 +306,7 @@ def notification_preview(db: DB, params: dict) -> dict:
 def alert_settings(db: DB) -> dict:
     cfg = alerts_config(db)
     return {"words": cfg["words"], "mentions": cfg["mentions"], "source": cfg["source"]}
+
+
+def engine_view(db: DB) -> dict:
+    return engine_mod.status(db.path)

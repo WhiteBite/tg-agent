@@ -4,6 +4,7 @@ import json
 import time
 
 from db import DB, clean_text
+import engine
 from workspace_store import KINDS, STATUSES, WorkspaceError, metadata, revision
 
 
@@ -207,6 +208,25 @@ def set_alerts(db: DB, body: dict) -> dict:
     with db.conn:
         put_meta(db, "ws:alerts", stored)
     return {"ok": True, "words": stored.get("words", []), "mentions": stored.get("mentions", [])}
+
+
+def engine_start(db: DB, body: dict) -> dict:
+    try:
+        return engine.start(db.path, str(body.get("engine") or "pipeline"),
+                            int(body.get("minutes") or 30))
+    except PermissionError as exc:
+        raise WorkspaceError(str(exc), 403) from exc
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceError(str(exc)) from exc
+
+
+def engine_stop(db: DB, body: dict) -> dict:
+    try:
+        return engine.stop(db.path, str(body.get("engine") or "pipeline"))
+    except PermissionError as exc:
+        raise WorkspaceError(str(exc), 403) from exc
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceError(str(exc)) from exc
 
 
 def catalog_star(db: DB, body: dict) -> dict:
