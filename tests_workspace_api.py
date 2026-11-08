@@ -388,6 +388,22 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertEqual([g["key"] for g in q["items"]], ["vpn.example"])
         self.assertEqual(self.request("catalog?status=nope")[0], 400)
 
+    def test_home_upcoming_and_catalog_week_filter(self):
+        with DB(self.db_path) as db:
+            for eid, title, dedup, due in ((10, "Триал недели", "week.example", self.now + 3 * 86400),
+                                           (11, "Триал далёкий", "far.example", self.now + 30 * 86400)):
+                db.conn.execute(
+                    "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,owner,due_ts,dedup_key,created_ts,updated_ts) "
+                    "VALUES(?, 'services', -100111, 1, 'trial', ?, 'open', NULL, ?, ?, ?, ?)",
+                    (eid, title, due, dedup, self.now - 500, self.now - 100))
+            db.conn.commit()
+        status, d = self.request("home")
+        self.assertEqual(status, 200)
+        self.assertEqual(d["counts"]["upcoming"], 1)
+        _, cat = self.request("catalog?due=upcoming")
+        self.assertEqual([g["key"] for g in cat["items"]], ["week.example"])
+        self.assertEqual(self.request("catalog?due=bogus")[0], 400)
+
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})
         self.assertEqual(status, 409)

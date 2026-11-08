@@ -15,7 +15,7 @@ def home(db: DB, params: dict) -> dict:
     args = [params["project"]] if params.get("project") else []
     all_rows = db.conn.execute("SELECT e.*," + REVIEW_STATE_SQL + " AS review_state" + REVIEW_JOINS + where, args)
     now = int(time.time())
-    counts = dict.fromkeys(("overdue", "blocked", "open_questions", "promises_missing_due",
+    counts = dict.fromkeys(("overdue", "upcoming", "blocked", "open_questions", "promises_missing_due",
                            "promises_missing_owner", "review_pending"), 0)
     attention = []
     for row in all_rows:
@@ -26,6 +26,8 @@ def home(db: DB, params: dict) -> dict:
             if e["due_ts"] and e["due_ts"] < now:
                 counts["overdue"] += 1
                 reasons.append("overdue")
+            if e["due_ts"] and now < e["due_ts"] <= now + 7 * 86400:
+                counts["upcoming"] += 1
             if e["status"] == "blocked":
                 counts["blocked"] += 1
                 reasons.append("blocked")
@@ -181,6 +183,12 @@ def catalog(db: DB, params: dict) -> dict:
     items = [groups[k] for k in order]
     if status != "all":
         items = [g for g in items if g["status"] == status]
+    if params.get("due"):
+        if params["due"] != "upcoming":
+            raise WorkspaceError("Фильтр срока каталога: upcoming")
+        horizon = now + 7 * 86400
+        items = [g for g in items
+                 if g["status"] == "active" and g["next_due"] and g["next_due"] <= horizon]
     items.sort(key=lambda g: (g["status"] != "active", g["next_due"] or now + 10 ** 9, -g["last_seen"]))
     total = len(items)
     for g in items:
