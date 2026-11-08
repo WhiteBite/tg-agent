@@ -5,7 +5,8 @@ from workspace_store import WorkspaceError, changes, entities, entity, scrub
 from workspace_views import (chat_analysis, home, integration_preview,
                              integration_status, notification_preview, people,
                              projects)
-from workspace_write import bulk_close, entity_edit, entity_review, person, project_review, project_topics
+from workspace_write import (bulk_close, entity_edit, entity_review, person,
+                             project_review, project_topics, visit)
 from workspace_search import search
 
 _MODULE_ROUTES = workspace_routes()
@@ -59,6 +60,8 @@ def post(db, path: str, body: dict):
             return project_review(db, body)
         case "project/topics":
             return project_topics(db, body)
+        case "visit":
+            return visit(db, body)
         case "people":
             return person(db, body)
         case _:

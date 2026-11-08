@@ -87,6 +87,14 @@ class WorkspaceHTTPTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read())
 
+    def request_api_get(self, path, token=True):
+        url = f"http://127.0.0.1:{self.port}/api/{path}"
+        if token:
+            url += ("&" if "?" in path else "?") + "token=workspace-test"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read())
+
     def test_attention_has_real_counts(self):
         status, d = self.request("home")
         self.assertEqual(status, 200)
@@ -299,6 +307,22 @@ class WorkspaceHTTPTests(unittest.TestCase):
             self.assertIn("протухших", ev["quote"])
         self.assertEqual(self.request("entity/bulk_close", {"older_than_days": 0})[0], 400)
         self.assertEqual(self.request("entity/bulk_close", {"kinds": ["nope"]})[0], 400)
+
+    def test_visit_counters_count_new_since_your_visit(self):
+        status, _ = self.request("visit", {"chat_id": -100111, "topic_id": 1})
+        self.assertEqual(status, 200)
+        with DB(self.db_path) as db:
+            db.insert_message({"chat_id": -100111, "msg_id": 20, "topic_id": 1,
+                               "ts": self.now + 10, "sender_id": 5, "sender_name": "Иван",
+                               "text": "новое после визита"})
+        _, d = self.request_api_get("state")
+        chat = next(c for c in d["chats"] if c["id"] == -100111)
+        w = next(w for w in chat["watched"] if w["topic_id"] == 1)
+        self.assertEqual(w["new_since_visit"], 1)
+        self.assertEqual(chat["new_total"], 2)
+        self.assertEqual(self.request("visit", {"chat_id": -100111, "topic_id": 999})[0], 404)
+        self.assertEqual(self.request("visit", {"chat_id": -100111, "topic_id": "x"})[0], 400)
+        self.assertEqual(self.request("visit", {})[0], 400)
 
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})

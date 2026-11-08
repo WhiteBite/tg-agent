@@ -84,6 +84,13 @@ def build_state() -> dict:
         watched_by: dict[int, list[dict]] = {}
         for w in db.watch_list():
             watched_by.setdefault(w["chat_id"], []).append(w)
+        visits: dict[tuple[int, int], int] = {}
+        for r in db.conn.execute("SELECT key,value FROM meta WHERE key LIKE 'ws:visit:%'"):
+            _, chat_part, topic_part = r["key"].rsplit(":", 2)
+            try:
+                visits[(int(chat_part), int(topic_part))] = int(json.loads(r["value"]))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                continue
         pins_by: dict[int, list[dict]] = {}
         for p in db.conn.execute("SELECT * FROM pins ORDER BY chat_id, ts DESC"):
             pins_by.setdefault(p["chat_id"], []).append(dict(p))
@@ -94,8 +101,14 @@ def build_state() -> dict:
             c["last_ts"] = lt[2] if lt else c.get("last_ts")
             c["topics"] = topics_by.get(c["id"], [])
             c["watched"] = watched_by.get(c["id"], [])
+            for w in c["watched"]:
+                seen = visits.get((c["id"], w["topic_id"]))
+                w["new_since_visit"] = db.conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE chat_id=? AND topic_id=? AND deleted=0 AND ts>?",
+                    (c["id"], w["topic_id"], seen)).fetchone()[0] if seen is not None \
+                    else (w.get("new_since_read") or 0)
             c["pins"] = [p for p in pins_by.get(c["id"], [])[:10]]
-            c["new_total"] = sum(w.get("new_since_read") or 0 for w in c["watched"])
+            c["new_total"] = sum(w.get("new_since_visit") or 0 for w in c["watched"])
         stats = dict(db.conn.execute(
             "SELECT (SELECT COUNT(*) FROM chats) chats, "
             "(SELECT COUNT(*) FROM topics) topics, "

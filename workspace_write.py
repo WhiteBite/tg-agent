@@ -121,6 +121,20 @@ def bulk_close(db: DB, body: dict) -> dict:
     return {"ok": True, "closed": len(closed), "older_than_days": days}
 
 
+def visit(db: DB, body: dict) -> dict:
+    try:
+        chat_id = int(body["chat_id"])
+        topic_id = int(body.get("topic_id", 1)) or 1
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WorkspaceError("Нужны числовые chat_id и topic_id") from exc
+    if not db.conn.execute("SELECT 1 FROM topics WHERE chat_id=? AND topic_id=?",
+                           (chat_id, topic_id)).fetchone():
+        raise WorkspaceError("Тема не найдена в индексе", 404)
+    with db.conn:
+        put_meta(db, f"ws:visit:{chat_id}:{topic_id}", int(time.time()))
+    return {"ok": True, "chat_id": chat_id, "topic_id": topic_id}
+
+
 def project_review(db: DB, body: dict) -> dict:
     project = body.get("project")
     try:

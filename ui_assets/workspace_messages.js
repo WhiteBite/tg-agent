@@ -1,7 +1,7 @@
 "use strict";
 (() => {
   const W = window.WS,
-    { $, esc, icon, api, time } = W;
+    { $, esc, icon, api, post, time } = W;
   let state = { chats: [], folders: [] },
     selected = new Map(),
     current = null,
@@ -61,7 +61,7 @@
             return `<details ${chat === c.id || text ? "open" : ""}><summary>${esc(c.title)} <small>${c.new_total || 0} новых</small></summary><button class="text-button" data-watch-all="${c.id}">Отметить все темы</button>${topics
               .map((t) => {
                 const w = c.watched.find((w) => w.topic_id === t.topic_id);
-                return `<div class="topic-entry"><a class="${chat === c.id && topic === t.topic_id ? "selected" : ""}" href="#messages?${W.query({ chat_id: c.id, topic_id: t.topic_id, project })}">${esc(w?.alias || t.title)}${w?.new_since_read ? ` <small>+${w.new_since_read}</small>` : ""}</a><button class="icon-button" data-watch="${c.id}:${t.topic_id}" aria-label="${w ? "Снять отметку" : "Отметить тему"}" title="${w ? "Снять отметку" : "Отметить тему"}">${icon(w ? "check" : "plus")}</button></div>`;
+                return `<div class="topic-entry"><a class="${chat === c.id && topic === t.topic_id ? "selected" : ""}" href="#messages?${W.query({ chat_id: c.id, topic_id: t.topic_id, project })}">${esc(w?.alias || t.title)}${(w?.new_since_visit || w?.new_since_read) ? ` <small>+${w.new_since_visit || w.new_since_read}</small>` : ""}</a><button class="icon-button" data-watch="${c.id}:${t.topic_id}" aria-label="${w ? "Снять отметку" : "Отметить тему"}" title="${w ? "Снять отметку" : "Отметить тему"}">${icon(w ? "check" : "plus")}</button></div>`;
               })
               .join("")}</details>`;
           })
@@ -191,6 +191,12 @@
           W.toast(e.message);
         }
       });
+      post("visit", { chat_id: chat, topic_id: topic }).catch(() => {});
+      const wvisited = c?.watched.find((x) => x.topic_id === topic);
+      if (wvisited) {
+        wvisited.new_since_visit = 0;
+        tree();
+      }
       const pins = (c?.pins || []).filter((p) => (p.topic_id || 1) === topic);
       if (pins.length)
         $("#message-pins").innerHTML =
