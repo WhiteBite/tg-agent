@@ -1672,6 +1672,51 @@ dialog::backdrop {
   display: none;
 }
 
+.sidenav {
+  background:
+    radial-gradient(170px 170px at 18px 16px, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%),
+    var(--nav);
+}
+main {
+  background:
+    radial-gradient(760px 300px at 16% -70px, color-mix(in srgb, var(--accent) 12%, transparent), transparent 62%),
+    radial-gradient(520px 260px at 72% -110px, color-mix(in srgb, var(--ember) 9%, transparent), transparent 64%);
+}
+.brand-mark {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent),
+    0 6px 20px color-mix(in srgb, var(--accent) 30%, transparent);
+  animation: brand-pulse 6s ease-in-out infinite;
+}
+@keyframes brand-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
+      0 6px 20px color-mix(in srgb, var(--accent) 26%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent),
+      0 6px 28px color-mix(in srgb, var(--accent) 46%, transparent);
+  }
+}
+.button.primary {
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.button.primary:hover {
+  box-shadow: 0 8px 26px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+img {
+  max-width: 100%;
+  height: auto;
+}
+@media (max-width: 1200px) {
+  .connection-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 body {
   letter-spacing: -0.01em;
 }
