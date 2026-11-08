@@ -247,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
             name = u.path.removeprefix("/assets/")
             allowed = {"workspace.css", "workspace.js", "workspace_entities.js", "workspace_projects.js",
                        "workspace_messages.js", "workspace_analysis.js", "workspace_catalog.js",
-                       "workspace_settings.js", "workspace_downloads.js"}
+                       "workspace_settings.js", "workspace_downloads.js", "workspace_engine.js"}
             if name not in allowed:
                 self._json({"error": "not found"}, 404)
                 return
