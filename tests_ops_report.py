@@ -991,6 +991,48 @@ def test_monitor_mine() -> None:
     check(s2["mine"] == [], "monitor: без TG_ME_OWNERS блок «моё» пуст", str(s2["mine"]))
 
 
+def test_monitor_changes() -> None:
+    print("=== monitor: изменения за окно — закрыто и перенесено сроков ===")
+    import monitor as monitor_mod
+
+    db = TMP / "changes.sqlite"
+    _seed_watch_db(db, project="стройка")
+    now = int(time.time())
+    with DB(db) as d:
+        d.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "project, created_ts, updated_ts) "
+            "VALUES('construction', -100900, 1, 'task', 'Задача', 'open', "
+            "'стройка', ?, ?)", (now - 7200, now - 7200))
+        d.conn.executemany(
+            "INSERT INTO entity_events(entity_id, ts, op, field, from_val, to_val) "
+            "VALUES(1, ?, ?, ?, ?, ?)",
+            [(now - 3600, "close", None, None, None),
+             (now - 3600, "update", "due_ts", str(now), str(now + 86400)),
+             (now - 3600, "update", "due_ts", str(now + 86400), str(now)),
+             (now - 3600, "update", "due_ts", None, str(now + 86400)),
+             (now - 3600, "update", "due_ts", str(now), "не число"),
+             (now - 48 * 3600, "close", None, None, None)])
+        d.conn.commit()
+
+    s = monitor_mod.collect(str(db))
+    check(s["closed_count"] == 1 and s["moved_count"] == 1,
+          "изменения: закрыто 1, перенесено 1 (раньше/пусто/нечисло/вне окна — мимо)",
+          str((s["closed_count"], s["moved_count"])))
+    lines = monitor_mod.format_report(s)
+    check(any("изменения за 24ч: закрыто 1, перенесено сроков 1" in ln for ln in lines),
+          "изменения: строка в сводке", "\n".join(lines)[:300])
+
+    empty = TMP / "changes_empty.sqlite"
+    _seed_watch_db(empty)
+    s2 = monitor_mod.collect(str(empty))
+    check(s2["closed_count"] == 0 and s2["moved_count"] == 0,
+          "изменения: пустая БД — нули", str((s2["closed_count"], s2["moved_count"])))
+    lines2 = monitor_mod.format_report(s2)
+    check(not any("изменения за" in ln for ln in lines2),
+          "изменения: нули не добавляют строку", str(lines2))
+
+
 def test_engine_control() -> None:
     print("=== engine: статус по lockfile, пуск/стоп за гейтом ===")
     import engine as engine_mod
@@ -1124,6 +1166,7 @@ def main() -> int:
         test_monitor_promise_gaps()
         test_monitor_stuck()
         test_monitor_mine()
+        test_monitor_changes()
         test_engine_control()
         test_extract_report_rejected()
         test_doctor_quality()

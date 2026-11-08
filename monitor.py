@@ -91,6 +91,18 @@ def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
         rej = d.conn.execute(
             "SELECT COALESCE(SUM(ops_rejected),0) r, COALESCE(SUM(ops_overflow),0) o "
             "FROM extraction_runs WHERE ts >= ?", (since,)).fetchone()
+        closed_count = d.conn.execute(
+            "SELECT COUNT(*) c FROM entity_events WHERE op='close' AND ts >= ?",
+            (since,)).fetchone()["c"]
+        moved_count = 0
+        for ev in d.conn.execute(
+                "SELECT from_val, to_val FROM entity_events "
+                "WHERE field='due_ts' AND ts >= ?", (since,)):
+            try:
+                if float(ev["from_val"]) < float(ev["to_val"]):
+                    moved_count += 1
+            except (TypeError, ValueError):
+                continue
         stuck = [dict(r) for r in d.conn.execute(
             "SELECT * FROM entities WHERE status='blocked' AND closed_ts IS NULL "
             "AND due_ts IS NOT NULL AND due_ts <= ?" + proj_sql +
@@ -131,6 +143,7 @@ def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
             "news_hours": news_hours, "news_updated": updated,
             "questions": questions, "question_days": q_days,
             "ops_rejected": rej["r"], "ops_overflow": rej["o"],
+            "closed_count": closed_count, "moved_count": moved_count,
             "stuck": stuck, "promises_no_due": promises_no_due,
             "promises_no_owner": promises_no_owner, "mine": mine}
 
@@ -159,6 +172,10 @@ def format_report(summary: dict) -> list[str]:
     for e in summary["news"][:10]:
         age = max((now - e["created_ts"]) // 3600, 1)
         lines.append(f"  новое: [{e['pack']}/{e['kind']}] {e['title'][:120]} ({age}ч назад)")
+    if summary.get("closed_count") or summary.get("moved_count"):
+        lines.append(f"  изменения за {summary['news_hours']}ч: закрыто "
+                     f"{summary.get('closed_count', 0)}, перенесено сроков "
+                     f"{summary.get('moved_count', 0)}")
     for e in summary.get("questions") or []:
         age = max((now - e["created_ts"]) // 86400, 1)
         lines.append(f"  вопрос: [{e['pack']}] {e['title'][:120]} ({age} дн. открыт)")
@@ -275,6 +292,7 @@ def _run_routed(db_path: str | Path, days_ahead: int, send: bool, dry_run: bool,
             "questions": summary["questions"], "stuck": summary["stuck"],
             "promises_no_due": summary["promises_no_due"],
             "promises_no_owner": summary["promises_no_owner"],
+            "closed_count": summary["closed_count"], "moved_count": summary["moved_count"],
             "mine": summary["mine"], "lines": lines, "notify": result}
 
 
@@ -308,6 +326,7 @@ def run(db_path: str | Path = DB_PATH, days_ahead: int = 0, project: str | None 
             "questions": summary["questions"], "stuck": summary["stuck"],
             "promises_no_due": summary["promises_no_due"],
             "promises_no_owner": summary["promises_no_owner"],
+            "closed_count": summary["closed_count"], "moved_count": summary["moved_count"],
             "mine": summary["mine"], "lines": lines, "notify": result}
 
 
