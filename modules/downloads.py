@@ -663,13 +663,16 @@ def _json(obj) -> str:
 
 
 def mcp_run(sources: str = "watch", days: int = 0, kinds: str = "video",
+            max_mb: int = 0, include_downloaded: bool = False,
             confirm: bool = False, spawn: bool = True) -> str:
     if not confirm:
         return _json({"error": "confirm=False: скачивание — операция записи "
                                "(диск и трафик), требуется явный confirm=True"})
     try:
         with DB(DB_PATH) as db:
-            res = plan_job(db, sources, kinds=kinds, days=days)
+            res = plan_job(db, sources, kinds=kinds, days=days,
+                           max_mb=max_mb or None,
+                           include_downloaded=include_downloaded)
         if spawn:
             res["runner"] = _runner(res["job_id"])
         res["note"] = ("задание создано; прогресс — tg_downloads_status; "
@@ -737,7 +740,9 @@ MODULE = {
                 "запустить фоновый загрузчик. sources через запятую: watch "
                 "(выделенные чаты/темы) | all | folder:<id> | collection:<имя> | "
                 "chat:<id|@username>; kinds: video (умолчание), videonote, photo; "
-                "days — окно в днях, 0 — вся история; spawn=False — только "
+                "days — окно в днях, 0 — вся история; max_mb — лимит размера "
+                "(0 — TG_DOWNLOADS_MAX_MB); include_downloaded=True — переснять "
+                "даже уже скачанное; spawn=False — только "
                 "создать задание. Точные дубликаты не качаются повторно: по id "
                 "файла Telegram и по sha256 содержимого. Операция записи: "
                 "требует confirm=True."
