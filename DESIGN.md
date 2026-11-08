@@ -1,41 +1,45 @@
 # TG Agent Workspace
 
 ## 1. Atmosphere and identity
-A dark-first control desk wearing the visual language of a modern Telegram client
-(Telegram Desktop / AyuGram): a near-dark desaturated canvas, soft elevated
-surfaces, rounded 12-16px components, and a correspondence pane that reads like a
-real messenger with message bubbles. One named accent — Telegram Blue — carries
-links, active navigation and primary actions. The workspace is still a
-project-control desk, not a chat client: the attention ledger, registers and
-evidence drawer remain the product; only the skin is messenger-grade.
+A dark-first control desk in the visual language of Huly (see `huly-ref.md`): a
+warm near-black graphite canvas, layered graphite surfaces, a narrow chromatic band
+of two accents — Electric Iris (#5683da) for the single primary action and active
+navigation, Ember Pulse (#ff8964) as warm punctuation in pills, dots and the
+"expiring" metric — and pill-first geometry (9999px controls, 12px cards). One
+named UI face (Inter, with a system fallback so no external font is requested).
+The workspace stays a project-control desk: the attention ledger, registers and
+evidence drawer remain the product; only the skin is Huly-grade.
 
-References: AyuGram Desktop demo screenshots (public repo) for the vibe — dark
-canvas, grouped settings rows, rounded toggles, blue section headers — not for
-pixels. No marketing illustration, no hero, no external assets.
+Reference: `huly-ref.md` (Huly style reference — palette, type scale, radii,
+shadows, do/don'ts). Tokens are adapted, not copied; no marketing hero, no aurora
+as a full background, no external assets.
 
 ## 2. Color
 Dark is the default theme; light remains available in settings and via the system
-preference. One accent: Telegram Blue #3390EC.
+preference. One cool accent (Electric Iris) + one warm accent (Ember Pulse) are the
+entire chromatic vocabulary — no third accent.
 
 | Role | Token | Dark (default) | Light |
 |---|---|---|---|
-| Canvas | --canvas | #0e1621 | #ffffff |
-| Navigation | --nav | #17212b | #ffffff |
-| Surface | --surface | #1c2733 | #ffffff |
-| Soft surface | --soft | #232e3c | #f1f4f7 |
-| Ink | --ink | #f5f7fa | #0f1720 |
-| Secondary text | --muted | #8a9baa | #5c6b7a |
-| Rules | --rule | #26333f | #e3e8ed |
-| Edge (control border) | --edge | #3a4a5a | #c9d3dc |
-| Accent | --accent | #3390ec | #3390ec |
-| Accent strong (filled controls) | --accent-strong | #2c74b8 | #1f6fb2 |
-| Accent background | --accent-soft | #1e3a5f | #e3f0fd |
+| Canvas | --canvas | #0e0f11 | #ffffff |
+| Navigation | --nav | #131418 | #ffffff |
+| Surface | --surface | #17181c | #ffffff |
+| Soft surface | --soft | #1f2025 | #f6f6f6 |
+| Ink | --ink | #f4f5f7 | #050506 |
+| Secondary text | --muted | #95979e | #6b6c6d |
+| Rules | --rule | #24262b | #e5e5e7 |
+| Edge (control border) | --edge | #4a4b50 | #d1d1d1 |
+| Accent (iris) | --accent | #5683da | #5683da |
+| Accent strong (filled) | --accent-strong | #4a76cc | #4a76cc |
+| Accent background | --accent-soft | #1b2740 | #e8eefb |
 | Accent control ink | --on-accent | #ffffff | #ffffff |
-| Danger | --danger | #ff7a7a | #c0392b |
-| Danger background | --danger-soft | #3a2226 | #fce9e9 |
-| Warning | --warning | #f0b429 | #8a6100 |
-| Warning background | --warning-soft | #3a3220 | #fbf0d9 |
-| Scrim | --scrim | #00000099 | #0f172055 |
+| Warm accent (ember) | --ember | #ff8964 | #e0744a |
+| Warm accent background | --ember-soft | #3a2118 | #fdece4 |
+| Danger | --danger | #ff6b6b | #c0392b |
+| Danger background | --danger-soft | #3a1f1f | #fce9e9 |
+| Warning (= warm accent) | --warning | #ff8964 | #c96a3f |
+| Warning background | --warning-soft | #3a2118 | #fbe6dc |
+| Scrim | --scrim | #000000aa | #0f172055 |
 
 Message bubbles carry a per-sender tint (six neutral steps, --bubble-0..5) derived
 from a hash of the sender name, so a group chat reads as distinct voices without
@@ -46,16 +50,21 @@ chrome (topbar, toast), --shadow-2 for overlays (drawer, modal). Reply quotation
 blockquotes use a neutral 2px rule in --edge, never the accent.
 
 ## 3. Typography
-One family: locally available Segoe UI Variable / Segoe UI / sans-serif, so private
-project data needs no external font request. No serif. Numbers use tabular figures.
-Scale: --text-xs 12px (metadata only), --text-sm 14px, --text-base 15px,
---text-lg 18px, --text-title clamp(22px,2.4vw,28px). Mobile body 17px, secondary
-15px. Weights 400/500/600/700; body line-height 1.5; headings 1.2. Prose max 70ch.
+One UI face: `Inter` first in the stack, with a local system fallback
+(`ui-sans-serif, system-ui, "Segoe UI", Roboto`), so no external font is requested
+and private data stays local. No serif. Numbers use tabular figures. Scale follows
+the Huly reference: --text-xs 11px (caption/metadata), --text-sm 14px (body),
+--text-base 14px, --text-lg 18px (subheading), --text-title clamp(22px,2.2vw,28px)
+(heading-sm). Weights 300/400/500/600/700 (500–600 for emphasis, 300 sparingly for
+quiet metadata); body line-height 1.5; headings 1.25. Letter spacing tightens with
+size (-0.01em body, -0.02em subhead). Prose max 70ch.
 
 ## 4. Spacing and layout
 Four-pixel base: --s1 4px, --s2 8px, --s3 12px, --s4 16px, --s5 20px,
---s6 24px, --s8 32px, --s10 40px. Radii: --r1 8px, --r2 12px, --r3 16px.
-Desktop labelled sidebar --sidebar 224px, fluid main content max 1500px.
+--s6 24px, --s8 32px, --s10 40px. Radii: --r1 8px (inputs/fields), --r2 12px
+(cards/panels), --r3 16px (overlays), --radius-pill 9999px — all buttons, tabs and
+tags are pills (the signature shape). Desktop labelled sidebar --sidebar 224px,
+fluid main content max 1500px.
 Main owns vertical scroll; shell bounded to 100dvh. Drawer owns a separate scroll.
 At 900px nav becomes an explicit menu; at 600px registers become stacked rows and
 filters wrap. Primary content never needs horizontal scrolling at 390px.
@@ -63,6 +72,11 @@ No permanent chat/topic/message columns. Correspondence has one source tree and
 a fluid message panel, single pane on mobile. Drawer width min(520px,100vw).
 
 ## 5. Components and states
+- Pill-first: buttons, tabs and tags use --radius-pill; cards/panels use --r2;
+  inputs use --r1. No sharp corners on controls.
+- Shadows: dark surfaces get depth from hairline borders (--rule/--edge) and tonal
+  layering, not drop shadows; shadows are reserved for floating overlays only
+  (drawer, modal, toast).
 - App shell: labelled nav links, current item a filled accent pill + aria-current,
   header, main and skip link.
 - Page header: breadcrumb/back, title, short explanation and one primary action.
