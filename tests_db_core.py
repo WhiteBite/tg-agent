@@ -347,10 +347,10 @@ def test_posts_migration(tmp: Path) -> None:
         db.insert_message(msg(-1010, 1, ts=100, text="до миграции"))
         cols = {r[1] for r in db.conn.execute("PRAGMA table_info(posts)")}
         uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
-    check(SCHEMA_VERSION == 10, "v10: SCHEMA_VERSION = 10", str(SCHEMA_VERSION))
+    check(SCHEMA_VERSION == 11, "v11: SCHEMA_VERSION = 11", str(SCHEMA_VERSION))
     check({"chat_id", "msg_id", "topic_id", "kind", "product", "tpl_hash", "ts"} <= cols,
           "fresh: таблица posts со всеми колонками", str(sorted(cols)))
-    check(uv == 10, "fresh: user_version = 10", str(uv))
+    check(uv == 11, "fresh: user_version = 11", str(uv))
 
     raw = sqlite3.connect(str(p))
     raw.execute("DROP TABLE IF EXISTS posts")
@@ -364,7 +364,7 @@ def test_posts_migration(tmp: Path) -> None:
             "SELECT COUNT(*) FROM messages WHERE chat_id=-1010").fetchone()[0]
     check({"chat_id", "msg_id", "topic_id", "kind", "product", "tpl_hash", "ts"} <= cols,
           "v4->v5: posts создана миграцией", str(sorted(cols)))
-    check(uv == 10, "v4->v10: user_version поднят", str(uv))
+    check(uv == 11, "v4->v11: user_version поднят", str(uv))
     check(kept == 1, "v4->v5: строки messages не потеряны", str(kept))
 
 
@@ -397,6 +397,44 @@ def test_posts_helpers(tmp: Path) -> None:
           str(dict(replaced) if replaced else None))
 
 
+def test_actor_migration(tmp: Path) -> None:
+    print("=== миграция v11: entity_events.actor ===")
+    p = tmp / "actor.sqlite"
+    with DB(p) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(entity_events)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check("actor" in cols, "fresh: entity_events.actor есть", str(sorted(cols)))
+    check(uv == 11, "fresh: user_version = 11", str(uv))
+
+    raw = sqlite3.connect(str(p))
+    raw.execute("INSERT INTO entity_events(entity_id, ts, op, field, to_val) "
+                "VALUES(1, 100, 'update', 'status', 'done')")
+    raw.execute("ALTER TABLE entity_events DROP COLUMN actor")
+    raw.execute("PRAGMA user_version = 10")
+    raw.commit()
+    raw.close()
+    with DB(p) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(entity_events)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+        kept = db.conn.execute(
+            "SELECT COUNT(*) FROM entity_events WHERE entity_id=1").fetchone()[0]
+    check("actor" in cols, "v10->v11: колонка actor добавлена", str(sorted(cols)))
+    check(uv == 11, "v10->v11: user_version поднят", str(uv))
+    check(kept == 1, "v10->v11: строки entity_events сохранены", str(kept))
+
+    raw = sqlite3.connect(str(p))
+    raw.execute("PRAGMA user_version = 10")
+    raw.commit()
+    raw.close()
+    with DB(p) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(entity_events)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+        kept = db.conn.execute(
+            "SELECT COUNT(*) FROM entity_events WHERE entity_id=1").fetchone()[0]
+    check("actor" in cols and uv == 11 and kept == 1,
+          "v11: повторный прогон миграции идемпотентен", f"{uv}/{len(cols)}/{kept}")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_db_core_"))
     try:
@@ -409,6 +447,7 @@ def main() -> int:
         test_dirty_recorder(tmp)
         test_posts_migration(tmp)
         test_posts_helpers(tmp)
+        test_actor_migration(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

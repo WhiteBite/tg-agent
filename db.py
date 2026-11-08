@@ -335,7 +335,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 class DB:
@@ -395,6 +395,8 @@ class DB:
             self._migrate_v9()
         if version < 10:
             self._migrate_v10()
+        if version < 11:
+            self._migrate_v11()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -628,6 +630,11 @@ class DB:
             self.conn.execute("ALTER TABLE link_status ADD COLUMN title TEXT")
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_v11(self) -> None:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(entity_events)")}
+        if "actor" not in cols:
+            self.conn.execute("ALTER TABLE entity_events ADD COLUMN actor TEXT")
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
