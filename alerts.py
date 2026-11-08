@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -31,19 +32,30 @@ def _send_allowed() -> bool:
     return os.environ.get("TG_ALLOW_SEND", "").strip().lower() in ALLOWED
 
 
-def _alerts_enabled() -> bool:
-    if os.environ.get("TG_ALERTS", "").strip().lower() not in ALLOWED:
-        return False
-    return bool(_parse_list(os.environ.get("TG_ALERT_WORDS"))
-                or _parse_list(os.environ.get("TG_ALERT_MENTIONS")))
+def _gate_on() -> bool:
+    return os.environ.get("TG_ALERTS", "").strip().lower() in ALLOWED
 
 
-def config() -> dict:
+def config(db: DB | None = None) -> dict:
+    words = _parse_list(os.environ.get("TG_ALERT_WORDS"))
+    mentions = [m.lstrip("@").lower() for m in _parse_list(os.environ.get("TG_ALERT_MENTIONS"))]
+    source = "env"
+    if db is not None:
+        raw = db.get_meta("ws:alerts")
+        if raw:
+            try:
+                stored = json.loads(raw)
+            except (ValueError, TypeError):
+                stored = None
+            if isinstance(stored, dict):
+                words = [str(w) for w in stored.get("words") or []]
+                mentions = [str(m).lstrip("@").lower() for m in stored.get("mentions") or []]
+                source = "ui"
     return {
-        "words": _parse_list(os.environ.get("TG_ALERT_WORDS")),
-        "mentions": [m.lstrip("@").lower()
-                     for m in _parse_list(os.environ.get("TG_ALERT_MENTIONS"))],
+        "words": words,
+        "mentions": mentions,
         "cooldown": int(os.environ.get("TG_ALERT_COOLDOWN", "300") or 300),
+        "source": source,
     }
 
 
@@ -65,9 +77,9 @@ def format_alert(chat_title: str, topic_title: str | None, snippet: str,
 
 async def maybe_alert(client, db: DB, chat_id: int, topic_id: int,
                       text: str) -> list[str]:
-    if not _alerts_enabled():
+    if not _gate_on():
         return []
-    cfg = config()
+    cfg = config(db)
     reasons = match(text, cfg)
     if not reasons:
         return []
@@ -94,6 +106,3 @@ async def maybe_alert(client, db: DB, chat_id: int, topic_id: int,
         return fresh
     print(f"  алерт: {'; '.join(fresh)} -> Saved Messages ({chat_id})", flush=True)
     return fresh
-
-
-ENABLED = _alerts_enabled()

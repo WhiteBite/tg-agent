@@ -4,6 +4,7 @@ import json
 import os
 import time
 
+from alerts import config as alerts_config
 from db import DB
 from workspace_store import REVIEW_JOINS, REVIEW_STATE_SQL, WorkspaceError, metadata, page, review
 from workspace_write import autoclose_stale_trials
@@ -295,3 +296,8 @@ def notification_preview(db: DB, params: dict) -> dict:
     summary = monitor.collect(db.path, project=params.get("project"))
     return {"preview_only": True, "project": params.get("project"),
             "lines": monitor.format_report(summary), "destination_configured": bool(os.environ.get("TG_NOTIFY_ROUTES"))}
+
+
+def alert_settings(db: DB) -> dict:
+    cfg = alerts_config(db)
+    return {"words": cfg["words"], "mentions": cfg["mentions"], "source": cfg["source"]}

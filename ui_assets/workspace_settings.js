@@ -36,20 +36,39 @@
     }
   }
   async function settings(params, seq) {
-    const [people, projects] = await Promise.all([
+    const [people, projects, alerts] = await Promise.all([
       get("people"),
       get("projects"),
+      get("alerts"),
     ]);
     if (!W.isCurrent(seq)) return;
     const theme = W.saved("ws:theme", "dark");
     $("#view").innerHTML =
       `<section class="settings-section"><h2>Проекты и источники</h2><p>Сначала синхронизируйте чат в разделе «Переписка», затем назначьте его темы проекту. Уже назначенные темы можно перенести.</p><button class="button primary" id="setup-project">${icon("plus")}Подключить проект</button><div class="cluster section-gap">${projects.items.map((p) => `<button class="button" data-setup-project="${esc(p.name)}">${esc(p.name)}</button>`).join("")}</div></section>
       <section class="settings-section"><h2>Люди и роли</h2><p>Связи задаются вручную. Имя в переписке не считается подтверждённой личностью или исполнителем в 101.</p><div id="people-list" class="stack">${people.items.length ? people.items.map((p, i) => `<div class="attention-row"><div class="row-body"><strong>${esc(p.display_name || p.owner)}</strong><div class="row-meta">${esc(p.owner)}${p.role ? " · " + esc(p.role) : ""} · ${p.mapped ? "Связь задана" : "Без ручной связи"}</div></div><button class="button" data-person="${i}">Настроить</button></div>`).join("") : W.empty("Люди пока не определены", "Они появятся после извлечения ответственных из переписки.")}</div></section>
+      <section class="settings-section"><h2>Живые алерты</h2><p>Слова-триггеры и упоминания действуют сразу, перезапуск движка не нужен. Общий выключатель TG_ALERTS и отправка TG_ALLOW_SEND остаются в окружении сервера.</p><form id="alerts-form" class="stack"><div class="field"><label for="alert-words">Слова-триггеры (через запятую)</label><input id="alert-words" value="${esc((alerts.words || []).join(", "))}" placeholder="Например: раздача, холява"></div><div class="field"><label for="alert-mentions">Упоминания (через запятую)</label><input id="alert-mentions" value="${esc((alerts.mentions || []).join(", "))}" placeholder="Например: myname"></div><div class="cluster"><button class="button primary" type="submit">Сохранить слова</button><span class="muted">Источник сейчас: ${alerts.source === "ui" ? "настройки" : "окружение"}</span></div><div id="alerts-result" role="status"></div></form></section>
       <section class="settings-section"><h2>Предпросмотр сводки</h2><p>Проверьте содержание уведомления без отправки. Получатели задаются в окружении сервера через TG_NOTIFY_ROUTES.</p><form id="notification-form" class="filters"><div class="field"><label for="notification-project">Проект</label><select id="notification-project"><option value="">Все проекты</option>${projects.items.map((p) => `<option>${esc(p.name)}</option>`).join("")}</select></div><button class="button">Посмотреть сводку</button></form><div id="notification-preview"></div></section>
       <section class="settings-section"><h2>Внешний вид</h2><div class="field"><label for="theme">Тема интерфейса</label><select id="theme"><option value="light" ${theme === "light" ? "selected" : ""}>Светлая</option><option value="dark" ${theme === "dark" ? "selected" : ""}>Тёмная</option><option value="system" ${theme === "system" ? "selected" : ""}>Как в системе</option></select></div></section>`;
     $("#theme").onchange = (e) => {
       W.store("ws:theme", e.target.value);
       W.applyTheme(e.target.value);
+    };
+    $("#alerts-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const split = (v) =>
+        v
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      try {
+        await post("settings/alerts", {
+          words: split($("#alert-words").value),
+          mentions: split($("#alert-mentions").value),
+        });
+        W.toast("Слова алертов сохранены");
+      } catch (err) {
+        $("#alerts-result").innerHTML = W.error(err);
+      }
     };
     $("#setup-project").onclick = () => setupProject();
     document

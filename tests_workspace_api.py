@@ -404,6 +404,20 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertEqual([g["key"] for g in cat["items"]], ["week.example"])
         self.assertEqual(self.request("catalog?due=bogus")[0], 400)
 
+    def test_alerts_settings_roundtrip(self):
+        status, d = self.request("alerts")
+        self.assertEqual(status, 200)
+        self.assertEqual(d["source"], "env")
+        status, saved = self.request("settings/alerts", {"words": ["раздача"], "mentions": ["MyName"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["mentions"], ["MyName"])
+        status, d = self.request("alerts")
+        self.assertEqual(d["source"], "ui")
+        self.assertEqual(d["words"], ["раздача"])
+        self.assertEqual(d["mentions"], ["myname"])
+        self.assertEqual(self.request("settings/alerts", {"words": ["ok", "x" * 61]})[0], 400)
+        self.assertEqual(self.request("settings/alerts", {})[0], 400)
+
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})
         self.assertEqual(status, 409)

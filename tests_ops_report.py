@@ -859,6 +859,28 @@ def test_live_alerts() -> None:
                 cli, db, -100777, 5, "холява"))
             check(fired5 == [] and len(cli.sent) == 2,
                   "алерты: без TG_ALERTS ничего не происходит")
+
+            os.environ["TG_ALERTS"] = "1"
+            os.environ.pop("TG_ALERT_WORDS", None)
+            os.environ["TG_ALLOW_SEND"] = "1"
+            alerts_mod._cooldown.clear()
+            db.conn.execute(
+                "INSERT INTO meta(key,value) VALUES('ws:alerts', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (json.dumps({"words": ["раздача"], "mentions": []}, ensure_ascii=False),))
+            db.conn.commit()
+            fired6 = asyncio.run(alerts_mod.maybe_alert(
+                cli, db, -100777, 5, "началась раздача ключей"))
+            check(fired6 == ["слово: раздача"],
+                  "алерты: слова из настроек UI работают без правки окружения")
+            db.conn.execute("UPDATE meta SET value=? WHERE key='ws:alerts'",
+                            (json.dumps({"words": [], "mentions": []}, ensure_ascii=False),))
+            db.conn.commit()
+            alerts_mod._cooldown.clear()
+            fired7 = asyncio.run(alerts_mod.maybe_alert(
+                cli, db, -100777, 5, "снова раздача"))
+            check(fired7 == [],
+                  "алерты: пустые настройки UI отключают слова")
     finally:
         for key, val in saved.items():
             if val is None:

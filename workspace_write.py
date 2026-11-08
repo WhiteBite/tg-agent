@@ -190,6 +190,25 @@ def person(db: DB, body: dict) -> dict:
     return {"ok": True, "key": key}
 
 
+def set_alerts(db: DB, body: dict) -> dict:
+    if not any(k in body for k in ("words", "mentions")):
+        raise WorkspaceError("Нужны words или mentions")
+    stored = metadata(db, "ws:alerts", {})
+    if not isinstance(stored, dict):
+        stored = {}
+    for key in ("words", "mentions"):
+        if key not in body:
+            continue
+        raw = body[key]
+        if (not isinstance(raw, list) or len(raw) > 100
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 60 for v in raw)):
+            raise WorkspaceError(f"{key}: список строк до 100 штук, каждая до 60 символов")
+        stored[key] = [clean_text(v.strip()) for v in raw]
+    with db.conn:
+        put_meta(db, "ws:alerts", stored)
+    return {"ok": True, "words": stored.get("words", []), "mentions": stored.get("mentions", [])}
+
+
 def project_topics(db: DB, body: dict) -> dict:
     project, topics = body.get("project"), body.get("topics")
     if not isinstance(project, str) or not project.strip() or len(project) > 120:

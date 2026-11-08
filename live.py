@@ -157,11 +157,10 @@ async def main() -> None:
         try:
             if handle_message(db, event.message, cid, cid in state["forums"]):
                 print(f"  + {cid}/{event.message.id}", flush=True)
-                if alerts_mod.ENABLED:
-                    await alerts_mod.maybe_alert(
-                        client, db, cid,
-                        sync_mod.topic_of_message(event.message) if cid in state["forums"] else 1,
-                        event.message.message or "")
+                await alerts_mod.maybe_alert(
+                    client, db, cid,
+                    sync_mod.topic_of_message(event.message) if cid in state["forums"] else 1,
+                    event.message.message or "")
         except Exception as exc:  # не роняем демона на одном кривом сообщении
             print(f"  ! {cid}: {exc}", file=sys.stderr)
 
