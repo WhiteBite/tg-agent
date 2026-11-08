@@ -149,8 +149,52 @@ def test_parse_due_text() -> None:
           "due_text: «через день»")
     check(p("завтра", None) is None,
           "due_text: относительное без даты сообщения неопределим")
-    check(p("к пятнице", msg_jun) is None,
-          "due_text: день недели не парсится")
+    check(p("к пятнице", msg_jun) == eod(2026, 6, 19),
+          "due_text: «к пятнице» -> ближайшая пятница")
+    check(p("до пятницы", msg_jun) == eod(2026, 6, 19),
+          "due_text: «до пятницы»")
+    check(p("в пятницу", msg_jun) == eod(2026, 6, 19),
+          "due_text: «в пятницу»")
+    check(p("по пятницу", msg_jun) == eod(2026, 6, 19),
+          "due_text: «по пятницу»")
+    check(p("понедельник", msg_jun) == eod(2026, 6, 22),
+          "due_text: «понедельник» -> следующий понедельник (+7)")
+    check(p("в понедельник", msg_jun) == eod(2026, 6, 22),
+          "due_text: «в понедельник»")
+    check(p("к понедельнику", msg_jun) == eod(2026, 6, 22),
+          "due_text: «к понедельнику»")
+    check(p("до понедельника", msg_jun) == eod(2026, 6, 22),
+          "due_text: «до понедельника»")
+    check(p("вторник", msg_jun) == eod(2026, 6, 16),
+          "due_text: «вторник»")
+    check(p("среда", msg_jun) == eod(2026, 6, 17),
+          "due_text: «среда»")
+    check(p("четверг", msg_jun) == eod(2026, 6, 18),
+          "due_text: «четверг»")
+    check(p("суббота", msg_jun) == eod(2026, 6, 20),
+          "due_text: «суббота»")
+    check(p("воскресенье", msg_jun) == eod(2026, 6, 21),
+          "due_text: «воскресенье»")
+    check(p("пн", msg_jun) == eod(2026, 6, 22),
+          "due_text: аббревиатура «пн»")
+    check(p("вт", msg_jun) == eod(2026, 6, 16),
+          "due_text: аббревиатура «вт»")
+    check(p("ср", msg_jun) == eod(2026, 6, 17),
+          "due_text: аббревиатура «ср»")
+    check(p("чт", msg_jun) == eod(2026, 6, 18),
+          "due_text: аббревиатура «чт»")
+    check(p("пт", msg_jun) == eod(2026, 6, 19),
+          "due_text: аббревиатура «пт»")
+    check(p("сб", msg_jun) == eod(2026, 6, 20),
+          "due_text: аббревиатура «сб»")
+    check(p("вс", msg_jun) == eod(2026, 6, 21),
+          "due_text: аббревиатура «вс»")
+    check(p("пятница", ts_utc(2026, 6, 19)) == eod(2026, 6, 26),
+          "due_text: день недели в тот же день -> +7")
+    check(p("пятница", ts_utc(2026, 12, 31)) == eod(2027, 1, 1),
+          "due_text: день недели через границу года")
+    check(p("пятница", None) is None,
+          "due_text: день недели без даты сообщения неопределим")
     check(p("32.13.2026", None) is None,
           "due_text: несуществующая дата отклонена")
     check(p("2026-02-30", None) is None,
@@ -222,11 +266,11 @@ def test_due_fallback(root: Path) -> None:
               f"due_ts={e and e['due_ts']}")
 
     run_ops([op("task", "Планировка", 603, "планировку",
-                due_text="к пятнице")], 602)
+                due_text="по готовности")], 602)
     with DB(db_path) as db:
         e = db.conn.execute("SELECT * FROM entities WHERE id=3").fetchone()
         check(e["due_ts"] is None and e["attrs_json"]
-              and json.loads(e["attrs_json"])["due_text"] == "к пятнице",
+              and json.loads(e["attrs_json"])["due_text"] == "по готовности",
               "фолбэк: неразрешимый due_ts остался None, due_text в attrs_json",
               f"due_ts={e and e['due_ts']} attrs={e and e['attrs_json']}")
 

@@ -110,6 +110,16 @@ _DUR_UNITS = {"дней": "d", "дня": "d", "день": "d",
               "месяцев": "m", "месяца": "m", "месяц": "m", "мес": "m"}
 _DUE_BARE_RE = re.compile(r"(?:через\s+)?(недел[ьяиюе]|месяц[ау]?)\b")
 _DUE_CHEREZ_DAY_RE = re.compile(r"\bчерез\s+день\b")
+_WEEKDAY_RE = re.compile(
+    r"\b(понедельник[а-яё]{0,2}|вторник[а-яё]{0,2}|сред[ауые]|средой|"
+    r"четверг[а-яё]{0,2}|пятниц[ауые]|пятницей|суббот[ауые]|субботой|"
+    r"воскресень[еяю]|воскресеньем|воскресени[еяю]|воскресением|"
+    r"пн|вт|ср|чт|пт|сб|вс)\b")
+_WEEKDAY_STEMS = (
+    ("понедельник", 0), ("вторник", 1), ("сред", 2), ("четверг", 3),
+    ("пятниц", 4), ("суббот", 5), ("воскресен", 6),
+)
+_WEEKDAY_ABBR = {"пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "вс": 6}
 _MONTHS = {
     "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
     "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11,
@@ -196,6 +206,21 @@ def _parse_due_text(due_text: str | None, msg_ts: int | None) -> int | None:
             ts = _eod(base.year, base.month, day)
             if ts is not None and ts >= msg_ts:
                 return ts
+    m = _WEEKDAY_RE.search(due_text)
+    if m is not None:
+        word = m.group(1)
+        idx = _WEEKDAY_ABBR.get(word)
+        if idx is None:
+            for stem, i in _WEEKDAY_STEMS:
+                if word.startswith(stem):
+                    idx = i
+                    break
+        if idx is not None:
+            anchor = datetime.fromtimestamp(msg_ts, timezone.utc)
+            delta = (idx - anchor.weekday()) % 7
+            if delta == 0:
+                delta = 7
+            return _eod_ts(anchor + timedelta(days=delta))
     m = _DUE_DUR_RE.search(due_text)
     if m is not None:
         n, unit = int(m.group(1)), _DUR_UNITS[m.group(2)]
