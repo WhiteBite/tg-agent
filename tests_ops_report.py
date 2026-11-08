@@ -797,6 +797,77 @@ def test_loop_until_done_false() -> None:
           str(seen))
 
 
+def test_live_alerts() -> None:
+    print("=== live: живые алерты — слова, упоминания, cooldown, dry-run/отправка ===")
+    import alerts as alerts_mod
+
+    class AlertClient:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, to, text):
+            self.sent.append((to, text))
+
+    db_path = TMP / "alerts.sqlite"
+    with DB(db_path) as db:
+        db.upsert_chat(-100777, "Чат алертов", None, "supergroup", True, 3)
+        db.upsert_topic(-100777, 5, "Тема алертов")
+
+    cfg = {"words": ["холява"], "mentions": ["whitebite"], "cooldown": 300}
+    check(alerts_mod.match("лови ХОЛЯВА на vpn", cfg) == ["слово: холява"],
+          "алерты: слово ловится без учёта регистра")
+    check(alerts_mod.match("@WhiteBite глянь", cfg) == ["упоминание: @whitebite"],
+          "алерты: упоминание ловится через refs")
+    check(alerts_mod.match("обычное сообщение", cfg) == [],
+          "алерты: без правила — без причин")
+    msg = alerts_mod.format_alert("Чат", "Тема", "текст сообщения", ["слово: холява"])
+    check("«Чат» / «Тема»" in msg and "текст сообщения" in msg,
+          "алерты: формат содержит место и цитату", msg)
+
+    saved = {k: os.environ.get(k) for k in
+             ("TG_ALERTS", "TG_ALERT_WORDS", "TG_ALERT_COOLDOWN", "TG_ALLOW_SEND")}
+    os.environ.pop("TG_ALLOW_SEND", None)
+    os.environ.update({"TG_ALERTS": "1", "TG_ALERT_WORDS": "холява",
+                       "TG_ALERT_COOLDOWN": "9999"})
+    alerts_mod._cooldown.clear()
+    cli = AlertClient()
+    try:
+        with DB(db_path) as db:
+            fired = asyncio.run(alerts_mod.maybe_alert(
+                cli, db, -100777, 5, "появилась холява на vpn.example"))
+            check(fired == ["слово: холява"] and not cli.sent,
+                  "алерты: dry-run возвращает причины и не пишет в Telegram")
+            fired2 = asyncio.run(alerts_mod.maybe_alert(
+                cli, db, -100777, 5, "опять холява там же"))
+            check(fired2 == [],
+                  "алерты: cooldown гасит повтор того же правила")
+
+            os.environ["TG_ALERT_COOLDOWN"] = "0"
+            alerts_mod._cooldown.clear()
+            os.environ["TG_ALLOW_SEND"] = "1"
+            fired3 = asyncio.run(alerts_mod.maybe_alert(
+                cli, db, -100777, 5, "снова холява, теперь отправка"))
+            fired4 = asyncio.run(alerts_mod.maybe_alert(
+                cli, db, -100777, 5, "ещё холява, пауза нулевая"))
+            check(bool(fired3) and bool(fired4) and len(cli.sent) == 2
+                  and cli.sent[0][0] == "me",
+                  "алерты: TG_ALLOW_SEND=1 — две отправки в Saved Messages",
+                  str(len(cli.sent)))
+
+            os.environ.pop("TG_ALERTS", None)
+            fired5 = asyncio.run(alerts_mod.maybe_alert(
+                cli, db, -100777, 5, "холява"))
+            check(fired5 == [] and len(cli.sent) == 2,
+                  "алерты: без TG_ALERTS ничего не происходит")
+    finally:
+        for key, val in saved.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+        alerts_mod._cooldown.clear()
+
+
 def main() -> int:
     try:
         test_notify_event_loop()
@@ -815,6 +886,7 @@ def main() -> int:
         test_doctor_cost()
         test_digest_bound()
         test_loop_until_done_false()
+        test_live_alerts()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print()
