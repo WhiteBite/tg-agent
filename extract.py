@@ -54,6 +54,7 @@ from llm_http import (
 from packs import PACKS
 
 import media as media_mod
+import people
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -264,6 +265,22 @@ def _op_due_ts(db: DB, op: dict) -> int | float | None:
     if due is None and op.get("due_text"):
         due = _parse_due_text(op.get("due_text"), _evidence_ts(db, op))
     return due
+
+
+def _actor_for(db: DB, evidence, msg_by_id: dict | None) -> str | None:
+    ev = (evidence or [{}])[0]
+    sender = (msg_by_id or {}).get((ev.get("chat_id"), ev.get("msg_id")))
+    if not sender:
+        return None
+    person = people.resolve_owner(db, sender)
+    return person["display_name"] if person else sender
+
+
+def _norm_owner(db: DB, raw):
+    if raw is None:
+        return None
+    person = people.resolve_owner(db, raw)
+    return person["display_name"] if person else raw
 
 
 def scope_matches(scope_filter: dict, w: dict) -> bool:
@@ -584,7 +601,7 @@ def _touch_source(db: DB, entity_id: int, w: dict, now: int) -> None:
 
 
 def _apply_supersede(db: DB, pack: dict, op: dict, new_id: int,
-                     run_id: int, now: int) -> None:
+                     run_id: int, now: int, msg_by_id: dict | None = None) -> None:
     sup = op.get("supersedes")
     if not isinstance(sup, int):
         return
@@ -597,12 +614,14 @@ def _apply_supersede(db: DB, pack: dict, op: dict, new_id: int,
     ev = (op.get("evidence") or [{}])[0]
     db.conn.execute(
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, to_val, "
-        "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?)",
+        "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (sup, run_id, now, "supersede", "superseded_by", str(new_id),
-         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"),
+         _actor_for(db, op.get("evidence"), msg_by_id)))
 
 
-def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> None:
+def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int,
+               msg_by_id: dict | None = None) -> None:
     kind = op["kind"]
     title = op.get("title") or ""
     hint = op.get("dedup_hint")
@@ -613,13 +632,14 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
     dedup_key = hashlib.sha1(ident.encode("utf-8")).hexdigest()
     attrs = {"due_text": op.get("due_text")} if op.get("due_text") else None
     op_due = _op_due_ts(db, op)
+    actor = _actor_for(db, op.get("evidence"), msg_by_id)
     try:
         cur = db.conn.execute(
             "INSERT INTO entities(pack, chat_id, topic_id, kind, title, body, owner, "
             "due_ts, project, confidence, attrs_json, dedup_key, created_ts, updated_ts) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pack["id"], w["chat_id"], w["topic_id"], kind, title, op.get("body"),
-             op.get("owner"), op_due, w.get("project"), None,
+             _norm_owner(db, op.get("owner")), op_due, w.get("project"), None,
              json.dumps(attrs, ensure_ascii=False) if attrs is not None else None,
              dedup_key, now, now))
         entity_id = cur.lastrowid
@@ -627,10 +647,10 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
         for ev in op.get("evidence") or []:
             db.conn.execute(
                 "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
-                "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
+                "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?)",
                 (entity_id, run_id, now, "new", None,
-                 ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
-        _apply_supersede(db, pack, op, entity_id, run_id, now)
+                 ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"), actor))
+        _apply_supersede(db, pack, op, entity_id, run_id, now, msg_by_id)
         return
     except sqlite3.IntegrityError:
         row = db.conn.execute(
@@ -646,7 +666,7 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
         changes.append(("body", row["body"], body))
     owner = row["owner"]
     if (owner is None or owner == "") and op.get("owner"):
-        owner = op["owner"]
+        owner = _norm_owner(db, op["owner"])
         changes.append(("owner", row["owner"], owner))
     due_ts = row["due_ts"]
     if due_ts is None and op_due is not None:
@@ -663,29 +683,31 @@ def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> 
     ev0 = (op.get("evidence") or [{}])[0]
     db.conn.execute(
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
-        "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
+        "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?)",
         (entity_id, run_id, now, "update", "dedup",
-         ev0.get("chat_id"), ev0.get("msg_id"), ev0.get("quote")))
+         ev0.get("chat_id"), ev0.get("msg_id"), ev0.get("quote"), actor))
     for field, old, new in changes:
         db.conn.execute(
             "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, "
-            "to_val, chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "to_val, chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (entity_id, run_id, now, "update", field,
              None if old is None else str(old), None if new is None else str(new),
-             ev0.get("chat_id"), ev0.get("msg_id"), ev0.get("quote")))
-    _apply_supersede(db, pack, op, entity_id, run_id, now)
+             ev0.get("chat_id"), ev0.get("msg_id"), ev0.get("quote"), actor))
+    _apply_supersede(db, pack, op, entity_id, run_id, now, msg_by_id)
     _touch_source(db, entity_id, w, now)
 
 
-def _apply_update(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) -> None:
+def _apply_update(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int,
+                  msg_by_id: dict | None = None) -> None:
     entity_id = op["entity_id"]
     row = db.conn.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
     if row is None:
         return
     _touch_source(db, entity_id, w, now)
-    _apply_supersede(db, pack, op, entity_id, run_id, now)
+    _apply_supersede(db, pack, op, entity_id, run_id, now, msg_by_id)
     title = op.get("title") or row["title"]
-    owner = op.get("owner") if op.get("owner") is not None else row["owner"]
+    owner = (_norm_owner(db, op.get("owner")) if op.get("owner") is not None
+             else row["owner"])
     op_due = op.get("due_ts")
     if op_due is not None:
         due_ts = op_due
@@ -717,17 +739,18 @@ def _apply_update(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int) 
         "attrs_json=?, updated_ts=? WHERE id=?",
         (title, body, owner, due_ts, attrs_json, now, entity_id))
     ev = (op.get("evidence") or [{}])[0]
+    actor = _actor_for(db, op.get("evidence"), msg_by_id)
     for field, old, new in changes:
         db.conn.execute(
             "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, to_val, "
-            "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (entity_id, run_id, now, "update", field,
              None if old is None else str(old), None if new is None else str(new),
-             ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+             ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"), actor))
 
 
 def _apply_flip(db: DB, w: dict, op: dict, run_id: int, now: int,
-                name: str, closed_ts: int | None) -> None:
+                name: str, closed_ts: int | None, msg_by_id: dict | None = None) -> None:
     entity_id = op["entity_id"]
     if name == "reopen":
         row = db.conn.execute(
@@ -745,12 +768,14 @@ def _apply_flip(db: DB, w: dict, op: dict, run_id: int, now: int,
     ev = (op.get("evidence") or [{}])[0]
     db.conn.execute(
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
-        "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?)",
+        "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?)",
         (entity_id, run_id, now, name, None,
-         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"),
+         _actor_for(db, op.get("evidence"), msg_by_id)))
 
 
-def _apply_status(db: DB, w: dict, op: dict, run_id: int, now: int, name: str) -> None:
+def _apply_status(db: DB, w: dict, op: dict, run_id: int, now: int, name: str,
+                  msg_by_id: dict | None = None) -> None:
     entity_id = op["entity_id"]
     prev = db.conn.execute(
         "SELECT status FROM entities WHERE id=?", (entity_id,)).fetchone()["status"]
@@ -761,29 +786,32 @@ def _apply_status(db: DB, w: dict, op: dict, run_id: int, now: int, name: str) -
     ev = (op.get("evidence") or [{}])[0]
     db.conn.execute(
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, to_val, "
-        "chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (entity_id, run_id, now, name, "status", prev, target,
-         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote")))
+         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"),
+         _actor_for(db, op.get("evidence"), msg_by_id)))
 
 
-def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int) -> None:
+def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int,
+               msg_by_id: dict | None = None) -> None:
     now = int(time.time())
     for op in valid:
         name = op.get("op")
         if name == "update":
-            _apply_update(db, pack, w, op, run_id, now)
+            _apply_update(db, pack, w, op, run_id, now, msg_by_id)
         elif name == "close":
-            _apply_flip(db, w, op, run_id, now, "close", now)
+            _apply_flip(db, w, op, run_id, now, "close", now, msg_by_id)
         elif name == "reopen":
-            _apply_flip(db, w, op, run_id, now, "reopen", None)
+            _apply_flip(db, w, op, run_id, now, "reopen", None, msg_by_id)
         elif name in _STATUS_TARGET:
-            _apply_status(db, w, op, run_id, now, name)
+            _apply_status(db, w, op, run_id, now, name, msg_by_id)
         else:
-            _apply_new(db, pack, w, op, run_id, now)
+            _apply_new(db, pack, w, op, run_id, now, msg_by_id)
 
 
 def _record_question_replies(db: DB, pack: dict, w: dict, rows: list[dict],
-                                 run_id: int, now: int) -> None:
+                                 run_id: int, now: int,
+                                 msg_by_id: dict | None = None) -> None:
     replies: dict[int, list[dict]] = {}
     for r in rows:
         if r["reply_to"] and r["sender_id"] is not None and r["text"]:
@@ -808,13 +836,16 @@ def _record_question_replies(db: DB, pack: dict, w: dict, rows: list[dict],
             if existing:
                 continue
             db.conn.execute(
-                "INSERT INTO entity_events(entity_id,run_id,ts,op,field,to_val,chat_id,msg_id,quote) "
-                "VALUES(?,?,?,'reply_received','response','requires_review',?,?,?)",
-                (q["id"], run_id, now, w["chat_id"], reply["msg_id"], reply["text"][:80]))
+                "INSERT INTO entity_events(entity_id,run_id,ts,op,field,to_val,chat_id,msg_id,quote,actor) "
+                "VALUES(?,?,?,'reply_received','response','requires_review',?,?,?,?)",
+                (q["id"], run_id, now, w["chat_id"], reply["msg_id"], reply["text"][:80],
+                 _actor_for(db, [{"chat_id": w["chat_id"], "msg_id": reply["msg_id"]}],
+                            msg_by_id)))
 
 
 def _record_question_reactions(db: DB, pack: dict, w: dict,
-                                   run_id: int, now: int) -> None:
+                                   run_id: int, now: int,
+                                   msg_by_id: dict | None = None) -> None:
     ac = pack.get("autoconfirm") or {}
     emojis = set(ac.get("emojis") or [])
     if not emojis:
@@ -845,9 +876,10 @@ def _record_question_reactions(db: DB, pack: dict, w: dict,
                            (q["id"], w["chat_id"], q["qmsg"], quote)).fetchone():
             continue
         db.conn.execute(
-            "INSERT INTO entity_events(entity_id,run_id,ts,op,field,to_val,chat_id,msg_id,quote) "
-            "VALUES(?,?,?,'reaction_received','response','requires_review',?,?,?)",
-            (q["id"], run_id, now, w["chat_id"], q["qmsg"], quote))
+            "INSERT INTO entity_events(entity_id,run_id,ts,op,field,to_val,chat_id,msg_id,quote,actor) "
+            "VALUES(?,?,?,'reaction_received','response','requires_review',?,?,?,?)",
+            (q["id"], run_id, now, w["chat_id"], q["qmsg"], quote,
+             _actor_for(db, [{"chat_id": w["chat_id"], "msg_id": q["qmsg"]}], msg_by_id)))
 
 
 def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
@@ -981,9 +1013,10 @@ def _run_scope(db: DB, pack: dict, w: dict, prov, dry_run: bool,
     run_id = _insert_run(db, pack, w, from_msg, upto_msg, now,
                          len(valid), rejected, overflow, status,
                          duration_ms, meta, rejects)
-    _apply_ops(db, pack, w, valid, run_id)
-    _record_question_replies(db, pack, w, rows, run_id, now)
-    _record_question_reactions(db, pack, w, run_id, now)
+    msg_by_id = {(r["chat_id"], r["msg_id"]): r["sender_name"] for r in rows}
+    _apply_ops(db, pack, w, valid, run_id, msg_by_id)
+    _record_question_replies(db, pack, w, rows, run_id, now, msg_by_id)
+    _record_question_reactions(db, pack, w, run_id, now, msg_by_id)
     new_cursor = max(cursor or 0, upto_msg)
     if overflow:
         clamp = dropped_min - 1

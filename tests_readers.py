@@ -18,6 +18,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import people
 from db import DB
+from packs import PACKS
+
+import extract as extract_mod
 
 FAILURES: list[str] = []
 
@@ -327,6 +330,70 @@ def test_people_resolution(tmp: Path) -> None:
               "resolve_owner: пустой/None вход -> None")
 
 
+def test_extract_actor(root: Path) -> None:
+    print("=== extract: actor из автора evidence и нормализация owner ===")
+    db_path = root / "actor.sqlite"
+    chat, topic = -100777, 1
+    msg_ts = int(time.time()) - 3600
+    date_iso = "2026-06-15T00:00:00+00:00"
+    with DB(db_path) as db:
+        db.upsert_chat(chat, "Объект", None, "supergroup", True, 6)
+        db.upsert_topic(chat, topic, "Объект")
+        db.watch_add(chat, topic, project="стройка")
+        db.conn.execute(
+            "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+            "sender_id, sender_name, is_service, text) VALUES(?,?,?,?,?,?,?,0,?)",
+            (chat, 101, topic, msg_ts, date_iso, 555, "иван петров",
+             "задача: подготовить смету"))
+        db.conn.execute(
+            "INSERT INTO messages(chat_id, msg_id, topic_id, ts, date_iso, "
+            "sender_id, sender_name, is_service, text) VALUES(?,?,?,?,?,?,?,0,?)",
+            (chat, 102, topic, msg_ts, date_iso, 777, "Мария",
+             "задача: заказать окна"))
+        db.set_meta("ws:person:ivan", json.dumps(
+            {"display_name": "Иван Петров", "role": "прораб",
+             "crm_member_guid": "", "telegram_sender_ids": [555]},
+            ensure_ascii=False))
+        db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"extract:{chat}:{topic}:construction", "100"))
+        db.conn.commit()
+
+    pack = PACKS["construction"]
+
+    def op(title, msg, quote, owner=None):
+        return {"op": "new", "kind": "task", "title": title, "entity_id": None,
+                "body": None, "owner": owner, "due_text": None, "due_ts": None,
+                "supersedes": None,
+                "evidence": [{"chat_id": chat, "msg_id": msg, "quote": quote}]}
+
+    extract_mod.run(str(db_path), packs=[pack], workers=1,
+                    provider=lambda prompt, pk: {"ops": [
+                        op("Смета", 101, "смету", owner="иван петров"),
+                        op("Окна", 102, "окна", owner="Незнакомец"),
+                    ]})
+    with DB(db_path) as db:
+        ev1 = db.conn.execute(
+            "SELECT actor FROM entity_events WHERE entity_id=1 AND op='new'").fetchone()
+        check(ev1 is not None and ev1["actor"] == "Иван Петров",
+              "actor: автор evidence резолвится через справочник в display_name",
+              str(ev1 and ev1["actor"]))
+        ev2 = db.conn.execute(
+            "SELECT actor FROM entity_events WHERE entity_id=2 AND op='new'").fetchone()
+        check(ev2 is not None and ev2["actor"] == "Мария",
+              "actor: автор без записи в справочнике остаётся сырым sender_name",
+              str(ev2 and ev2["actor"]))
+        e1 = db.conn.execute("SELECT owner FROM entities WHERE id=1").fetchone()
+        check(e1["owner"] == "Иван Петров",
+              "owner: совпал со справочником -> display_name",
+              str(e1 and e1["owner"]))
+        e2 = db.conn.execute("SELECT owner FROM entities WHERE id=2").fetchone()
+        check(e2["owner"] == "Незнакомец",
+              "owner: нет совпадения -> сырое значение",
+              str(e2 and e2["owner"]))
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -340,6 +407,7 @@ def main() -> int:
         test_project_gaps(tmp)
         test_gaps_edge(tmp)
         test_people_resolution(tmp)
+        test_extract_actor(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()
