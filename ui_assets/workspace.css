@@ -1118,7 +1118,9 @@ dialog::backdrop {
 .msg-reply {
   display: block;
   color: var(--muted);
-  margin-bottom: var(--s1);
+  margin-bottom: var(--s2);
+  padding-left: var(--s2);
+  border-left: 2px solid var(--accent);
 }
 .msg-body p {
   white-space: pre-wrap;
@@ -1642,6 +1644,9 @@ dialog::backdrop {
   overflow-y: auto;
   min-height: 0;
   scrollbar-color: var(--edge) transparent;
+}
+.breadcrumb:empty {
+  display: none;
 }
 .page-heading .eyebrow {
   display: none;

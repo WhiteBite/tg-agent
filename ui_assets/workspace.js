@@ -249,7 +249,7 @@ window.WS = (() => {
         ? "Проекты / " + (route.params.get("project") || "")
         : route.name === "analysis"
           ? "Переписка / Разбор темы"
-          : "Рабочее пространство / " + heading[0];
+          : "";
     $("#main-nav").innerHTML = nav
       .map(
         ([section, items]) =>
