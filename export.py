@@ -4,7 +4,7 @@
     python3 export.py                                  # JSONL рядом с базой
     python3 export.py --system file --out /tmp/export.jsonl
     python3 export.py --system 101                     # REST-провайдер, нужны EXPORT_101_*
-    python3 export.py --system notion                  # структурированная ошибка: нет API-доступа
+    python3 export.py --system notion                  # REST-провайдер, нужны NOTION_TOKEN/NOTION_DATABASE_ID
 
 Путь file-провайдера: --out, иначе TG_EXPORT_PATH, иначе export.jsonl рядом с базой.
 Курсор каждого провайдера живёт в integrations (entity_id, system): synced_ts —
@@ -23,8 +23,14 @@ integrations.external_id — PATCH .../{guid}/; EXPORT_101_COMMENTS=1 допис
 только показать, что уедет (курсор не двигается). 5xx и сети ретраятся
 EXPORT_101_RETRIES раз с EXPORT_101_BACKOFF (1,5,15), 4xx не ретраится; сбой одной
 сущности не роняет остальные (ok=False, failed=[id]); external_id из ответа (guid)
-пишется в integrations.external_id, курсор двигается только после 2xx. notion не
-реализован — словарь-ошибка, исключений не бросает.
+пишется в integrations.external_id, курсор двигается только после 2xx.
+notion — REST API Notion (stdlib urllib): NOTION_TOKEN + NOTION_DATABASE_ID,
+страницы задач в базе (POST /v1/pages, при наличии external_id — PATCH
+/v1/pages/{id}); kinds из NOTION_KINDS (task,promise,approval), переименование
+полей — NOTION_MAP (JSON {"title":"Name","body":"Notes","due_ts":"Due",
+"status":"Status","owner":"Owner"}), NOTION_API_VERSION (2026-03-11),
+NOTION_DRY=1 — показать без сети; 429/529 ретраятся с Retry-After, 5xx — только
+GET, 4xx не ретраится; без кредов — словарь-ошибка, исключений не бросает.
 TG_EXTRA_PROVIDERS=<путь к .py-модулю со словарём PROVIDERS> — сторонний реестр
 мержится поверх встроенных; битый модуль бросает ImportError/FileNotFoundError.
 """
@@ -135,12 +141,14 @@ def _provider_file(db: DB, out: str | None) -> dict:
 
 
 def _http_json(url: str, method: str, payload: dict | None, token: str | None,
-               timeout: float) -> dict:
+               timeout: float, extra_headers: dict | None = None) -> dict:
     data = (json.dumps(payload, ensure_ascii=False).encode("utf-8")
             if payload is not None else None)
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if extra_headers:
+        headers.update(extra_headers)
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read()
@@ -275,11 +283,123 @@ def _provider_101(db: DB, out: str | None) -> dict:
     return res
 
 
-def _stub(db: DB, out: str | None) -> dict:
-    return {"ok": False, "error": "провайдер не реализован: нужен API-доступ"}
+class _ApiNotion:
+    """REST-клиент Notion: Bearer-токен и фиксированная Notion-Version."""
+
+    def __init__(self, token: str, version: str, timeout: float):
+        self.token = token
+        self.version = version
+        self.timeout = timeout
+
+    def call(self, method: str, path: str, payload: dict | None) -> dict:
+        url = "https://api.notion.com/v1/" + path.lstrip("/")
+        return _http_json(url, method, payload, self.token, self.timeout,
+                          {"Notion-Version": self.version})
 
 
-PROVIDERS = {"file": _provider_file, "101": _provider_101, "notion": _stub}
+def _notion_properties(ent: dict, field_map: dict) -> dict:
+    props: dict = {}
+    for src, dst in field_map.items():
+        val = ent.get(src)
+        if val in (None, ""):
+            continue
+        if src == "title":
+            props[dst] = {"title": [{"text": {"content": str(val)}}]}
+        elif src == "due_ts":
+            props[dst] = {"date": {"start": time.strftime("%Y-%m-%d", time.gmtime(int(val)))}}
+        elif src == "status":
+            props[dst] = {"select": {"name": str(val)}}
+        else:
+            props[dst] = {"rich_text": [{"text": {"content": str(val)}}]}
+    return props
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float | None:
+    raw = exc.headers.get("Retry-After") if exc.headers else None
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
+
+
+def _provider_notion(db: DB, out: str | None) -> dict:
+    token = os.environ.get("NOTION_TOKEN")
+    database_id = os.environ.get("NOTION_DATABASE_ID")
+    if not token or not database_id:
+        return {"ok": False, "error": "notion: нет кредов — задайте NOTION_TOKEN "
+                                      "и NOTION_DATABASE_ID"}
+    version = os.environ.get("NOTION_API_VERSION") or "2026-03-11"
+    timeout = float(os.environ.get("NOTION_TIMEOUT") or 30)
+    kinds = {k.strip() for k in
+             (os.environ.get("NOTION_KINDS") or "task,promise,approval").split(",") if k.strip()}
+    dry = os.environ.get("NOTION_DRY", "").lower() in ("1", "true", "yes")
+    field_map = {"title": "Name", "body": "Notes", "due_ts": "Due",
+                 "status": "Status", "owner": "Owner"}
+    if os.environ.get("NOTION_MAP"):
+        field_map = json.loads(os.environ["NOTION_MAP"])
+    retries = int(os.environ.get("NOTION_RETRIES") or 3)
+    backoff = [float(x) for x in
+               (os.environ.get("NOTION_BACKOFF") or "1,5,15").split(",")
+               if x.strip()] or [0.0]
+    api = _ApiNotion(token, version, timeout)
+    synced = {r["entity_id"]: r["synced_ts"] for r in db.conn.execute(
+        "SELECT entity_id, synced_ts FROM integrations WHERE system='notion'")}
+    try:
+        external = {r["entity_id"]: r["external_id"] for r in db.conn.execute(
+            "SELECT entity_id, external_id FROM integrations WHERE system='notion'")}
+    except sqlite3.OperationalError:
+        external = {}  # старые базы без колонки external_id
+
+    if dry:
+        now = int(time.time())
+        would = sum(1 for ent in (dict(r) for r in db.conn.execute("SELECT * FROM entities"))
+                    if ent["kind"] in kinds and _pending_events(db, ent, synced, now))
+        return {"ok": True, "dry": True, "would_export": would, "database_id": database_id}
+
+    def _retry(method: str, path: str, payload: dict | None) -> dict:
+        err = ""
+        for attempt in range(retries + 1):
+            try:
+                return api.call(method, path, payload)
+            except urllib.error.HTTPError as e:
+                err = f"HTTP {e.code}"
+                if not (e.code in (429, 529) or (500 <= e.code < 600 and method == "GET")):
+                    raise _EntityFailed(err) from None
+                if attempt < retries:
+                    delay = _retry_after(e)
+                    time.sleep(delay if delay is not None
+                               else backoff[min(attempt, len(backoff) - 1)])
+                    continue
+            except OSError as e:
+                err = f"сеть/таймаут: {e}"
+            if attempt < retries:
+                time.sleep(backoff[min(attempt, len(backoff) - 1)])
+        raise _EntityFailed(f"{err} (попыток: {retries + 1})")
+
+    def emit(ent: dict, events: list[dict], now: int) -> str | None:
+        if ent["kind"] not in kinds:
+            return None
+        props = _notion_properties(ent, field_map)
+        ext = external.get(ent["id"])
+        if ext:
+            _retry("PATCH", f"pages/{ext}", {"properties": props})
+            return ext
+        result = _retry("POST", "pages",
+                        {"parent": {"database_id": database_id}, "properties": props})
+        page_id = result.get("id")
+        return str(page_id) if page_id else None
+
+    exported, failed, error = _export_entities(db, "notion", emit)
+    res: dict = {"ok": not failed, "exported": exported, "database_id": database_id}
+    if failed:
+        res["failed"] = failed
+        res["error"] = f"notion: {error}"
+    return res
+
+
+PROVIDERS = {"file": _provider_file, "101": _provider_101, "notion": _provider_notion}
 
 
 def _extra_providers() -> dict[str, Callable[[DB, str | None], dict]]:

@@ -2101,8 +2101,8 @@ def test_export(db_path: Path) -> None:
           "export: новое событие выгружает ровно одну сущность и только новое событие", str(res3))
 
     res_n = export_mod.run(str(exp_db), system="notion")
-    check(res_n.get("ok") is False and "не реализован" in res_n.get("error", ""),
-          "export: notion — структурированная ошибка без исключения", str(res_n))
+    check(res_n.get("ok") is False and "NOTION_TOKEN" in res_n.get("error", ""),
+          "export: notion — структурированная ошибка без кредов", str(res_n))
     res_1 = export_mod.run(str(exp_db), system="101")
     check(res_1.get("ok") is False and "EXPORT_101_URL" in res_1.get("error", ""),
           "export: 101 — структурированная ошибка без кредов", str(res_1))

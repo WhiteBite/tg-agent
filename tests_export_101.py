@@ -654,12 +654,12 @@ def test_extra_providers(tmp: Path) -> None:
               "extras: неизвестная система — та же строка ошибки при активном реестре",
               str(res_z))
         res_n = export_mod.run(db, system="notion")
-        check(res_n.get("ok") is False and "не реализован" in res_n.get("error", ""),
-              "extras: встроенный notion не перекрыт и остаётся стабом", str(res_n))
+        check(res_n.get("ok") is False and "NOTION_TOKEN" in res_n.get("error", ""),
+              "extras: встроенный notion не перекрыт сторонним реестром", str(res_n))
     finally:
         os.environ.pop("TG_EXTRA_PROVIDERS", None)
     res_n2 = export_mod.run(db, system="notion")
-    check(res_n2.get("ok") is False and "не реализован" in res_n2.get("error", ""),
+    check(res_n2.get("ok") is False and "NOTION_TOKEN" in res_n2.get("error", ""),
           "без TG_EXTRA_PROVIDERS: реестр пуст, встроенные резолвятся", str(res_n2))
     os.environ["TG_EXTRA_PROVIDERS"] = str(tmp / "no_such_module.py")
     try:
