@@ -30,11 +30,11 @@
   --shadow-1: 0 2px 8px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 6px 25px rgba(0, 0, 0, 0.5);
   --bubble-0: #1a1b1f;
-  --bubble-1: #1c2029;
-  --bubble-2: #1b211f;
-  --bubble-3: #201f24;
-  --bubble-4: #1b201c;
-  --bubble-5: #211d22;
+  --bubble-1: #1b2130;
+  --bubble-2: #16241f;
+  --bubble-3: #241d2c;
+  --bubble-4: #2a2118;
+  --bubble-5: #2a1d21;
   --s1: 4px;
   --s2: 8px;
   --s3: 12px;
@@ -1714,6 +1714,69 @@ img {
 @media (max-width: 1200px) {
   .connection-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+h1 {
+  font-size: clamp(26px, 2.6vw, 34px);
+  letter-spacing: -0.03em;
+}
+.section-heading h2 {
+  font-size: 22px;
+}
+.empty svg {
+  width: 40px;
+  height: 40px;
+}
+input,
+select,
+textarea {
+  border-radius: 4px;
+}
+.msg-avatar {
+  color: var(--ink);
+}
+
+@media (max-width: 900px) {
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .section-heading {
+    flex-wrap: wrap;
+    align-items: start;
+  }
+  .section-heading > * {
+    max-width: 100%;
+  }
+  .project-item {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .project-item > div:first-child,
+  .project-item > .button {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 768px) {
+  .correspondence {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+  .source-tree {
+    max-height: 42dvh;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .message-pane {
+    height: 65dvh;
+  }
+}
+@media (max-width: 600px) {
+  .property-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .star-toggle {
+    width: 44px;
+    height: 44px;
   }
 }
 
