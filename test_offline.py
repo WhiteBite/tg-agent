@@ -2448,9 +2448,9 @@ def test_mcp_server(db_path: Path) -> None:
         expected = {"tg_watch", "tg_new", "tg_read", "tg_find", "tg_stats",
                     "tg_mark_read", "tg_index_stats", "tg_links", "tg_topics",
                     "tg_digests", "tg_entities", "tg_entity", "tg_overdue",
-                    "tg_changes", "tg_project_brief", "tg_gaps"}
-        check(expected <= names and len(names) == 16,
-              "MCP tools/list: все 16 инструментов на месте",
+                    "tg_changes", "tg_project_brief", "tg_gaps", "tg_transcripts"}
+        check(expected <= names and len(names) == 17,
+              "MCP tools/list: все 17 инструментов на месте",
               str(sorted(names)))
         check(not any(n.startswith(("send_", "tg_live")) for n in names),
               "MCP: без флагов нет ни отправки, ни живого доступа")

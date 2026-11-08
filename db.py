@@ -697,6 +697,23 @@ class DB:
             [(chat_id, msg_id, k, v) for k, v in refs],
         )
 
+    def transcripts(self, chat_id: Optional[int] = None, status: Optional[str] = None,
+                    query: Optional[str] = None, limit: int = 50) -> list[dict]:
+        sql = "SELECT chat_id, msg_id, kind, status, engine, ts, text FROM media_assets WHERE 1=1"
+        args: list[Any] = []
+        if chat_id is not None:
+            sql += " AND chat_id = ?"
+            args.append(chat_id)
+        if status is not None:
+            sql += " AND status = ?"
+            args.append(status)
+        if query:
+            sql += " AND text LIKE ?"
+            args.append("%" + query + "%")
+        sql += " ORDER BY ts DESC LIMIT ?"
+        args.append(int(limit))
+        return [dict(r) for r in self.conn.execute(sql, args)]
+
     def refs_summary(
         self,
         chat_id: Optional[int] = None,

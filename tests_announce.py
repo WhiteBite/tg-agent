@@ -333,8 +333,8 @@ def test_mcp_post(tmp: Path) -> None:
     proc = _spawn(_mcp_env(TG_DB=str(db), TG_ALLOW_MANAGE="1"))
     try:
         names = _init(proc)
-        check("tg_manage_post" in names and len(names) == 22,
-              "MCP post: TG_ALLOW_MANAGE=1 -> 16 базовых + 6 tg_manage_* = 22",
+        check("tg_manage_post" in names and len(names) == 23,
+              "MCP post: TG_ALLOW_MANAGE=1 -> 17 базовых + 6 tg_manage_* = 23",
               str(sorted(names)))
 
         no_confirm = _call(proc, "tg_manage_post",
@@ -352,7 +352,7 @@ def test_mcp_post(tmp: Path) -> None:
 
         _rpc(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
         alive = _wait_for(proc, lambda m: m.get("id") == 5)
-        check(len(alive.get("result", {}).get("tools", [])) == 22,
+        check(len(alive.get("result", {}).get("tools", [])) == 23,
               "MCP post: сервер жив после ошибок tg_manage_post")
     finally:
         _stop(proc)
