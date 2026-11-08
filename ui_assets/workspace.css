@@ -5,7 +5,7 @@
   --surface: #1c2733;
   --soft: #232e3c;
   --ink: #f5f7fa;
-  --muted: #8a9baa;
+  --muted: #93a4b3;
   --rule: #26333f;
   --edge: #3a4a5a;
   --accent: #3390ec;
@@ -306,9 +306,9 @@ small {
   display: flex;
   gap: var(--s6);
   align-items: center;
-  min-height: 68px;
+  min-height: 60px;
   border-bottom: 1px solid var(--rule);
-  padding: var(--s3) var(--s8);
+  padding: var(--s2) var(--s6);
   background: var(--nav);
 }
 .breadcrumb {
@@ -359,7 +359,7 @@ small {
 main {
   overflow-y: auto;
   min-height: 0;
-  padding: var(--s8);
+  padding: var(--s6);
   scrollbar-gutter: stable;
   scrollbar-color: var(--edge) transparent;
 }
@@ -374,11 +374,11 @@ main {
   justify-content: space-between;
   align-items: center;
   gap: var(--s4);
-  margin-bottom: var(--s6);
+  margin-bottom: var(--s5);
 }
 .page-heading p {
   color: var(--muted);
-  margin-top: var(--s3);
+  margin-top: var(--s2);
   font-size: var(--text-sm);
   max-width: 70ch;
 }
@@ -422,7 +422,7 @@ main {
   gap: var(--s4);
 }
 .section-gap {
-  margin-top: var(--s8);
+  margin-top: var(--s6);
 }
 .section-heading {
   display: flex;
@@ -701,7 +701,7 @@ textarea {
   color: var(--muted);
   text-align: left;
   background: var(--soft);
-  padding: var(--s3) var(--s4);
+  padding: var(--s2) var(--s4);
 }
 .register th button {
   border: 0;
@@ -715,7 +715,7 @@ textarea {
   text-decoration: underline;
 }
 .register td {
-  padding: var(--s4);
+  padding: var(--s3) var(--s4);
   border-top: 1px solid var(--rule);
   vertical-align: top;
   overflow-wrap: anywhere;
@@ -769,7 +769,7 @@ textarea {
   display: grid;
   justify-items: center;
   text-align: center;
-  padding: var(--s10) var(--s6);
+  padding: var(--s8) var(--s6);
   gap: var(--s3);
   color: var(--muted);
 }
@@ -1624,4 +1624,25 @@ dialog::backdrop {
     grid-column: auto;
     width: auto;
   }
+}
+.nav-section {
+  display: grid;
+  gap: var(--s1);
+}
+.nav-section-label {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  padding: var(--s4) var(--s3) var(--s1);
+}
+.nav-section:first-child .nav-section-label {
+  padding-top: 0;
+}
+#main-nav {
+  overflow-y: auto;
+  min-height: 0;
+  scrollbar-color: var(--edge) transparent;
+}
+.page-heading .eyebrow {
+  display: none;
 }

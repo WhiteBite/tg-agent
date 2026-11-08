@@ -179,19 +179,11 @@ window.WS = (() => {
     search: ["Поиск", "Задачи, решения и сообщения с контекстом."],
   };
   const nav = [
-    ["attention", "Требует внимания"],
-    ["projects", "Проекты"],
-    ["catalog", "Каталог"],
-    ["tasks", "Задачи"],
-    ["decisions", "Решения"],
-    ["questions", "Вопросы"],
-    ["messages", "Переписка"],
-    ["links", "Ссылки"],
-    ["global", "Поиск в Telegram"],
-    ["downloads", "Загрузки"],
-    ["integrations", "Интеграции"],
-    ["engine", "Движок"],
-    ["settings", "Настройки"],
+    ["Обзор", [["attention", "Требует внимания"], ["projects", "Проекты"], ["catalog", "Каталог"]]],
+    ["Работа", [["tasks", "Задачи"], ["decisions", "Решения"], ["questions", "Вопросы"]]],
+    ["Переписка", [["messages", "Переписка"], ["links", "Ссылки"], ["global", "Поиск в Telegram"]]],
+    ["Данные", [["downloads", "Загрузки"], ["integrations", "Интеграции"]]],
+    ["Система", [["engine", "Движок"], ["settings", "Настройки"]]],
   ];
   let route = { name: "attention", params: new URLSearchParams() };
   const screens = {};
@@ -260,8 +252,13 @@ window.WS = (() => {
           : "Рабочее пространство / " + heading[0];
     $("#main-nav").innerHTML = nav
       .map(
-        ([key, label]) =>
-          `<a class="nav-link" href="#${key}" ${key === route.name || (key === "projects" && route.name === "project") ? 'aria-current="page"' : ""}>${icon(key)}<span>${label}</span></a>`,
+        ([section, items]) =>
+          `<div class="nav-section"><div class="nav-section-label">${section}</div>${items
+            .map(
+              ([key, label]) =>
+                `<a class="nav-link" href="#${key}" ${key === route.name || (key === "projects" && route.name === "project") ? 'aria-current="page"' : ""}>${icon(key)}<span>${label}</span></a>`,
+            )
+            .join("")}</div>`,
       )
       .join("");
     setMenu(false);
