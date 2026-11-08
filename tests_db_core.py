@@ -347,10 +347,9 @@ def test_posts_migration(tmp: Path) -> None:
         db.insert_message(msg(-1010, 1, ts=100, text="до миграции"))
         cols = {r[1] for r in db.conn.execute("PRAGMA table_info(posts)")}
         uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
-    check(SCHEMA_VERSION == 11, "v11: SCHEMA_VERSION = 11", str(SCHEMA_VERSION))
     check({"chat_id", "msg_id", "topic_id", "kind", "product", "tpl_hash", "ts"} <= cols,
           "fresh: таблица posts со всеми колонками", str(sorted(cols)))
-    check(uv == 11, "fresh: user_version = 11", str(uv))
+    check(uv == SCHEMA_VERSION, "fresh: user_version = SCHEMA_VERSION", str(uv))
 
     raw = sqlite3.connect(str(p))
     raw.execute("DROP TABLE IF EXISTS posts")
@@ -364,7 +363,7 @@ def test_posts_migration(tmp: Path) -> None:
             "SELECT COUNT(*) FROM messages WHERE chat_id=-1010").fetchone()[0]
     check({"chat_id", "msg_id", "topic_id", "kind", "product", "tpl_hash", "ts"} <= cols,
           "v4->v5: posts создана миграцией", str(sorted(cols)))
-    check(uv == 11, "v4->v11: user_version поднят", str(uv))
+    check(uv == SCHEMA_VERSION, "v4->v11: user_version поднят", str(uv))
     check(kept == 1, "v4->v5: строки messages не потеряны", str(kept))
 
 
@@ -404,7 +403,7 @@ def test_actor_migration(tmp: Path) -> None:
         cols = {r[1] for r in db.conn.execute("PRAGMA table_info(entity_events)")}
         uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
     check("actor" in cols, "fresh: entity_events.actor есть", str(sorted(cols)))
-    check(uv == 11, "fresh: user_version = 11", str(uv))
+    check(uv == SCHEMA_VERSION, "fresh: user_version = SCHEMA_VERSION", str(uv))
 
     raw = sqlite3.connect(str(p))
     raw.execute("INSERT INTO entity_events(entity_id, ts, op, field, to_val) "
@@ -419,7 +418,7 @@ def test_actor_migration(tmp: Path) -> None:
         kept = db.conn.execute(
             "SELECT COUNT(*) FROM entity_events WHERE entity_id=1").fetchone()[0]
     check("actor" in cols, "v10->v11: колонка actor добавлена", str(sorted(cols)))
-    check(uv == 11, "v10->v11: user_version поднят", str(uv))
+    check(uv == SCHEMA_VERSION, "v10->v11: user_version поднят", str(uv))
     check(kept == 1, "v10->v11: строки entity_events сохранены", str(kept))
 
     raw = sqlite3.connect(str(p))
@@ -431,8 +430,44 @@ def test_actor_migration(tmp: Path) -> None:
         uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
         kept = db.conn.execute(
             "SELECT COUNT(*) FROM entity_events WHERE entity_id=1").fetchone()[0]
-    check("actor" in cols and uv == 11 and kept == 1,
+    check("actor" in cols and uv == SCHEMA_VERSION and kept == 1,
           "v11: повторный прогон миграции идемпотентен", f"{uv}/{len(cols)}/{kept}")
+
+
+def test_entity_links_migration(tmp: Path) -> None:
+    print("=== миграция v12: entity_links ===")
+    p = tmp / "elinks.sqlite"
+    with DB(p) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(entity_links)")}
+        idx = {r[1] for r in db.conn.execute("PRAGMA index_list(entity_links)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check({"id", "from_entity_id", "to_entity_id", "link_kind", "run_id",
+           "chat_id", "msg_id", "quote", "created_ts", "updated_ts"} <= cols,
+          "fresh: entity_links со всеми колонками", str(sorted(cols)))
+    check({"ux_elink", "ix_elink_to"} <= idx,
+          "fresh: индексы entity_links созданы", str(sorted(idx)))
+    check(uv == SCHEMA_VERSION, "fresh: user_version = SCHEMA_VERSION", str(uv))
+
+    raw = sqlite3.connect(str(p))
+    raw.execute("INSERT INTO messages(chat_id, msg_id, topic_id, ts, text) "
+                "VALUES(-1012, 1, 1, 100, 'до миграции')")
+    raw.execute("DROP TABLE IF EXISTS entity_links")
+    raw.execute("PRAGMA user_version = 11")
+    raw.commit()
+    raw.close()
+    with DB(p) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(entity_links)")}
+        idx = {r[1] for r in db.conn.execute("PRAGMA index_list(entity_links)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+        kept = db.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE chat_id=-1012").fetchone()[0]
+    check({"id", "from_entity_id", "to_entity_id", "link_kind", "run_id",
+           "chat_id", "msg_id", "quote", "created_ts", "updated_ts"} <= cols,
+          "v11->v12: entity_links создана миграцией", str(sorted(cols)))
+    check({"ux_elink", "ix_elink_to"} <= idx,
+          "v11->v12: индексы entity_links созданы", str(sorted(idx)))
+    check(uv == SCHEMA_VERSION, "v11->v12: user_version поднят", str(uv))
+    check(kept == 1, "v11->v12: строки messages сохранены", str(kept))
 
 
 def main() -> int:
@@ -448,6 +483,7 @@ def main() -> int:
         test_posts_migration(tmp)
         test_posts_helpers(tmp)
         test_actor_migration(tmp)
+        test_entity_links_migration(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

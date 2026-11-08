@@ -335,7 +335,7 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 class DB:
@@ -397,6 +397,8 @@ class DB:
             self._migrate_v10()
         if version < 11:
             self._migrate_v11()
+        if version < 12:
+            self._migrate_v12()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -635,6 +637,22 @@ class DB:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(entity_events)")}
         if "actor" not in cols:
             self.conn.execute("ALTER TABLE entity_events ADD COLUMN actor TEXT")
+
+    def _migrate_v12(self) -> None:
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS entity_links ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "from_entity_id INTEGER NOT NULL, "
+            "to_entity_id INTEGER NOT NULL, "
+            "link_kind TEXT NOT NULL, "
+            "run_id INTEGER, chat_id INTEGER, msg_id INTEGER, "
+            "quote TEXT, created_ts INTEGER, updated_ts INTEGER)")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_elink "
+            "ON entity_links(from_entity_id, to_entity_id, link_kind)")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_elink_to "
+            "ON entity_links(to_entity_id, link_kind)")
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
