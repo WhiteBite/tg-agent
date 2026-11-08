@@ -30,17 +30,36 @@ DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 PREFIX = "ws:person:"
 
 
-def _people(db: DB) -> list[dict]:
+def load_people(db: DB) -> list[dict]:
     out = []
     for r in db.conn.execute("SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key",
                              (PREFIX + "%",)):
         try:
             data = json.loads(r["value"]) if r["value"] else {}
         except (ValueError, TypeError):
-            data = {}
+            continue
         if isinstance(data, dict):
             out.append({"key": r["key"][len(PREFIX):], **data})
     return out
+
+
+def resolve_owner(db: DB, name_or_id) -> dict | None:
+    if name_or_id is None:
+        return None
+    needle = str(name_or_id).strip()
+    if not needle:
+        return None
+    folded = needle.casefold()
+    people = load_people(db)
+    for person in people:
+        name = person.get("display_name")
+        if isinstance(name, str) and name.casefold() == folded:
+            return person
+    for person in people:
+        ids = person.get("telegram_sender_ids")
+        if isinstance(ids, list) and any(str(i) == needle for i in ids):
+            return person
+    return None
 
 
 def main() -> int:
@@ -59,7 +78,7 @@ def main() -> int:
     args = ap.parse_args()
     with DB(args.db) as db:
         if args.cmd == "list":
-            print(json.dumps(_people(db), ensure_ascii=False, indent=2))
+            print(json.dumps(load_people(db), ensure_ascii=False, indent=2))
             return 0
         if args.cmd == "remove":
             with db.conn:

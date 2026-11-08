@@ -4,6 +4,7 @@ project_brief, project_gaps — посев сущностей/событий п�
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -15,6 +16,7 @@ os.environ["TG_ENV_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import people
 from db import DB
 
 FAILURES: list[str] = []
@@ -290,6 +292,41 @@ def test_gaps_edge(tmp: Path) -> None:
               str(len(db.entities_list(owner=""))))
 
 
+def test_people_resolution(tmp: Path) -> None:
+    print("=== people: резолв по имени и sender id ===")
+    with DB(tmp / "people.sqlite") as db:
+        db.set_meta("ws:person:ivan", json.dumps(
+            {"display_name": "Иван Петров", "role": "прораб",
+             "crm_member_guid": "g-1", "telegram_sender_ids": [123, 456]},
+            ensure_ascii=False))
+        db.set_meta("ws:person:maria", json.dumps(
+            {"display_name": "Мария", "role": "", "crm_member_guid": "",
+             "telegram_sender_ids": [789]}, ensure_ascii=False))
+        db.set_meta("ws:person:broken", "{not json")
+        people_list = people.load_people(db)
+        check(len(people_list) == 2, "load_people: битый JSON пропущен", str(len(people_list)))
+        keys = sorted(p["key"] for p in people_list)
+        check(keys == ["ivan", "maria"], "load_people: ключ из суффикса", str(keys))
+        ivan = next(p for p in people_list if p["key"] == "ivan")
+        check(ivan["display_name"] == "Иван Петров" and ivan["telegram_sender_ids"] == [123, 456],
+              "load_people: поля человека на месте", str(ivan))
+        by_name = people.resolve_owner(db, "иван петров")
+        check(by_name is not None and by_name["key"] == "ivan",
+              "resolve_owner: имя без учёта регистра", str(by_name and by_name["key"]))
+        by_id = people.resolve_owner(db, 456)
+        check(by_id is not None and by_id["key"] == "ivan",
+              "resolve_owner: по sender id (int)", str(by_id and by_id["key"]))
+        by_id_str = people.resolve_owner(db, "789")
+        check(by_id_str is not None and by_id_str["key"] == "maria",
+              "resolve_owner: по sender id (строка)", str(by_id_str and by_id_str["key"]))
+        check(people.resolve_owner(db, "нет такого") is None,
+              "resolve_owner: неизвестное имя -> None")
+        check(people.resolve_owner(db, 999999) is None,
+              "resolve_owner: неизвестный id -> None")
+        check(people.resolve_owner(db, "") is None and people.resolve_owner(db, None) is None,
+              "resolve_owner: пустой/None вход -> None")
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -302,6 +339,7 @@ def main() -> int:
         test_project_brief(tmp)
         test_project_gaps(tmp)
         test_gaps_edge(tmp)
+        test_people_resolution(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()
