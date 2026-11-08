@@ -121,6 +121,27 @@ def bulk_close(db: DB, body: dict) -> dict:
     return {"ok": True, "closed": len(closed), "older_than_days": days}
 
 
+def autoclose_stale_trials(db: DB, grace_days: int = 7, batch: int = 500) -> int:
+    cutoff = int(time.time()) - grace_days * 86400
+    closed = []
+    with db.conn:
+        db.conn.execute("BEGIN IMMEDIATE")
+        rows = db.conn.execute(
+            "SELECT id,status,due_ts FROM entities WHERE closed_ts IS NULL AND kind='trial' "
+            "AND due_ts IS NOT NULL AND due_ts < ? ORDER BY due_ts LIMIT ?",
+            (cutoff, batch)).fetchall()
+        now = int(time.time())
+        for r in rows:
+            db.conn.execute("UPDATE entities SET status='done', closed_ts=?, updated_ts=? WHERE id=?",
+                            (r["due_ts"], now, r["id"]))
+            human_event(db, r["id"], "auto_close", "status", r["status"], "done",
+                        "триал давно истёк")
+            put_meta(db, f"ws:review:{r['id']}",
+                     {"state": "pending", "revision": revision(db, r["id"])})
+            closed.append(r["id"])
+    return len(closed)
+
+
 def visit(db: DB, body: dict) -> dict:
     try:
         chat_id = int(body["chat_id"])

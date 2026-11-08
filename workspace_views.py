@@ -6,9 +6,11 @@ import time
 
 from db import DB
 from workspace_store import REVIEW_JOINS, REVIEW_STATE_SQL, WorkspaceError, metadata, page, review
+from workspace_write import autoclose_stale_trials
 
 
 def home(db: DB, params: dict) -> dict:
+    autoclose_stale_trials(db)
     where = "WHERE e.project=?" if params.get("project") else ""
     args = [params["project"]] if params.get("project") else []
     all_rows = db.conn.execute("SELECT e.*," + REVIEW_STATE_SQL + " AS review_state" + REVIEW_JOINS + where, args)
@@ -41,7 +43,6 @@ def home(db: DB, params: dict) -> dict:
                 reasons.append("missing_owner")
         if state == "pending":
             counts["review_pending"] += 1
-            reasons.append("review_pending")
         if reasons and state != "rejected":
             attention.append({**e, "review_state": state, "reasons": reasons})
     attention.sort(key=lambda e: ("overdue" not in e["reasons"], "blocked" not in e["reasons"],

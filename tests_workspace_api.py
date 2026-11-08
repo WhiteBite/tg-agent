@@ -324,6 +324,32 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("visit", {"chat_id": -100111, "topic_id": "x"})[0], 400)
         self.assertEqual(self.request("visit", {})[0], 400)
 
+    def test_home_autocloses_stale_trials_and_drops_review_noise(self):
+        with DB(self.db_path) as db:
+            for eid, kind, due in ((7, "trial", self.now - 20 * 86400),
+                                   (8, "trial", self.now - 3 * 86400),
+                                   (9, "task", self.now - 20 * 86400)):
+                db.conn.execute(
+                    "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,owner,due_ts,project,created_ts,updated_ts) "
+                    "VALUES(?, 'services', -100111, 1, ?, ?, 'open', 'Иван', ?, NULL, ?, ?)",
+                    (eid, kind, f"Запись {eid}", due, self.now - 500, self.now - 100))
+            db.conn.commit()
+        status, d = self.request("home")
+        self.assertEqual(status, 200)
+        with DB(self.db_path) as db:
+            e7 = db.conn.execute("SELECT status,closed_ts FROM entities WHERE id=7").fetchone()
+            self.assertEqual(e7["status"], "done")
+            self.assertEqual(e7["closed_ts"], self.now - 20 * 86400)
+            e8 = db.conn.execute("SELECT status FROM entities WHERE id=8").fetchone()
+            self.assertEqual(e8["status"], "open")
+            ev = db.conn.execute("SELECT op FROM entity_events WHERE entity_id=7 ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual(ev["op"], "auto_close")
+        self.assertTrue(all("review_pending" not in e["reasons"] for e in d["attention"]))
+        self.assertNotIn(7, [e["id"] for e in d["attention"]])
+        self.assertIn(8, [e["id"] for e in d["attention"]])
+        self.assertIn(9, [e["id"] for e in d["attention"]])
+        self.assertGreaterEqual(d["counts"]["review_pending"], 4)
+
     def test_sync_cancel_without_running_sync(self):
         status, d = self.request_api("sync/cancel", {})
         self.assertEqual(status, 409)
