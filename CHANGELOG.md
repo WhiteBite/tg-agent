@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.0 — 2026-11-08
+Пять доработок рабочего пространства и автономки:
+- `workspace_views.py`/`ui_assets/workspace_projects.js`: счётчик «Истекает» на главной — открытые сущности со сроком в ближайшую неделю; недельный фильтр каталога `catalog?due=upcoming`.
+- Живые алерты настраиваются в UI: секция «Живые алерты» в настройках, слова и упоминания хранятся в `meta['ws:alerts']` (`GET alerts`, `POST settings/alerts`); `alerts.py` читает правила на лету (`config(db)`), `live.py` больше не зависит от устаревшей константы `ENABLED`.
+- `entity_alerts.py`: сущностные алерты после шага extract — открытые сущности с событиями `op='new'` новее курсора `entity_alerts:cursor`, виды из `TG_ENTITY_ALERT_KINDS` (дефолт trial,question) уходят в Saved Messages (гейт `TG_ENTITY_ALERTS`, отправка через notify за `TG_ALLOW_SEND`); шаг `alerts` добавлен в `pipeline.py`.
+- Каталог: звёздочка-избранное (`POST catalog/star`, список в `meta['ws:catalog_stars']`, фильтр `catalog?starred=1`, избранное всплывает наверх); сводка монитора: блок «моё» по владельцам из `TG_ME_OWNERS`.
+- Панель «Движок» в UI: статус демонов по lockfile и свежести `pipeline:last_ok_ts`, пуск/стоп `pipeline --loop` и `live` за гейтом `TG_ALLOW_ENGINE=1` (`engine.py`, `GET engine`, `POST engine/start|stop`).
+- Тесты: `tests_workspace_api.py` (избранное каталога, алерты, панель движка) и `tests_ops_report.py` (сущностные алерты, блок «моё», управление движком), полный офлайн-гейт зелёный.
+
 ## 0.15.0 — 2026-11-03
 Валидатор cloud.mail.ru, отправка для агента и дедуп перед публикацией:
 - `checkmail.py`: статус публичных облаков cloud.mail.ru через `GET cloud.mail.ru/api/v2/folder` — без аккаунта и скачивания. Живое облако отдаёт имя, размер и число объектов; `not_exists` — терминальный dead; 429/5xx пережидаются повтором. Кэш в `link_status` (host='mailru'), CLI зеркалит checkmega.

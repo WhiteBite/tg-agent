@@ -67,7 +67,10 @@ python3 ui.py                 # http://127.0.0.1:8899
 - «Каталог» — сервисы, триалы и промо одной строкой на сервис: жив или истёк,
   ближайший срок, из скольких чатов всплывал; быстрые действия прямо в строках
   реестров (проверено / закрыть / отложить на неделю), «Закрыть протухшие триалы» —
-  массовое закрытие;
+  массовое закрытие; звёздочка-избранное с фильтром «только избранные» (избранное
+  всплывает наверх), недельный фильтр `catalog?due=upcoming`;
+- на главной счётчик «Истекает» — открытые записи со сроком в ближайшую неделю;
+  настройки содержат секцию «Живые алерты» (слова-триггеры и упоминания);
 - триалы с давно истёкшим сроком закрываются автоматически (событие `auto_close`),
   поэтому просрочка на главной — только живая; очередь внимания не содержит
   ревью-шума, проверка осталась в карточках и фильтрах;
@@ -411,7 +414,9 @@ live ничего не отправляет.
 сразу уходит в Saved Messages через тот же клиент демона (второй session-файл
 не заводится); реальная отправка за общим гейтом `TG_ALLOW_SEND=1`, иначе
 dry-run в лог; `TG_ALERT_COOLDOWN` (сек, дефолт 300) глушит повторы того же
-правила в том же чате. Настройки читаются при старте демона.
+правила в том же чате. Слова и упоминания задаются в настройках UI (секция
+«Живые алерты») и хранятся в индексе — демон читает их на лету, перезапуск не
+нужен; если правила в UI не заданы, берутся значения из окружения.
 
 ## Дайджесты
 
@@ -508,7 +513,7 @@ run `status='filtered'`, остальные сообщения обрабаты�
 ## Автономный конвейер
 
 ```bash
-python3 pipeline.py                  # sync -> media -> extract -> fuzzy -> export -> digest -> monitor
+python3 pipeline.py                  # sync -> media -> extract -> alerts -> fuzzy -> export -> digest -> monitor
 python3 pipeline.py --pack services  # один пакет извлечения
 python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram (--skip media/fuzzy/export тоже можно)
 python3 pipeline.py --days-ahead 7 --send
@@ -522,7 +527,10 @@ python3 pipeline.py --loop 30 --send # демон: полный цикл каж�
 до конца, в `--loop` — по окну за цикл (курсоры продолжают следующий).
 `run()` захватывает локи `proclock`, поэтому разовый запуск не гоняется
 параллельно с loop-демоном (лок занят — выход 0 «уже запущен»). В отчёте
-`report["extract"]` — сводные `ops_rejected`/`ops_overflow`. После извлечения `fuzzy` сливает дубли
+`report["extract"]` — сводные `ops_rejected`/`ops_overflow`. Сразу после extract
+шаг `alerts` шлёт новые сущности (виды из `TG_ENTITY_ALERT_KINDS`, дефолт
+trial,question) в Saved Messages — гейт `TG_ENTITY_ALERTS`, курсор
+`entity_alerts:cursor` двигается только после реальной отправки. После извлечения `fuzzy` сливает дубли
 сущностей по нормализованному title (`FUZZY_MAX_MERGES`, дефолт 500), а
 `export` дописывает JSONL-фид для внешних потребителей (по умолчанию
 `export.jsonl` рядом с базой, путь — `TG_EXPORT_PATH`; формат строки
@@ -574,7 +582,9 @@ python3 monitor.py --send                # отправить сводку в Sa
 чате) со временем появления: утренний
 `pipeline.py --loop 1440 --send` превращается в ежедневную сводку о триалах.
 Есть блок «зависшие вопросы» — открытые question старше
-`MONITOR_QUESTION_DAYS` (дефолт 3). Сканы ограничены по объёму.
+`MONITOR_QUESTION_DAYS` (дефолт 3). Сканы ограничены по объёму. `TG_ME_OWNERS`
+(имена через запятую) добавляет блок «моё» — открытые сущности, чей владелец
+совпадает с одним из имён.
 `--send` дедупится по хэшу отчёта (`meta['monitor:last_hash']`): одинаковая
 сводка второй раз не отправляется, `TG_MONITOR_FORCE=1` обходит проверку.
 `--send` — это `notify.py`:
@@ -799,11 +809,12 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `manage.py` | Создание и управление чатами: группы, каналы, форумы, настройки, участники (гейт `TG_ALLOW_MANAGE=1`) |
 | `announce.py` | Релиз-посты: баннер PIL, шаблон YAML, readme тем из org.yaml, черновик из CHANGELOG; гейт `TG_ALLOW_MANAGE=1` |
 | `org.yaml` | Реестр продуктов WhiteBite: репо, ссылки, эмодзи, разметка тем |
-| `pipeline.py` | Автономный конвейер: sync → media → extract → fuzzy → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
+| `pipeline.py` | Автономный конвейер: sync → media → extract → alerts → fuzzy → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
 | `db.py` | Индекс: схема с миграциями по `PRAGMA user_version`, FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
 | `server.py` | MCP-сервер (stdio): 16 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
 | `live.py` | Новые сообщения в реальном времени (`events.NewMessage`), правки и удаления (`MessageEdited` / `MessageDeleted`) |
-| `alerts.py` | Живые алерты live-демона: слова-триггеры и упоминания → Saved Messages (гейт `TG_ALERTS` + `TG_ALLOW_SEND`, cooldown на пару чат+правило) |
+| `alerts.py` | Живые алерты live-демона: слова-триггеры и упоминания → Saved Messages (гейт `TG_ALERTS` + `TG_ALLOW_SEND`, cooldown на пару чат+правило); правила читаются из UI (`meta['ws:alerts']`) на лету |
+| `entity_alerts.py` | Сущностные алерты после extract: новые сущности (виды из `TG_ENTITY_ALERT_KINDS`) → Saved Messages (гейт `TG_ENTITY_ALERTS`, курсор `entity_alerts:cursor`) |
 | `digest.py` | Дайджесты: stub или openai-совместимый LLM |
 | `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт, due_text→due_ts fallback (ru-месяцы, относительные, конец дня), supersedes, причины отказа в `rejects_json`, перепрогон dirty |
 | `packs/` | Декларативные пакеты извлечения: `construction` (decision/task/promise/question), `services` (service/trial/promo); scope-фильтры (`require_match`, `exclude_project_regex`) и `dedup_scope` |
@@ -818,6 +829,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `services_report.py` | Каталог сервисов из сущностей: rollup по dedup_key, `--days/--query/--top/--hide-closed` |
 | `fuzzy_dedup.py` | Maintenance-проход: слияние дублей сущностей по нормализованному title (richer-keeper, cap, идемпотентный) |
 | `proclock.py` | Lockfile одиночного инстанса для демонов (pipeline --loop, live.py) |
+| `engine.py` | Панель «Движок»: статус демонов по lockfile/`pipeline:last_ok_ts`, пуск/стоп за гейтом `TG_ALLOW_ENGINE=1` |
 | `ui.py` + `ui.html` + `ui_assets/` | Рабочее пространство в браузере: «Требует внимания», сущности, «Переписка», «Загрузки»; раздаёт `/assets/*` и `/api/workspace/*` за общим токен-гейтом, синхронизацию можно отменить |
 | `workspace_store.py` / `workspace_views.py` / `workspace_write.py` / `workspace_search.py` / `workspace_api.py` | Бэкенд рабочего пространства: фильтры/сортировка/пагинация, поиск FTS5+LIKE-фоллбек, правка полей с аудитом (409 на устаревшую ревизию), проверка карточек, курсор просмотра проекта, привязка тем, справочник людей, локальные превью 101 и уведомлений |
 | `DESIGN.md` | Дизайн-спека рабочего пространства: палитра, типографика, сетка, светлая/тёмная темы |
