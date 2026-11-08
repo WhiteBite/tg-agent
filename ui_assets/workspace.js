@@ -245,6 +245,7 @@ window.WS = (() => {
       name: headings[name] ? name : "attention",
       params: new URLSearchParams(params),
     };
+    document.body.dataset.screen = route.name;
     const heading = headings[route.name];
     document.title = `TG Agent · ${heading[0]}`;
     $("#page-eyebrow").textContent = "Контроль по переписке";
