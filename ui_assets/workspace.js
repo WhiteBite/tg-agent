@@ -47,6 +47,9 @@ window.WS = (() => {
     source: '<path d="M14 3h7v7m-1-6L10 14M11 3H3v18h18v-8"/>',
     refresh: '<path d="M20 7a8 8 0 1 0 0 10M20 3v5h-5"/>',
     copy: '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
+    star: '<path d="m12 3 2.6 5.6 6.1.8-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6L3.3 9.4l6.1-.8z"/>',
+    starFilled:
+      '<path d="m12 3 2.6 5.6 6.1.8-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6L3.3 9.4l6.1-.8z" fill="currentColor"/>',
   };
   const icon = (name) =>
     `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.tasks}</svg>`;

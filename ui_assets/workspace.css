@@ -1,3 +1,10 @@
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/assets/fonts/InterVariable.woff2") format("woff2");
+}
 :root {
   color-scheme: dark;
   --font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -1663,4 +1670,183 @@ dialog::backdrop {
 }
 .page-heading .eyebrow {
   display: none;
+}
+
+body {
+  letter-spacing: -0.01em;
+}
+small,
+.muted,
+.badge,
+.eyebrow,
+.nav-section-label,
+.nav-label,
+.freshness,
+.pagination,
+.property-grid dt,
+.msg-foot time {
+  letter-spacing: -0.1px;
+}
+h1,
+h2,
+h3 {
+  letter-spacing: -0.02em;
+}
+
+.metric-grid {
+  gap: var(--s3);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+}
+.metric {
+  background: var(--surface);
+  border: 1px solid var(--edge);
+  border-radius: var(--r2);
+  padding: var(--s5) var(--s6);
+}
+.metric:last-child {
+  border-right: 1px solid var(--edge);
+}
+.metric:hover {
+  background: var(--soft);
+}
+.metric span {
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+.metric strong {
+  font-size: 32px;
+  line-height: 1.05;
+  letter-spacing: -0.05em;
+}
+.metric small {
+  font-size: var(--text-xs);
+}
+.metric.urgent {
+  background:
+    radial-gradient(120% 130% at 100% 0%, rgba(255, 137, 100, 0.1), transparent 62%),
+    var(--surface);
+}
+.metric.urgent:hover {
+  background:
+    radial-gradient(120% 130% at 100% 0%, rgba(255, 137, 100, 0.12), transparent 62%),
+    var(--soft);
+}
+.metric.urgent strong {
+  color: var(--ember);
+}
+
+.panel {
+  border-color: var(--edge);
+}
+.register th {
+  background: transparent;
+}
+
+.badge {
+  padding: 4px 10px;
+  font-weight: 500;
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+  color: var(--muted);
+}
+.badge.open {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink);
+}
+.badge.pending,
+.badge.done {
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+  color: var(--muted);
+}
+.badge.in_progress,
+.badge.approved {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+.badge.blocked,
+.badge.warning {
+  background: color-mix(in srgb, var(--ember) 16%, transparent);
+  color: var(--ember);
+}
+.badge.rejected,
+.badge.overdue {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--danger);
+}
+
+.row-icon {
+  background: var(--soft);
+  color: var(--muted);
+}
+.row-icon.danger {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+.row-title {
+  font-weight: 500;
+}
+.row-due {
+  color: var(--ember);
+}
+
+.star-toggle[aria-pressed="true"] {
+  color: var(--ember);
+}
+.star-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+
+.source-tree summary {
+  border-radius: var(--radius-pill);
+  padding: var(--s2) var(--s4);
+}
+.topic-entry > a {
+  border-radius: var(--radius-pill);
+  padding: var(--s2) var(--s4);
+}
+.msg-body {
+  border-radius: var(--r2);
+  border-bottom-left-radius: var(--r1);
+}
+.message.same-as-prev .msg-body {
+  border-top-left-radius: var(--r1);
+}
+.msg-head strong {
+  font-weight: 500;
+}
+.msg-avatar {
+  border: 0;
+}
+.evidence blockquote {
+  border-left: 2px solid var(--edge);
+  padding-left: var(--s3);
+}
+
+@media (max-width: 600px) {
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--s2);
+  }
+  .metric {
+    padding: var(--s4);
+    border: 1px solid var(--edge);
+  }
+  .metric:nth-child(2) {
+    border-right: 1px solid var(--edge);
+  }
+  .metric:nth-child(n + 3) {
+    border-bottom: 1px solid var(--edge);
+  }
+  .metric strong {
+    font-size: 26px;
+  }
+  .metric span {
+    font-size: 12px;
+  }
+  .metric small {
+    font-size: 11px;
+  }
 }

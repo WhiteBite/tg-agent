@@ -25,14 +25,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from db import DB, clean_text
-from sanitize import sanitize_name
-from env import load_env
 import workspace_api
+from db import DB, clean_text
+from env import load_env
+from sanitize import sanitize_name
 
 load_env()
 
-import sync as sync_mod  # noqa: E402
+import sync as sync_mod
 
 HERE = Path(__file__).parent
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
@@ -280,11 +280,17 @@ class Handler(BaseHTTPRequestHandler):
             allowed = {"workspace.css", "workspace.js", "workspace_entities.js", "workspace_projects.js",
                        "workspace_messages.js", "workspace_analysis.js", "workspace_catalog.js",
                        "workspace_settings.js", "workspace_downloads.js", "workspace_engine.js",
-                       "workspace_links.js", "workspace_global.js"}
+                       "workspace_links.js", "workspace_global.js", "fonts/InterVariable.woff2",
+                       "fonts/Inter-Regular.woff2", "fonts/Inter-Medium.woff2", "fonts/Inter-SemiBold.woff2"}
             if name not in allowed:
                 self._json({"error": "not found"}, 404)
                 return
-            mime = "text/css" if name.endswith(".css") else "text/javascript"
+            if name.endswith(".css"):
+                mime = "text/css"
+            elif name.endswith(".woff2"):
+                mime = "font/woff2"
+            else:
+                mime = "text/javascript"
             self._send((HERE / "ui_assets" / name).read_bytes(), mime + "; charset=utf-8")
         elif u.path.startswith("/api/workspace/"):
             with _db() as db:
