@@ -2545,6 +2545,10 @@ def test_mcp_server(db_path: Path) -> None:
         check(st["messages"] == 27 and st["watched"] == 2,
               "MCP tg_index_stats: 27 сообщений / 2 в watch-листе",
               f"{st['messages']}/{st['watched']}")
+
+        tr = call("tg_transcripts", {"status": "done"}, 11)
+        check("items" in tr and isinstance(tr["items"], list),
+              "MCP tg_transcripts: отдаёт список транскрипций", str(tr)[:120])
     finally:
         proc.terminate()
         try:
