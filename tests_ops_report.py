@@ -1076,6 +1076,40 @@ def test_alerts_cli() -> None:
           "alerts CLI: --text показывает сработавшие правила", out2.stdout[:200])
 
 
+def test_people_cli() -> None:
+    print("=== people: CLI — set/list/remove справочника ===")
+    repo = Path(__file__).parent
+    db_path = TMP / "people_cli.sqlite"
+    with DB(db_path):
+        pass
+    env = {**os.environ, "TG_ENV_FILE": "", "TG_DB": str(db_path)}
+
+    def run(*extra):
+        return subprocess.run([sys.executable, str(repo / "people.py"), *extra],
+                              capture_output=True, text=True, encoding="utf-8", env=env)
+
+    out = run("set", "--key", "ivan", "--name", "Иван", "--role", "прораб",
+              "--ids", "123, 456")
+    check(out.returncode == 0 and json.loads(out.stdout).get("ids") == [123, 456],
+          "people CLI: set сохраняет человека и id", out.stdout[:200])
+    lst = run("list")
+    try:
+        items = json.loads(lst.stdout)
+    except (ValueError, TypeError):
+        items = []
+    check(len(items) == 1 and items[0]["key"] == "ivan"
+          and items[0]["display_name"] == "Иван"
+          and items[0]["telegram_sender_ids"] == [123, 456],
+          "people CLI: list отдаёт сохранённое", lst.stdout[:200])
+    bad = run("set", "--key", "x", "--ids", "12,oops")
+    check(bad.returncode == 2, "people CLI: нечисловой id отклоняется", bad.stderr[:120])
+    rm = run("remove", "--key", "ivan")
+    check(rm.returncode == 0 and json.loads(rm.stdout).get("ok") is True,
+          "people CLI: remove удаляет связь", rm.stdout[:120])
+    check(json.loads(run("list").stdout) == [],
+          "people CLI: после remove список пуст")
+
+
 def main() -> int:
     try:
         test_notify_event_loop()
@@ -1098,6 +1132,7 @@ def main() -> int:
         test_loop_until_done_false()
         test_entity_alerts()
         test_alerts_cli()
+        test_people_cli()
         test_live_alerts()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
