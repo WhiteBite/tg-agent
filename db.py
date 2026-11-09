@@ -335,7 +335,26 @@ CREATE TRIGGER IF NOT EXISTS trg_msg_au AFTER UPDATE OF text ON messages BEGIN
 END;
 """
 
-SCHEMA_VERSION = 13
+ENTITIES_FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
+    entity_id UNINDEXED, title, body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS trg_ent_ai AFTER INSERT ON entities BEGIN
+    INSERT INTO entities_fts(rowid, entity_id, title, body)
+    VALUES (new.id, new.id, new.title, COALESCE(new.body, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_ent_ad AFTER DELETE ON entities BEGIN
+    DELETE FROM entities_fts WHERE rowid = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_ent_au AFTER UPDATE OF title, body ON entities BEGIN
+    DELETE FROM entities_fts WHERE rowid = old.id;
+    INSERT INTO entities_fts(rowid, entity_id, title, body)
+    VALUES (new.id, new.id, new.title, COALESCE(new.body, ''));
+END;
+"""
+
+SCHEMA_VERSION = 16
 
 
 class DB:
@@ -401,6 +420,12 @@ class DB:
             self._migrate_v12()
         if version < 13:
             self._migrate_v13()
+        if version < 14:
+            self._migrate_v14()
+        if version < 15:
+            self._migrate_v15()
+        if version < 16:
+            self._migrate_v16()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -417,6 +442,7 @@ class DB:
     def _probe_fts(self) -> bool:
         try:
             self.conn.execute("SELECT 1 FROM messages_fts LIMIT 1")
+            self.conn.execute("SELECT 1 FROM entities_fts LIMIT 1")
         except sqlite3.OperationalError:
             return False
         return True
@@ -660,6 +686,38 @@ class DB:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(messages)")}
         if "via" not in cols:
             self.conn.execute("ALTER TABLE messages ADD COLUMN via TEXT")
+
+    def _migrate_v14(self) -> None:
+        try:
+            self.conn.executescript(ENTITIES_FTS_SCHEMA)
+            self.conn.execute("DELETE FROM entities_fts")
+            self.conn.execute(
+                "INSERT INTO entities_fts(rowid, entity_id, title, body) "
+                "SELECT id, id, title, COALESCE(body, '') FROM entities")
+        except sqlite3.OperationalError:
+            self.fts = False
+
+    def _migrate_v15(self) -> None:
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS entity_vec("
+            "entity_id INTEGER PRIMARY KEY, model TEXT, dim INTEGER, "
+            "vec BLOB, updated_ts INTEGER)")
+
+    def _migrate_v16(self) -> None:
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS memory_candidates("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "new_entity_id INTEGER NOT NULL, "
+            "candidate_entity_id INTEGER NOT NULL, "
+            "signal TEXT, score REAL, quote TEXT, chat_id INTEGER, msg_id INTEGER, "
+            "status TEXT NOT NULL DEFAULT 'pending', "
+            "created_ts INTEGER, decided_ts INTEGER, decided_by TEXT)")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_memcand "
+            "ON memory_candidates(new_entity_id, candidate_entity_id)")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_memcand_status "
+            "ON memory_candidates(status)")
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 

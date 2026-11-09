@@ -496,6 +496,82 @@ def test_via_migration(tmp: Path) -> None:
     check(kept == 1, "v12->v13: строки messages сохранены", str(kept))
 
 
+def test_memory_migrations(tmp: Path) -> None:
+    print("=== миграции v14/v15/v16: entities_fts, entity_vec, memory_candidates ===")
+    p = tmp / "memory.sqlite"
+    with DB(p) as db:
+        tables = {r[0] for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        triggers = {r[0] for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'")}
+        mc_idx = {r[1] for r in db.conn.execute("PRAGMA index_list(memory_candidates)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check("entities_fts" in tables, "fresh: entities_fts создана", str(sorted(tables)))
+    check({"trg_ent_ai", "trg_ent_ad", "trg_ent_au"} <= triggers,
+          "fresh: триггеры entities_fts созданы", str(sorted(triggers)))
+    check("entity_vec" in tables, "fresh: entity_vec создана")
+    check("memory_candidates" in tables, "fresh: memory_candidates создана")
+    check({"ux_memcand", "ix_memcand_status"} <= mc_idx,
+          "fresh: индексы memory_candidates созданы", str(sorted(mc_idx)))
+    check(uv == SCHEMA_VERSION, "fresh: user_version = SCHEMA_VERSION", str(uv))
+
+    p2 = tmp / "memory_backfill.sqlite"
+    with DB(p2) as db:
+        db.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, body, status, "
+            "created_ts) VALUES('services', -1020, 1, 'service', 'Старый сервис', "
+            "'тело', 'open', 1)")
+        db.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, created_ts) "
+            "VALUES('services', -1020, 1, 'service', 'Без тела', 'open', 1)")
+        db.conn.commit()
+    raw = sqlite3.connect(str(p2))
+    raw.execute("DROP TABLE entities_fts")
+    raw.execute("PRAGMA user_version = 13")
+    raw.commit()
+    raw.close()
+    with DB(p2) as db:
+        cnt = db.conn.execute("SELECT COUNT(*) FROM entities_fts").fetchone()[0]
+        hit = db.conn.execute(
+            "SELECT COUNT(*) FROM entities_fts WHERE entities_fts MATCH 'сервис'").fetchone()[0]
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check(cnt == 2, "v13->v14: backfill проиндексировал существующие сущности", str(cnt))
+    check(hit == 1, "v13->v14: backfill ищется по title", str(hit))
+    check(uv == SCHEMA_VERSION, "v13->v14: user_version поднят", str(uv))
+
+    p3 = tmp / "memory_merge.sqlite"
+    with DB(p3) as db:
+        db.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, body, status, "
+            "created_ts, updated_ts) VALUES('services', -1021, 1, 'service', 'Дубль', "
+            "'тело кипера', 'open', 1, 1)")
+        keeper = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, body, status, "
+            "created_ts, updated_ts) VALUES('services', -1022, 1, 'service', 'Дубль', "
+            "'тело лузера', 'open', 2, 2)")
+        loser = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.conn.commit()
+        before = db.conn.execute("SELECT COUNT(*) FROM entities_fts").fetchone()[0]
+        db.merge_entities(keeper, [loser], "test", 100)
+        db.conn.commit()
+        keeper_row = db.conn.execute(
+            "SELECT COUNT(*) FROM entities_fts WHERE rowid=?", (keeper,)).fetchone()[0]
+        loser_row = db.conn.execute(
+            "SELECT COUNT(*) FROM entities_fts WHERE rowid=?", (loser,)).fetchone()[0]
+        total = db.conn.execute("SELECT COUNT(*) FROM entities_fts").fetchone()[0]
+    check(before == 2, "merge: обе сущности проиндексированы до слияния", str(before))
+    check(keeper_row == 1, "merge: строка кипера осталась в entities_fts", str(keeper_row))
+    check(loser_row == 0, "merge: строка лузера вычищена из entities_fts", str(loser_row))
+    check(total == 1, "merge: в entities_fts ровно одна строка", str(total))
+
+    with DB(p3) as db:
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+        total2 = db.conn.execute("SELECT COUNT(*) FROM entities_fts").fetchone()[0]
+    check(uv == SCHEMA_VERSION and total2 == 1,
+          "reopen: идемпотентно, entities_fts не дублируется", f"{uv}/{total2}")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_db_core_"))
     try:
@@ -511,6 +587,7 @@ def main() -> int:
         test_actor_migration(tmp)
         test_entity_links_migration(tmp)
         test_via_migration(tmp)
+        test_memory_migrations(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()
