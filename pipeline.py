@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Автономный конвейер: sync (watch) -> media -> extract -> alerts -> fuzzy -> export -> digest -> monitor.
+"""Автономный конвейер: sync (watch) -> bot -> media -> extract -> shiftwatch -> alerts -> fuzzy -> export -> digest -> monitor.
 
     python3 pipeline.py                      # полный прогон по watch-листу
     python3 pipeline.py --pack services      # один пакет извлечения
@@ -33,6 +33,7 @@ from env import load_env
 
 load_env()
 
+import bot_ingest as bot_ingest_mod
 import digest as digest_mod
 import entity_alerts as entity_alerts_mod
 import export as export_mod
@@ -40,6 +41,7 @@ import extract as extract_mod
 import fuzzy_dedup as fuzzy_mod
 import monitor as monitor_mod
 import proclock
+import shiftwatch as shiftwatch_mod
 import sync as sync_mod
 from db import DB
 
@@ -94,7 +96,8 @@ async def _call_step(fn, *args, **kwargs):
 async def run(db_path: str = DB_PATH, pack_id: str | None = None,
               days_ahead: int = 7, send: bool = False, skip_sync: bool = False,
               skip_fuzzy: bool = False, skip_export: bool = False,
-              skip_media: bool = False, client=None, until_done: bool = True,
+              skip_media: bool = False, skip_bot: bool = False,
+              skip_shiftwatch: bool = False, client=None, until_done: bool = True,
               acquire_lock: bool = True) -> dict:
     lock = None
     if acquire_lock:
@@ -115,6 +118,22 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
             }
         except Exception as exc:
             report["sync"] = _step_err(exc, budget)
+    if not skip_bot:
+        if os.environ.get("TG_BOT_TOKEN"):
+            try:
+                bi = await asyncio.wait_for(
+                    _call_step(bot_ingest_mod.run, db_path, once=True),
+                    timeout=budget)
+                report["bot"] = {"ok": bool(bi.get("ok")),
+                                 "handled": bi.get("handled"),
+                                 "offset": bi.get("offset")}
+                if not bi.get("ok"):
+                    report["bot"]["error"] = bi.get("error")
+            except Exception as exc:
+                report["bot"] = _step_err(exc, budget)
+        else:
+            report["bot"] = {"ok": True, "skipped": True,
+                             "reason": "TG_BOT_TOKEN не задан"}
     if not skip_media:
         try:
             med = await asyncio.wait_for(
@@ -135,6 +154,16 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         }
     except Exception as exc:
         report["extract"] = _step_err(exc, budget)
+    if not skip_shiftwatch:
+        try:
+            sw = await asyncio.wait_for(
+                _call_step(shiftwatch_mod.run, db_path), timeout=budget)
+            report["shiftwatch"] = {"ok": bool(sw.get("ok")),
+                                    "created": sw.get("created"),
+                                    "considered": sw.get("considered"),
+                                    "skipped": sw.get("skipped")}
+        except Exception as exc:
+            report["shiftwatch"] = _step_err(exc, budget)
     try:
         al = await asyncio.wait_for(
             _call_step(entity_alerts_mod.run, db_path, send=send),
@@ -218,8 +247,9 @@ def main() -> None:
     ap.add_argument("--send", action="store_true",
                     help="отправить сводку в Saved Messages (нужен TG_ALLOW_SEND=1)")
     ap.add_argument("--skip", action="append", default=[],
-                    choices=["sync", "media", "fuzzy", "export"],
-                    metavar="STEP", help="пропустить шаг (sync/media/fuzzy/export)")
+                    choices=["sync", "bot", "media", "shiftwatch", "fuzzy", "export"],
+                    metavar="STEP",
+                    help="пропустить шаг (sync/bot/media/shiftwatch/fuzzy/export)")
     ap.add_argument("--loop", type=int, metavar="MIN",
                     help="демон: повторять цикл каждые N минут (cron не нужен)")
     args = ap.parse_args()
@@ -229,7 +259,9 @@ def main() -> None:
         return
     report = asyncio.run(run(args.db, pack_id=args.pack, days_ahead=args.days_ahead,
                              send=args.send, skip_sync="sync" in args.skip,
+                             skip_bot="bot" in args.skip,
                              skip_media="media" in args.skip,
+                             skip_shiftwatch="shiftwatch" in args.skip,
                              skip_fuzzy="fuzzy" in args.skip,
                              skip_export="export" in args.skip))
     if report.get("already_running"):
