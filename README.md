@@ -48,6 +48,7 @@ python3 ui.py                 # http://127.0.0.1:8899
 без постоянных трёх колонок переписки.
 
 - таблицы с фильтрами проекта, ответственного, статуса и срока, сортировкой и пагинацией;
+- статус «К распределению» (`backlog`) и вид «Согласование» (`approval`) доступны в фильтрах и правке карточки;
 - единый поиск по сущностям и сообщениям (FTS5 с безопасным LIKE-фолбэком),
   фильтры периода/проекта/человека, история поиска и локальные сохранённые представления;
 - ручное исправление полей и проверка с аудитом; устаревшая версия карточки
@@ -286,6 +287,23 @@ id темы — в `reply_to.reply_to_msg_id`. Сообщения без `reply_
 offset_topic, limit)`. Обёртки в Telethon нет, а в `functions.channels` этого
 метода нет вообще (там только `ToggleForumRequest`) — запрос делается напрямую.
 
+## Ингест через Bot API
+
+```bash
+TG_BOT_TOKEN=123456:ABC... python3 bot_ingest.py
+```
+
+Бот, добавленный в группы, читается через Telegram Bot API в тот же локальный
+индекс, что и `sync.py`: сообщения ложатся в общую таблицу `messages` с
+пометкой `via='bot'` (у user-пути `via` пусто и трактуется как `'user'`), так
+что оба пути сходятся в одной базе. Модуль long-poll'ит `getUpdates`, курсор
+апдейтов — `meta:bot:offset`; тема берётся из `message_thread_id` (иначе
+General=1), service-сообщения и дубли пропускаются. `TG_BOT_URL` (дефолт
+`https://api.telegram.org`) переопределяет адрес API. В Telegram модуль ничего
+не отправляет — только читает, поэтому гейт `TG_ALLOW_*` не нужен (та же
+категория, что `sync.py`). Без `TG_BOT_TOKEN` возвращает структурную ошибку и
+не делает сетевых запросов. В конвейере шаг `bot` идёт сразу после `sync`.
+
 ## Глобальный поиск: найти новые каналы по слову
 
 ```bash
@@ -493,13 +511,24 @@ evidence отклоняется, причины отказа пишутся в `
 (`entities`, `entity_events`, `extraction_runs`), сбой провайдера курсор не
 двигает. Срок из текста: если провайдер не дал `due_ts`, детерминированный
 fallback в `extract.py` разбирает `due_text` — абсолютные даты (`20.10.2026`,
-`20.10.26`), русские названия месяцев («19 августа»), «N числа», относительные
+`20.10.26`), русские названия месяцев («19 августа»), «N числа», русские дни
+недели и аббревиатуры («к пятнице», «до среды», «в понедельник», пн/вт/ср/чт/пт/сб/вс —
+ближайшее вхождение строго после даты сообщения), относительные
 («сегодня»/«завтра»/«послезавтра», «через N дней/недель/месяц») и ISO-даты —
 всё резолвится по дате сообщения; срок ставится на конец дня (23:59:59 UTC),
 а не на полночь. Update без явного `due_ts` больше не затирает ранее
 выставленный точный срок.
 `supersedes`: решение new/update может сослаться на открытую сущность того же
-scope — цель закрывается, в `entity_events` пишется строка op='supersede'. Валидных операций больше 50 за прогон: применяются первые по позиции
+scope — цель закрывается, в `entity_events` пишется строка op='supersede'.
+Операция `link` фиксирует зависимость: `entity_id` (предпосылка) блокирует
+`blocks` (зависимую сущность) — пишется строка `entity_links`
+(`link_kind='blocks'`) и событие op='link'; оба id проверяются на скоуп и
+открытость, как у других операций. Вид `approval` (согласование/договорённость)
+добавлен в пакет `construction`. На каждом событии `entity_events` пишется
+`actor` — автор сообщения-доказательства, разрешённый через справочник людей
+(`people.resolve_owner`) в отображаемое имя, иначе сырой `sender_name`;
+извлечённый `owner` тоже нормализуется к `display_name` при совпадении со
+справочником. Валидных операций больше 50 за прогон: применяются первые по позиции
 evidence, остаток фиксируется как `ops_overflow` (status=partial), а курсор
 остаётся до первой отброшенной — следующий прогон дочитает без потерь.
 Батч, отклонённый контент-фильтром провайдера (`data_inspection_failed`),
@@ -516,12 +545,28 @@ run `status='filtered'`, остальные сообщения обрабаты�
 `python3 watch.py project --chat @mygroup --topic 789 --project "Объекд"`.
 Проект у строки watch — сущности наследуют его от темы.
 
+## Контроль срыва сроков
+
+```bash
+python3 shiftwatch.py                 # dry-run: показать, что было бы создано
+python3 shiftwatch.py --apply         # создать контроллеры
+python3 shiftwatch.py --days 14 --recheck-days 3 --owner "Пётр"
+```
+
+Скан `entity_events` на отложенные сроки (`field='due_ts'`, `from_val < to_val`)
+по открытым сущностям за окно `--days` (дефолт 7): на каждую такую сущность
+заводится одна открытая задача «Контрольно уточнить: <название>» со сроком
+`now + recheck_days` (дефолт 2 дня). Дедуп — по `(pack, sha1("controller|<entity_id>"))`:
+повторный прогон дубликатов не даёт. Это локальная производная проекция: в
+Telegram ничего не пишется, гейт не нужен. В конвейере шаг `shiftwatch` идёт
+сразу после `extract`.
+
 ## Автономный конвейер
 
 ```bash
-python3 pipeline.py                  # sync -> media -> extract -> alerts -> fuzzy -> export -> digest -> monitor
+python3 pipeline.py                  # sync -> bot -> media -> extract -> shiftwatch -> alerts -> fuzzy -> export -> digest -> monitor
 python3 pipeline.py --pack services  # один пакет извлечения
-python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram (--skip media/fuzzy/export тоже можно)
+python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram (--skip bot/media/shiftwatch/fuzzy/export тоже можно)
 python3 pipeline.py --days-ahead 7 --send
 python3 pipeline.py --loop 30 --send # демон: полный цикл каждые 30 минут
 ```
@@ -533,8 +578,11 @@ python3 pipeline.py --loop 30 --send # демон: полный цикл каж�
 до конца, в `--loop` — по окну за цикл (курсоры продолжают следующий).
 `run()` захватывает локи `proclock`, поэтому разовый запуск не гоняется
 параллельно с loop-демоном (лок занят — выход 0 «уже запущен»). В отчёте
-`report["extract"]` — сводные `ops_rejected`/`ops_overflow`. Сразу после extract
-шаг `alerts` шлёт новые сущности (виды из `TG_ENTITY_ALERT_KINDS`, дефолт
+`report["extract"]` — сводные `ops_rejected`/`ops_overflow`. Сразу после sync
+шаг `bot` делает один `getUpdates`-опрос, если задан `TG_BOT_TOKEN` (иначе
+тихий пропуск). Сразу после extract шаг `shiftwatch` заводит контроллеры по
+сдвинутым срокам, затем `alerts` шлёт новые сущности (виды из
+`TG_ENTITY_ALERT_KINDS`, дефолт
 trial,question) в Saved Messages — гейт `TG_ENTITY_ALERTS`, курсор
 `entity_alerts:cursor` двигается только после реальной отправки. После извлечения `fuzzy` сливает дубли
 сущностей по нормализованному title (`FUZZY_MAX_MERGES`, дефолт 500), а
@@ -550,7 +598,7 @@ trial,question) в Saved Messages — гейт `TG_ENTITY_ALERTS`, курсор
 
 | Компонент | Роль | Запуск |
 |---|---|---|
-| `pipeline.py --loop 30` | полный цикл каждые 30 минут (sync → media → extract → fuzzy → export → digest → monitor) | при входе в систему: `tg-agent.cmd` в папке Startup |
+| `pipeline.py --loop 30` | полный цикл каждые 30 минут (sync → bot → media → extract → shiftwatch → fuzzy → export → digest → monitor) | при входе в систему: `tg-agent.cmd` в папке Startup |
 | `live.py` | мгновенная подхватка новых сообщений в индекс | тот же `.cmd` |
 | задача `tg-agent-morning` (09:00) | утренняя сводка в Saved Messages (`pipeline.py --skip sync --skip media --send`) | Task Scheduler |
 
@@ -588,7 +636,11 @@ python3 monitor.py --send                # отправить сводку в Sa
 чате) со временем появления: утренний
 `pipeline.py --loop 1440 --send` превращается в ежедневную сводку о триалах.
 Есть блок «зависшие вопросы» — открытые question старше
-`MONITOR_QUESTION_DAYS` (дефолт 3). Сканы ограничены по объёму. `TG_ME_OWNERS`
+`MONITOR_QUESTION_DAYS` (дефолт 3). Добавлены строки «изменения за Nч: закрыто
+X, перенесено сроков Y» (закрытые сущности и отложенные сроки из
+`entity_events`) и «к распределению: X, без срока: Y» (открытые
+`status='backlog'` и открытые actionable-сущности без `due_ts`). Сканы
+ограничены по объёму. `TG_ME_OWNERS`
 (имена через запятую) добавляет блок «моё» — открытые сущности, чей владелец
 совпадает с одним из имён.
 `--send` дедупится по хэшу отчёта (`meta['monitor:last_hash']`): одинаковая
@@ -719,7 +771,7 @@ version, schema, workspace-маршруты, MCP-спеки, runner). Ядро �
 python3 export.py                                  # JSONL рядом с базой
 python3 export.py --system file --out /tmp/export.jsonl
 python3 export.py --system 101                     # POST в 101 (нужны EXPORT_101_URL/TOKEN)
-python3 export.py --system notion                  # структурированная ошибка: нет API-доступа
+python3 export.py --system notion                  # POST/PATCH страниц в базу Notion (нужны NOTION_TOKEN/NOTION_DATABASE_ID)
 ```
 
 Выгружает сущности и их события во внешние системы. Путь file-провайдера:
@@ -741,7 +793,15 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 в `failed`), `external_id` из ответа (guid) пишется в `integrations.external_id`,
 курсор — только после 2xx; без кредов — структурированный `{"ok": false, "error": ...}`
 без исключения. Тела задач в сваггере 101 нет — дефолтный `EXPORT_101_MAP`
-консервативен и настраивается. `notion` остаётся заглушкой со словарём-ошибкой.
+консервативен и настраивается. `notion` — реальный REST-провайдер (stdlib
+urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создаются
+`POST /v1/pages`, обновляются `PATCH /v1/pages/{id}`; идемпотентность через
+`integrations.external_id`. Kinds — `NOTION_KINDS` (дефолт `task,promise,approval`),
+переименование полей — `NOTION_MAP` (дефолт
+`{"title":"Name","body":"Notes","due_ts":"Due","status":"Status","owner":"Owner"}`),
+версия API — `NOTION_API_VERSION` (дефолт `2026-03-11`), `NOTION_DRY=1` —
+показать без сети. 429/529 ретраятся с `Retry-After`, 4xx не ретраится; курсор
+двигается только после 2xx; без кредов — структурированная ошибка.
 
 ## Безопасность
 
@@ -807,6 +867,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | Файл | Роль |
 |---|---|
 | `sync.py` | Telethon → SQLite: инкрементальная синхронизация, бэкфилл чанками, папки, пины, подхват правок (`edited_ts`) |
+| `bot_ingest.py` | Ингест через Telegram Bot API в тот же индекс (`via='bot'`): long-poll `getUpdates`, курсор `meta:bot:offset`, тема из `message_thread_id` (иначе General); read-only к Telegram, без гейта |
 | `search.py` | Глобальный поиск Telegram: публичные каналы/группы/юзеры по ключевому слову |
 | `checklinks.py` | Статус инвайт-ссылок (checkChatInvite без вступления): CLI + кэш `invite_status`, терминальные expired/invalid, перепроверка живых не чаще раза в N дней, FloodWait-пacing |
 | `checkmega.py` | Статус mega.nz-ссылок (файл/папка через публичный web-API): CLI + кэш `link_status` (host-колонка под другие хосты), терминальные dead/blocked (-9/-16), перепроверка живых не чаще раза в N дней, без телеграм-сессии |
@@ -815,23 +876,24 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `manage.py` | Создание и управление чатами: группы, каналы, форумы, настройки, участники (гейт `TG_ALLOW_MANAGE=1`) |
 | `announce.py` | Релиз-посты: баннер PIL, шаблон YAML, readme тем из org.yaml, черновик из CHANGELOG; гейт `TG_ALLOW_MANAGE=1` |
 | `org.yaml` | Реестр продуктов WhiteBite: репо, ссылки, эмодзи, разметка тем |
-| `pipeline.py` | Автономный конвейер: sync → media → extract → alerts → fuzzy → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
-| `db.py` | Индекс: схема с миграциями по `PRAGMA user_version`, FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
+| `pipeline.py` | Автономный конвейер: sync → bot → media → extract → shiftwatch → alerts → fuzzy → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
+| `db.py` | Индекс: схема с миграциями по `PRAGMA user_version` (v11 `entity_events.actor`, v12 `entity_links`, v13 `messages.via`), FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
 | `server.py` | MCP-сервер (stdio): 16 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
 | `live.py` | Новые сообщения в реальном времени (`events.NewMessage`), правки и удаления (`MessageEdited` / `MessageDeleted`) |
 | `alerts.py` | Живые алерты live-демона: слова-триггеры и упоминания → Saved Messages (гейт `TG_ALERTS` + `TG_ALLOW_SEND`, cooldown на пару чат+правило); правила читаются из UI (`meta['ws:alerts']`) на лету; CLI `--status`/`--text` |
 | `entity_alerts.py` | Сущностные алерты после extract: новые сущности (виды из `TG_ENTITY_ALERT_KINDS`) → Saved Messages (гейт `TG_ENTITY_ALERTS`, курсор `entity_alerts:cursor`) |
 | `digest.py` | Дайджесты: stub или openai-совместимый LLM |
-| `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт, due_text→due_ts fallback (ru-месяцы, относительные, конец дня), supersedes, причины отказа в `rejects_json`, перепрогон dirty |
-| `packs/` | Декларативные пакеты извлечения: `construction` (decision/task/promise/question), `services` (service/trial/promo); scope-фильтры (`require_match`, `exclude_project_regex`) и `dedup_scope` |
-| `monitor.py` | Сводка просроченного и дедлайнов по проектам, зависшие вопросы; `--send` через `notify.py`, дедуп по хэшу отчёта |
+| `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт, due_text→due_ts fallback (ru-месяцы, дни недели, относительные, конец дня), supersedes, op `link` (зависимость blocks), `actor` на каждом событии, авто-резолв owner по справочнику людей, причины отказа в `rejects_json`, перепрогон dirty |
+| `packs/` | Декларативные пакеты извлечения: `construction` (decision/task/promise/question/approval), `services` (service/trial/promo); scope-фильтры (`require_match`, `exclude_project_regex`) и `dedup_scope` |
+| `monitor.py` | Сводка просроченного и дедлайнов по проектам, зависшие вопросы, блоки «изменения за Nч» (закрыто/перенесено сроков) и «к распределению» (backlog + без срока); `--send` через `notify.py`, дедуп по хэшу отчёта |
+| `shiftwatch.py` | Контроль срыва сроков: скан `entity_events` на отложенные `due_ts` по открытым сущностям, авто-создание одной задачи «Контрольно уточнить: …» на сущность (дедуп по `controller|<entity_id>`); локальная проекция, без гейта |
 | `notify.py` | Уведомления в Saved Messages; пишущий модуль, гейт `TG_ALLOW_SEND=1` |
 | `media.py` | Очередь транскрипции аудио (voice + audio-документы): гейт `is_transcribable` на инджесте, рефетч и скачивание из Telegram, гейты до скачивания, `--sweep-pending`, qwen3-asr-flash (stub/openai) |
 | `modules/` | Реестр функциональных модулей (контракт: id, version, schema, workspace-маршруты, MCP-спеки, runner; `TG_MODULES_OFF`); `modules/downloads.py` — скачивание медиа с дедупом |
 | `downloads.py` | CLI модуля скачивания: план, прогон, статус, файлы, подборки, управление заданием |
 | `jobs.py` | Сохраняемые задания: `jobs`/`job_items`, claim с защитой от гонок, pause/resume/cancel, retry упавших, отчёт по пунктам |
 | `sources.py` | Выбор источников: `watch`/`all`/`folder:`/`collection:`/`chat:` (объединение через запятую) и подборки каналов |
-| `export.py` | Выгрузка сущностей во внешние системы (file / 101 — REST-задачи с JWT sign-in+refresh, id-курсор, ретраи, upsert по guid; notion — заглушка-ошибка) |
+| `export.py` | Выгрузка сущностей во внешние системы (file / 101 — REST-задачи с JWT sign-in+refresh, id-курсор, ретраи, upsert по guid; notion — REST-страницы через `POST /v1/pages` и `PATCH /v1/pages/{id}`, идемпотентность по `integrations.external_id`) |
 | `services_report.py` | Каталог сервисов из сущностей: rollup по dedup_key, `--days/--query/--top/--hide-closed` |
 | `fuzzy_dedup.py` | Maintenance-проход: слияние дублей сущностей по нормализованному title (richer-keeper, cap, идемпотентный) |
 | `proclock.py` | Lockfile одиночного инстанса для демонов (pipeline --loop, live.py) |
@@ -846,7 +908,7 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 1355 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс пятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1520 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс восемнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -862,6 +924,9 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 | `tests_question_signals.py` | сигналы по вопросам: ответ/реакции не закрывают вопрос (запускается из `test_offline.py`) |
 | `tests_announce.py` | Офлайн-тесты announce.py: рендер баннера, сборка текста, post с отправкой на фейк-клиенте, readme из org.yaml, draft из CHANGELOG, гейт (запускается из `test_offline.py`) |
 | `tests_downloads.py` | Офлайн-тесты downloads-модуля: дедуп doc-id/sha256 + алиасы, forward-режим (дедуп по файлу и адресату, FloodWait-пауза, запрет пересылки), resume, пауза/отмена, подборки, реестр и `TG_MODULES_OFF`, MCP-гейты `TG_ALLOW_DOWNLOADS`/`TG_ALLOW_FORWARDS`, фоновый загрузчик (запускается из `test_offline.py`) |
+| `tests_shiftwatch.py` | контроль срыва сроков: скан отложенных `due_ts`, дедуп контроллеров, dry-run (запускается из `test_offline.py`) |
+| `tests_bot_ingest.py` | Bot-API ингест: `getUpdates` на фейк-транспорте, `via='bot'`, курсор, service-сообщения и дубли (запускается из `test_offline.py`) |
+| `tests_export_notion.py` | notion-провайдер против фейк-сервера: create/PATCH, идемпотентность по `external_id`, ретраи 429/529, без кредов (запускается из `test_offline.py`) |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -910,13 +975,14 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **1355 проверок: свои проверки плюс пятнадцать suites
+`python3 test_offline.py` — **1520 проверок: свои проверки плюс восемнадцать suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
 `tests_watchdog.py`, `tests_ui_projects.py`, `tests_manage.py`,
 `tests_announce.py`, `tests_workspace_api.py`, `tests_question_signals.py`,
-`tests_downloads.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
+`tests_downloads.py`, `tests_shiftwatch.py`, `tests_bot_ingest.py`,
+`tests_export_notion.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
   `--chat @канал`, `--folder`, `--watched`, `--dry-run`, раскладка по темам
@@ -1024,8 +1090,15 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
   против локального фейк-сервера (POST, тело, id-курсор по `entity_events.id`,
   ретраи на 5xx, continue-on-error со списком `failed`, `Idempotency-Key`,
   запись `external_id`, курсор только после 2xx, ошибка
-  без кредов); notion — словарь-ошибка без исключения. Живой пуш в 101 не
+  без кредов); notion — реальный HTTP-провайдер, проверен против фейк-сервера
+  (create/PATCH, идемпотентность по `external_id`, ретраи 429/529, без кредов —
+  структурная ошибка). Живой пуш в 101 не
   проверялся (нет кредов/контракта)
+- `shiftwatch` (`tests_shiftwatch.py`): скан отложенных `due_ts` по открытым
+  сущностям, дедуп контроллеров по `controller|<entity_id>`, dry-run не пишет;
+  `bot_ingest` (`tests_bot_ingest.py`): `getUpdates` на фейк-транспорте,
+  `via='bot'`, курсор `meta:bot:offset`, service-сообщения и дубли
+  пропускаются, без токена — структурная ошибка без сети
 - **topic_id канонически NOT NULL** (=1 General): вставка без темы и миграция
   старых баз с NULL, запросы идут по индексу `ix_msg_chat_topic` (EXPLAIN PLAN
   проверяется), watch/history/search/stats видят то же
@@ -1065,12 +1138,14 @@ REST-провайдер (stdlib urllib): `EXPORT_101_URL` (https://app.101-group
 - пакет `services`: триал с due_text через dedup_hint-схему, другая
   формулировка с тем же hint — дубликат; stub создаёт service/trial/promo
 - семантика паков (`tests_packs_semantics.py`): детерминированный `due_text` →
-  `due_ts` (абсолютные даты, ru-месяцы, относительные, ISO — по дате сообщения,
-  конец дня вместо полуночи), no-downgrade точного срока при update; изоляция
+  `due_ts` (абсолютные даты, ru-месяцы, дни недели, относительные, ISO — по дате
+  сообщения, конец дня вместо полуночи), no-downgrade точного срока при update;
+  изоляция
   construction от проекта «сервисы» через `require_match` + `exclude_project_regex`;
   `dedup_scope` project/global; схемы пакетов: evidence `minItems=1`, без
   `confidence`; supersedes:
-  цель закрывается, событие op='supersede' в `entity_events`. Качество и
+  цель закрывается, событие op='supersede' в `entity_events`; op `link` пишет
+  `entity_links` и событие op='link', `actor` на каждом событии. Качество и
   частота извлечения на реальных чатах не проверены: rate `promise` и реальная
   заполняемость due/supersedes ждут живого прогона `EXTRACT_PROVIDER=openai`
 - `pipeline.run`: sync→extract→digest→monitor на фейк-клиенте (10 сообщений,

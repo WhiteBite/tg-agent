@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.19.0 — 2026-11-09
+Зависимости, авторство и контроль сроков; Bot-API ингест и реальный Notion:
+- `db.py`: три идемпотентные миграции — v11 `entity_events.actor` (кто сделал изменение), v12 таблица `entity_links` (зависимости, уникальный индекс `(from_entity_id, to_entity_id, link_kind)`), v13 `messages.via` (провенанс ингеста: `user` из Telethon, `bot` из Bot API, NULL = `user`); `SCHEMA_VERSION = 13`.
+- `extract.py`/`packs/construction.py`: вид `approval` (согласование/договорённость) и операция `link` — `entity_id` (предпосылка) блокирует `blocks` (зависимую сущность), пишется строка `entity_links` (`link_kind='blocks'`) и событие op='link', оба id проверяются на скоуп и открытость; `actor` пишется на каждом событии `entity_events` (автор сообщения-доказательства через `people.resolve_owner`, иначе сырой `sender_name`); извлечённый `owner` нормализуется к `display_name` при совпадении со справочником; `_parse_due_text` понимает русские дни недели и аббревиатуры, включая предложные формы («к пятнице», «до среды», «в понедельник», пн/вт/ср/чт/пт/сб/вс — ближайшее вхождение строго после даты сообщения, конец дня).
+- `people.py`: `load_people(db)` и `resolve_owner(db, name_or_id)` — сопоставление по `display_name` (casefold), затем по `telegram_sender_ids`.
+- `workspace_store.py`/`ui.py`/`ui_assets/`: статус `backlog` («К распределению») и вид `approval` («Согласование») в доменных перечислениях, валидации правки, словарях меток и обоих `<select>` статуса.
+- `monitor.py`: строки «изменения за Nч: закрыто X, перенесено сроков Y» (закрытые сущности и отложенные сроки из `entity_events`) и «к распределению: X, без срока: Y» (открытые `status='backlog'` и открытые actionable-сущности без `due_ts`).
+- `export.py`: провайдер `notion` стал реальным (был заглушкой-ошибкой) — `POST /v1/pages` и `PATCH /v1/pages/{id}`, идемпотентность через `integrations.external_id`, курсор только после 2xx, 429/529 ретраятся с `Retry-After`, 4xx не ретраится; env `NOTION_TOKEN`/`NOTION_DATABASE_ID`/`NOTION_MAP`/`NOTION_KINDS`/`NOTION_API_VERSION`/`NOTION_DRY`/`NOTION_RETRIES`/`NOTION_BACKOFF`/`NOTION_TIMEOUT`.
+- Новый `shiftwatch.py`: скан `entity_events` на отложенные сроки (`field='due_ts'`, `from_val < to_val`) по открытым сущностям за окно, авто-создание одной задачи «Контрольно уточнить: …» на сущность (дедуп по `(pack, sha1("controller|<entity_id>"))`), срок `now + recheck_days`; CLI `--apply`/`--days`/`--recheck-days`/`--owner`; локальная проекция, без гейта.
+- Новый `bot_ingest.py`: ингест через Telegram Bot API в тот же индекс (`via='bot'`), long-poll `getUpdates`, курсор `meta:bot:offset`, тема из `message_thread_id` (иначе General); read-only к Telegram, без гейта; без `TG_BOT_TOKEN` — структурная ошибка без сети.
+- `pipeline.py`: шаги `bot` (после sync, один опрос при заданном `TG_BOT_TOKEN`) и `shiftwatch` (после extract, перед alerts); `--skip bot`/`--skip shiftwatch`; порядок sync → bot → media → extract → shiftwatch → alerts → fuzzy → export → digest → monitor.
+- Тесты: 15 → 18 suites (`tests_shiftwatch.py`, `tests_bot_ingest.py`, `tests_export_notion.py`), проверки 1355 → 1520; новых MCP-инструментов нет (базовая поверхность — 17).
+
 ## 0.18.0 — 2026-11-08
 Дрейф и мелочи покрытия MCP/CLI/UI:
 - `server.py`: новый read-only инструмент `tg_transcripts` — транскрипции аудио из `media_assets` (фильтры chat_id/status/query); базовый набор стал 17 инструментов (обновлены счётчики в `test_offline`/`tests_manage`/`tests_downloads`/`tests_announce`).

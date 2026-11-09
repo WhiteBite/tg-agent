@@ -48,5 +48,13 @@
 `TG_DOWNLOADS_DIR` / `TG_DOWNLOADS_MAX_MB`, `TG_EXPORT_PATH` / `EXPORT_101_*`,
 `TG_NOTIFY_ROUTES` / `TG_ME_OWNERS` / `MONITOR_QUESTION_DAYS`.
 
+`TG_BOT_TOKEN` / `TG_BOT_URL` — ингест через Telegram Bot API (`bot_ingest.py`):
+читает Telegram в локальный индекс, в Telegram не пишет, поэтому это не гейт
+`TG_ALLOW_*`, а та же категория, что `sync.py`. `NOTION_*` (`NOTION_TOKEN`,
+`NOTION_DATABASE_ID`, `NOTION_MAP`, `NOTION_KINDS`, `NOTION_API_VERSION`,
+`NOTION_DRY`, `NOTION_RETRIES`, `NOTION_BACKOFF`, `NOTION_TIMEOUT`) — внешняя
+интеграция экспорта (`export.py --system notion`), тоже не гейт `TG_ALLOW_*`.
+`shiftwatch.py` пишет только локальную БД (производная проекция), гейт не нужен.
+
 Добавляешь новый гейт — впиши строку в первую таблицу и обнови счётчики
 инструментов в тестах (см. `AGENTS.md`).
