@@ -955,8 +955,8 @@ def test_mcp_gate() -> None:
     proc = _start(_mcp_env(TG_DB=str(db_path), TG_ALLOW_DOWNLOADS="1"))
     try:
         names = _init(proc)
-        check(dl_names <= names and len(names) == 20,
-              "MCP downloads: TG_ALLOW_DOWNLOADS=1 -> 17 базовых + 3 = 20",
+        check(dl_names <= names and len(names) == 22,
+              "MCP downloads: TG_ALLOW_DOWNLOADS=1 -> 19 базовых + 3 = 22",
               str(sorted(n for n in names if n.startswith("tg_downloads_"))))
         no_confirm = _call(proc, "tg_downloads_run", {"sources": "watch"}, 3)
         check(no_confirm.get("error") and "confirm" in no_confirm["error"],
@@ -979,7 +979,7 @@ def test_mcp_gate() -> None:
               str(bad)[:90])
         _rpc(proc, {"jsonrpc": "2.0", "id": 8, "method": "tools/list"})
         alive = _wait_for(proc, lambda m: m.get("id") == 8)
-        check(len(alive.get("result", {}).get("tools", [])) == 20,
+        check(len(alive.get("result", {}).get("tools", [])) == 22,
               "MCP downloads: сервер жив после вызовов")
     finally:
         _stop(proc)
@@ -987,8 +987,8 @@ def test_mcp_gate() -> None:
     proc2 = _start(_mcp_env(TG_DB=str(db_path)))
     try:
         names2 = _init(proc2)
-        check(len(names2) == 17 and not any(n.startswith("tg_downloads_") for n in names2),
-              "MCP downloads: без флага 17 инструментов, tg_downloads_* нет",
+        check(len(names2) == 19 and not any(n.startswith("tg_downloads_") for n in names2),
+              "MCP downloads: без флага 19 инструментов, tg_downloads_* нет",
               str(sorted(n for n in names2 if n.startswith("tg_")))[:120])
     finally:
         _stop(proc2)
@@ -997,7 +997,7 @@ def test_mcp_gate() -> None:
                             TG_MODULES_OFF="downloads"))
     try:
         names3 = _init(proc3)
-        check(len(names3) == 17 and not any(n.startswith("tg_downloads_") for n in names3),
+        check(len(names3) == 19 and not any(n.startswith("tg_downloads_") for n in names3),
               "MCP downloads: TG_MODULES_OFF глушит модуль даже при гейте")
     finally:
         _stop(proc3)
@@ -1007,9 +1007,9 @@ def test_mcp_gate() -> None:
         names4 = _init(proc4)
         fwd_names = {"tg_downloads_forward", "tg_downloads_status",
                      "tg_downloads_collections"}
-        check(fwd_names <= names4 and len(names4) == 20
+        check(fwd_names <= names4 and len(names4) == 22
               and "tg_downloads_run" not in names4,
-              "MCP forwards: TG_ALLOW_FORWARDS=1 -> 17 + forward/status/collections",
+              "MCP forwards: TG_ALLOW_FORWARDS=1 -> 19 + forward/status/collections",
               str(sorted(n for n in names4 if n.startswith("tg_downloads_"))))
         no_confirm = _call(proc4, "tg_downloads_forward",
                            {"sources": "watch", "to": "saved"}, 9)
@@ -1037,8 +1037,8 @@ def test_mcp_gate() -> None:
                             TG_ALLOW_DOWNLOADS="1"))
     try:
         names5 = _init(proc5)
-        check(len(names5) == 21,
-              "MCP: оба гейта -> 16 базовых + 4 tg_downloads_* = 20",
+        check(len(names5) == 23,
+              "MCP: оба гейта -> 19 базовых + 4 tg_downloads_* = 23",
               str(len(names5)))
     finally:
         _stop(proc5)

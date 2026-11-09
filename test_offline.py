@@ -2448,9 +2448,10 @@ def test_mcp_server(db_path: Path) -> None:
         expected = {"tg_watch", "tg_new", "tg_read", "tg_find", "tg_stats",
                     "tg_mark_read", "tg_index_stats", "tg_links", "tg_topics",
                     "tg_digests", "tg_entities", "tg_entity", "tg_overdue",
-                    "tg_changes", "tg_project_brief", "tg_gaps", "tg_transcripts"}
-        check(expected <= names and len(names) == 17,
-              "MCP tools/list: все 17 инструментов на месте",
+                    "tg_changes", "tg_project_brief", "tg_gaps", "tg_transcripts",
+                    "tg_recall", "tg_memory_candidates"}
+        check(expected <= names and len(names) == 19,
+              "MCP tools/list: все 19 инструментов на месте",
               str(sorted(names)))
         check(not any(n.startswith(("send_", "tg_live")) for n in names),
               "MCP: без флагов нет ни отправки, ни живого доступа")
@@ -5748,7 +5749,7 @@ def main() -> int:
                   "tests_ui_projects", "tests_manage", "tests_announce",
                   "tests_workspace_api", "tests_question_signals",
                   "tests_downloads", "tests_shiftwatch", "tests_bot_ingest",
-                  "tests_export_notion"):
+                  "tests_export_notion", "tests_memory"):
         rc = subprocess.run([sys.executable, "-X", "utf8",
                              str(Path(__file__).parent / f"{suite}.py")],
                             cwd=str(Path(__file__).parent)).returncode

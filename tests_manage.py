@@ -1294,8 +1294,8 @@ def test_mcp_manage_tools(tmp: Path) -> None:
     proc = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_MANAGE="1"))
     try:
         names = _init(proc)
-        check(manage_names <= names and len(names) == 23,
-              "MCP manage: TG_ALLOW_MANAGE=1 -> 16 базовых + 6 tg_manage_* = 22",
+        check(manage_names <= names and len(names) == 25,
+              "MCP manage: TG_ALLOW_MANAGE=1 -> 19 базовых + 6 tg_manage_* = 25",
               str(sorted(names)))
         check(not any(n.startswith("tg_live_") for n in names),
               "MCP manage: без TG_ALLOW_LIVE живых инструментов нет")
@@ -1312,7 +1312,7 @@ def test_mcp_manage_tools(tmp: Path) -> None:
 
         _rpc(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
         alive = _wait_for(proc, lambda m: m.get("id") == 5)
-        check(len(alive.get("result", {}).get("tools", [])) == 23,
+        check(len(alive.get("result", {}).get("tools", [])) == 25,
               "MCP manage: сервер жив после ошибок manage-инструмента")
     finally:
         _stop(proc)
@@ -1320,8 +1320,8 @@ def test_mcp_manage_tools(tmp: Path) -> None:
     proc2 = _start(_mcp_env(TG_DB=str(db)))
     try:
         names2 = _init(proc2)
-        check(len(names2) == 17 and not any(n.startswith("tg_manage_") for n in names2),
-              "MCP manage: без флага 17 инструментов, tg_manage_* нет",
+        check(len(names2) == 19 and not any(n.startswith("tg_manage_") for n in names2),
+              "MCP manage: без флага 19 инструментов, tg_manage_* нет",
               str(sorted(n for n in names2 if n.startswith("tg_manage_"))))
     finally:
         _stop(proc2)
@@ -1329,8 +1329,8 @@ def test_mcp_manage_tools(tmp: Path) -> None:
     proc3 = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_LIVE="1", TG_ALLOW_MANAGE="1"))
     try:
         names3 = _init(proc3)
-        check(len(names3) == 30,
-              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 30 инструмента",
+        check(len(names3) == 32,
+              "MCP manage: TG_ALLOW_LIVE=1 + TG_ALLOW_MANAGE=1 -> 32 инструмента",
               str(sorted(names3)))
     finally:
         _stop(proc3)
@@ -1345,8 +1345,8 @@ def test_mcp_send_tool(tmp: Path) -> None:
     proc = _start(_mcp_env(TG_DB=str(db), TG_ALLOW_SEND="1"))
     try:
         names = _init(proc)
-        check("tg_send_message" in names and len(names) == 18,
-              "MCP send: TG_ALLOW_SEND=1 -> 16 базовых + tg_send_message = 17",
+        check("tg_send_message" in names and len(names) == 20,
+              "MCP send: TG_ALLOW_SEND=1 -> 19 базовых + tg_send_message = 20",
               str(sorted(n for n in names if n.startswith("tg_send"))))
         no_confirm = _call(proc, "tg_send_message",
                             {"chat": "@mychannel", "text": "привет"}, 3)
@@ -1364,7 +1364,7 @@ def test_mcp_send_tool(tmp: Path) -> None:
     proc2 = _start(_mcp_env(TG_DB=str(db)))
     try:
         names2 = _init(proc2)
-        check("tg_send_message" not in names2 and len(names2) == 17,
+        check("tg_send_message" not in names2 and len(names2) == 19,
               "MCP send: без TG_ALLOW_SEND инструмента нет",
               str(sorted(n for n in names2 if n.startswith("tg_send"))))
     finally:
