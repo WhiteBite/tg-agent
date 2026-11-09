@@ -803,6 +803,29 @@ def test_title_render(tmp: Path) -> None:
     check(len(title_part) <= 120, "render H2: title обрезан до 120", str(len(title_part)))
 
 
+def test_vec_cache(tmp: Path) -> None:
+    print("=== кэш векторов: инвалидация по updated_ts ===")
+    path = tmp / "veccache.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="task", title="радиаторы", created_ts=now, updated_ts=now)
+        db.conn.execute(
+            "INSERT INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
+            "VALUES(1, 'm', 1, ?, 10)", (memory._pack_vec([1.0]),))
+        db.conn.commit()
+        memory._VEC_CACHE.clear()
+        v1 = memory._load_vecs_cached(db, "m")
+        check(v1.get(1) == [1.0], "кэш: первая загрузка", str(v1))
+        db.conn.execute(
+            "UPDATE entity_vec SET vec=?, updated_ts=20 WHERE entity_id=1",
+            (memory._pack_vec([2.0]),))
+        db.conn.commit()
+        v2 = memory._load_vecs_cached(db, "m")
+        check(v2.get(1) == [2.0],
+              "кэш: инвалидация по updated_ts при том же count", str(v2))
+        memory._VEC_CACHE.clear()
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -838,6 +861,7 @@ def main() -> int:
         test_cue_transcript(tmp)
         test_embed_mismatch(tmp)
         test_title_render(tmp)
+        test_vec_cache(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

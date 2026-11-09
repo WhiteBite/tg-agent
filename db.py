@@ -28,6 +28,13 @@ def clean_text(text: str | None, max_chars: int = 4096) -> str | None:
     masked, _ = redact(text)
     return sanitize_user_content(masked, max_chars)
 
+
+_TITLE_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def sanitize_title(text: str | None, cap: int = 120) -> str:
+    return re.sub(r"\s+", " ", _TITLE_CTRL_RE.sub(" ", text or "")).strip()[:cap]
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chats (
     id          INTEGER PRIMARY KEY,

@@ -28,7 +28,7 @@ from env import load_env
 
 load_env()
 
-from db import DB
+from db import DB, sanitize_title
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -71,7 +71,7 @@ def _create_controller(db: DB, t: dict, dedup_key: str, recheck_ts: int,
         "due_ts, project, confidence, attrs_json, dedup_key, status, created_ts, "
         "updated_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (t["pack"], t["ent_chat"], t["topic_id"], "task",
-         f"Контрольно уточнить: {t['title']}", None,
+         sanitize_title(f"Контрольно уточнить: {t['title']}"), None,
          owner if owner is not None else t["owner"], recheck_ts, t["project"],
          None, attrs, dedup_key, "open", now, now))
     controller_id = cur.lastrowid

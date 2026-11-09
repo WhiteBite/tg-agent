@@ -4,7 +4,7 @@ import json
 import time
 
 import engine
-from db import DB, clean_text
+from db import DB, clean_text, sanitize_title
 from workspace_store import KINDS, STATUSES, WorkspaceError, metadata, revision
 
 
@@ -75,6 +75,8 @@ def entity_edit(db: DB, body: dict) -> dict:
         for key, value in fields.items():
             if isinstance(value, str):
                 value = clean_text(value.strip())
+            if key == "title" and value is not None:
+                value = sanitize_title(value, 500)
             if e[key] == value:
                 continue
             changes.append((key, e[key], value))

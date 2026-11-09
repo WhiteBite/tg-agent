@@ -44,7 +44,7 @@ from env import load_env
 
 load_env()
 
-from db import DB
+from db import DB, sanitize_title as _sanitize_title
 from llm_http import (
     call_with_deadline,
     extra_body,
@@ -88,13 +88,6 @@ class ModerationBlocked(Exception):
 
 def _norm(text: str | None) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
-
-
-_TITLE_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
-
-
-def _sanitize_title(text: str) -> str:
-    return re.sub(r"\s+", " ", _TITLE_CTRL_RE.sub(" ", text)).strip()[:120]
 
 
 def _norm_cmp(text: str | None) -> str:

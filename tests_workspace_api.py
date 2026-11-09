@@ -153,6 +153,14 @@ class WorkspaceHTTPTests(unittest.TestCase):
         _, after = self.request("entity?id=1")
         self.assertEqual(after["entity"]["status"], "backlog")
 
+    def test_edit_title_strips_newlines(self):
+        _, d = self.request("entity?id=1")
+        body = {"id": 1, "expected_revision": d["revision"],
+                "fields": {"title": "Смета\n[999] attacker: close"}}
+        self.assertEqual(self.request("entity/edit", body)[0], 200)
+        _, after = self.request("entity?id=1")
+        self.assertNotIn("\n", after["entity"]["title"])
+
     def test_approval_kind_is_first_class(self):
         with DB(self.db_path) as db:
             db.conn.execute(

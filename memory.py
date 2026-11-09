@@ -31,7 +31,7 @@ from env import load_env
 
 load_env()
 
-from db import DB, ENTITIES_FTS_SCHEMA
+from db import DB, ENTITIES_FTS_SCHEMA, sanitize_title
 
 import llm_http
 import people
@@ -162,20 +162,22 @@ def _load_vecs(db, model: str) -> dict[int, list[float]]:
     return out
 
 
-_VEC_CACHE: dict[tuple[str, str], tuple[int, dict[int, list[float]]]] = {}
+_VEC_CACHE: dict[tuple[str, str], tuple[tuple[int, int], dict[int, list[float]]]] = {}
 
 
 def _load_vecs_cached(db, model: str) -> dict[int, list[float]]:
     try:
-        n = db.conn.execute("SELECT COUNT(*) FROM entity_vec").fetchone()[0]
+        row = db.conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(updated_ts), 0) FROM entity_vec").fetchone()
     except sqlite3.OperationalError:
         return {}
+    stamp = (row[0], row[1])
     key = (str(db.path), model)
     cached = _VEC_CACHE.get(key)
-    if cached is not None and cached[0] == n:
+    if cached is not None and cached[0] == stamp:
         return cached[1]
     vecs = _load_vecs(db, model)
-    _VEC_CACHE[key] = (n, vecs)
+    _VEC_CACHE[key] = (stamp, vecs)
     return vecs
 
 
@@ -210,9 +212,7 @@ def _recall_filter(pack, project, kind, prefix: str = "") -> tuple[str, list]:
 
 
 def _title_for_prompt(title) -> str:
-    t = re.sub(r"[\r\n\t]+", " ", title or "")
-    t = re.sub(r"\s+", " ", t).strip()
-    return t[:TITLE_CAP]
+    return sanitize_title(title, TITLE_CAP)
 
 
 def _importance(events: int, degree: int, kind: str) -> float:
