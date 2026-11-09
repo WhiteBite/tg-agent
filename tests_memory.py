@@ -28,6 +28,22 @@ def check(cond: bool, label: str, extra: str = "") -> None:
         FAILURES.append(label)
 
 
+EMBED_ENV = ("MEMORY_EMBED_PROVIDER", "MEMORY_EMBED_KEY", "MEMORY_EMBED_URL",
+             "MEMORY_EMBED_MODEL", "MEMORY_EMBED_TIMEOUT")
+
+
+def clear_embed_env() -> None:
+    for k in EMBED_ENV:
+        os.environ.pop(k, None)
+
+
+def set_embed_env(model: str = "test-embed") -> None:
+    os.environ["MEMORY_EMBED_PROVIDER"] = "openai"
+    os.environ["MEMORY_EMBED_KEY"] = "sk-test"
+    os.environ["MEMORY_EMBED_URL"] = "https://example.invalid/v1"
+    os.environ["MEMORY_EMBED_MODEL"] = model
+
+
 def seed_entity(db: DB, eid: int, *, pack: str = "construction", chat: int = -100,
                 topic: int = 5, kind: str = "task", title: str = "Задача",
                 body: str | None = None, status: str = "open",
@@ -309,6 +325,159 @@ def test_rebuild_gc(tmp: Path) -> None:
         check(v == 0, "gc: вектор удалён", str(v))
 
 
+def test_embed(tmp: Path) -> None:
+    print("=== embed: opt-in, upsert, смена модели, no-op без провайдера ===")
+    path = tmp / "embed.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="task", title="подключение радиаторов",
+                    body="корпус Б", created_ts=now, updated_ts=now)
+        db.conn.commit()
+
+    clear_embed_env()
+    res = memory.embed(str(path))
+    check(res.get("skipped") is True, "embed: без провайдера skipped", str(res))
+    with DB(path) as db:
+        n = db.conn.execute("SELECT COUNT(*) FROM entity_vec").fetchone()[0]
+        check(n == 0, "embed: без провайдера векторов нет", str(n))
+
+    set_embed_env("test-embed")
+    calls: list[list[str]] = []
+    orig = memory._embed_texts
+
+    def fake(texts):
+        calls.append(list(texts))
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+    memory._embed_texts = fake
+    try:
+        res = memory.embed(str(path))
+        check(res["ok"] is True and res["embedded"] == 1, "embed: один вектор", str(res))
+        check(res["model"] == "test-embed", "embed: модель в отчёте", str(res))
+        check(calls and calls[0] == ["подключение радиаторов\nкорпус Б"],
+              "embed: текст = title+body", str(calls))
+        with DB(path) as db:
+            row = db.conn.execute(
+                "SELECT * FROM entity_vec WHERE entity_id=1").fetchone()
+            check(row is not None, "embed: строка entity_vec создана")
+            check(row["model"] == "test-embed", "embed: model записан", row["model"])
+            check(row["dim"] == 3, "embed: dim=3", str(row["dim"]))
+            check(memory._unpack_vec(row["vec"]) == [1.0, 0.0, 0.0],
+                  "embed: vec round-trip")
+        res2 = memory.embed(str(path))
+        check(res2["embedded"] == 0, "embed: свежий не переэмбеддится", str(res2))
+        set_embed_env("test-embed-2")
+        res3 = memory.embed(str(path))
+        check(res3["embedded"] == 1, "embed: смена модели переэмбеддит", str(res3))
+        with DB(path) as db:
+            row = db.conn.execute(
+                "SELECT model FROM entity_vec WHERE entity_id=1").fetchone()
+            check(row["model"] == "test-embed-2", "embed: модель обновлена", row["model"])
+    finally:
+        memory._embed_texts = orig
+        clear_embed_env()
+
+
+def test_recall_semantic(tmp: Path) -> None:
+    print("=== recall: семантический кандидат вне лексических ===")
+    path = tmp / "recall_sem.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        for i in range(1, 11):
+            seed_entity(db, i, kind="task", title=f"радиатор {i}",
+                        created_ts=now - 300 * 86400,
+                        updated_ts=now - 300 * 86400)
+        seed_entity(db, 50, kind="decision", title="монтаж отопительных приборов",
+                    created_ts=now, updated_ts=now)
+        db.conn.commit()
+
+    clear_embed_env()
+    with DB(path) as db:
+        hits = memory.recall(db, "радиатор", limit=5)
+    ids = {h["id"] for h in hits}
+    check(50 not in ids, "recall: без векторов семантический не в топ-5", str(sorted(ids)))
+
+    set_embed_env("test-embed")
+    with DB(path) as db:
+        for i in range(1, 11):
+            db.conn.execute(
+                "INSERT INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
+                "VALUES(?,?,?,?,?)",
+                (i, "test-embed", 3, memory._pack_vec([0.0, 1.0, 0.0]), now))
+        db.conn.execute(
+            "INSERT INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
+            "VALUES(?,?,?,?,?)",
+            (50, "test-embed", 3, memory._pack_vec([1.0, 0.0, 0.0]), now))
+        db.conn.commit()
+
+    orig = memory._embed_texts
+    memory._embed_texts = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
+    try:
+        with DB(path) as db:
+            hits = memory.recall(db, "радиатор", limit=5)
+        ids = {h["id"] for h in hits}
+        check(50 in ids, "recall: семантический кандидат в топ-5", str(sorted(ids)))
+    finally:
+        memory._embed_texts = orig
+        clear_embed_env()
+
+
+def test_link_cosine(tmp: Path) -> None:
+    print("=== linker: косинус как вторичный сигнал ===")
+    now = int(time.time())
+
+    def build(path: Path, vec2, cue: bool) -> None:
+        with DB(path) as db:
+            seed_entity(db, 1, kind="decision", title="подключение радиаторов",
+                        created_ts=now - 100, updated_ts=now - 100)
+            seed_entity(db, 2, kind="decision", title="монтаж отопительных приборов",
+                        created_ts=now, updated_ts=now)
+            seed_event(db, 2, op="new", ts=now, msg_id=10, quote="монтаж")
+            seed_message(db, msg_id=10,
+                         text=("передумали, монтаж отопительных приборов" if cue
+                               else "монтаж отопительных приборов"), ts=now)
+            if vec2 is not None:
+                db.conn.execute(
+                    "INSERT INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
+                    "VALUES(?,?,?,?,?)",
+                    (1, "test-embed", 3, memory._pack_vec([1.0, 0.0, 0.0]), now))
+                db.conn.execute(
+                    "INSERT INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
+                    "VALUES(?,?,?,?,?)",
+                    (2, "test-embed", 3, memory._pack_vec(vec2), now))
+            db.conn.commit()
+
+    p0 = tmp / "linkcos0.sqlite"
+    build(p0, None, cue=False)
+    clear_embed_env()
+    r0 = memory.link(str(p0), dry_run=False)
+    check(r0["new"] == 0, "link cos: без векторов кандидата нет", str(r0["new"]))
+
+    p1 = tmp / "linkcos1.sqlite"
+    build(p1, [0.8, 0.6, 0.0], cue=False)
+    set_embed_env("test-embed")
+    r1 = memory.link(str(p1), dry_run=False)
+    check(r1["new"] == 1, "link cos: кандидат по косинусу", str(r1["new"]))
+    check(r1["auto"] == 0, "link cos: auto нет без cue", str(r1["auto"]))
+    with DB(p1) as db:
+        cand = db.conn.execute(
+            "SELECT status FROM memory_candidates WHERE new_entity_id=2 "
+            "AND candidate_entity_id=1").fetchone()
+        check(cand is not None and cand["status"] == "pending",
+              "link cos: статус pending", str(cand and cand["status"]))
+
+    p2 = tmp / "linkcos2.sqlite"
+    build(p2, [0.9, 0.4, 0.0], cue=True)
+    r2 = memory.link(str(p2), dry_run=False, auto=True)
+    check(r2["auto"] == 1, "link cos: авто-supersede по косинусу", str(r2["auto"]))
+    with DB(p2) as db:
+        p = db.conn.execute(
+            "SELECT status, closed_ts FROM entities WHERE id=1").fetchone()
+        check(p["closed_ts"] is not None, "link cos: P закрыт")
+        check(p["status"] == "done", "link cos: P status=done", p["status"])
+    clear_embed_env()
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -325,6 +494,9 @@ def main() -> int:
         test_link_dry_run(tmp)
         test_recall(tmp)
         test_rebuild_gc(tmp)
+        test_embed(tmp)
+        test_recall_semantic(tmp)
+        test_link_cosine(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()
