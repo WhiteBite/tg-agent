@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Автономный конвейер: sync (watch) -> bot -> media -> extract -> shiftwatch -> alerts -> fuzzy -> export -> digest -> monitor.
+"""Автономный конвейер: sync (watch) -> bot -> media -> extract -> shiftwatch -> alerts -> fuzzy -> memory -> export -> digest -> monitor.
 
     python3 pipeline.py                      # полный прогон по watch-листу
     python3 pipeline.py --pack services      # один пакет извлечения
@@ -39,6 +39,7 @@ import entity_alerts as entity_alerts_mod
 import export as export_mod
 import extract as extract_mod
 import fuzzy_dedup as fuzzy_mod
+import memory as memory_mod
 import monitor as monitor_mod
 import proclock
 import shiftwatch as shiftwatch_mod
@@ -96,9 +97,10 @@ async def _call_step(fn, *args, **kwargs):
 async def run(db_path: str = DB_PATH, pack_id: str | None = None,
               days_ahead: int = 7, send: bool = False, skip_sync: bool = False,
               skip_fuzzy: bool = False, skip_export: bool = False,
-              skip_media: bool = False, skip_bot: bool = False,
-              skip_shiftwatch: bool = False, client=None, until_done: bool = True,
-              acquire_lock: bool = True) -> dict:
+               skip_media: bool = False, skip_bot: bool = False,
+               skip_shiftwatch: bool = False, skip_memory: bool = False,
+               client=None, until_done: bool = True,
+               acquire_lock: bool = True) -> dict:
     lock = None
     if acquire_lock:
         lock = proclock.acquire_instance_lock(str(db_path) + ".pipeline.lock")
@@ -181,6 +183,18 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
                                "merged": fz["merged"]}
         except Exception as exc:
             report["fuzzy"] = _step_err(exc, budget)
+    if not skip_memory:
+        try:
+            mem = await asyncio.wait_for(
+                _call_step(memory_mod.link, db_path), timeout=budget)
+            report["memory"] = {"ok": bool(mem.get("ok")),
+                                "new": mem.get("new"),
+                                "candidates": mem.get("candidates"),
+                                "auto": mem.get("auto")}
+            if not mem.get("ok"):
+                report["memory"]["error"] = mem.get("error")
+        except Exception as exc:
+            report["memory"] = _step_err(exc, budget)
     if not skip_export:
         try:
             ex = await asyncio.wait_for(
@@ -247,9 +261,10 @@ def main() -> None:
     ap.add_argument("--send", action="store_true",
                     help="отправить сводку в Saved Messages (нужен TG_ALLOW_SEND=1)")
     ap.add_argument("--skip", action="append", default=[],
-                    choices=["sync", "bot", "media", "shiftwatch", "fuzzy", "export"],
+                    choices=["sync", "bot", "media", "shiftwatch", "fuzzy",
+                             "memory", "export"],
                     metavar="STEP",
-                    help="пропустить шаг (sync/bot/media/shiftwatch/fuzzy/export)")
+                    help="пропустить шаг (sync/bot/media/shiftwatch/fuzzy/memory/export)")
     ap.add_argument("--loop", type=int, metavar="MIN",
                     help="демон: повторять цикл каждые N минут (cron не нужен)")
     args = ap.parse_args()
@@ -262,8 +277,9 @@ def main() -> None:
                              skip_bot="bot" in args.skip,
                              skip_media="media" in args.skip,
                              skip_shiftwatch="shiftwatch" in args.skip,
-                             skip_fuzzy="fuzzy" in args.skip,
-                             skip_export="export" in args.skip))
+                              skip_fuzzy="fuzzy" in args.skip,
+                              skip_memory="memory" in args.skip,
+                              skip_export="export" in args.skip))
     if report.get("already_running"):
         print("pipeline: уже запущен другой прогон (lockfile занят) — выходим")
         return
