@@ -470,6 +470,32 @@ def test_entity_links_migration(tmp: Path) -> None:
     check(kept == 1, "v11->v12: строки messages сохранены", str(kept))
 
 
+def test_via_migration(tmp: Path) -> None:
+    print("=== миграция v13: messages.via ===")
+    p = tmp / "via.sqlite"
+    with DB(p) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(messages)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check("via" in cols, "fresh: messages.via есть", str(sorted(cols)))
+    check(uv == SCHEMA_VERSION, "fresh: user_version = SCHEMA_VERSION", str(uv))
+
+    raw = sqlite3.connect(str(p))
+    raw.execute("INSERT INTO messages(chat_id, msg_id, topic_id, ts, text) "
+                "VALUES(-1013, 1, 1, 100, 'до миграции')")
+    raw.execute("ALTER TABLE messages DROP COLUMN via")
+    raw.execute("PRAGMA user_version = 12")
+    raw.commit()
+    raw.close()
+    with DB(p) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(messages)")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+        kept = db.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE chat_id=-1013").fetchone()[0]
+    check("via" in cols, "v12->v13: колонка via добавлена", str(sorted(cols)))
+    check(uv == SCHEMA_VERSION, "v12->v13: user_version поднят", str(uv))
+    check(kept == 1, "v12->v13: строки messages сохранены", str(kept))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_db_core_"))
     try:
@@ -484,6 +510,7 @@ def main() -> int:
         test_posts_helpers(tmp)
         test_actor_migration(tmp)
         test_entity_links_migration(tmp)
+        test_via_migration(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()
