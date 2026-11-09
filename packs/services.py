@@ -106,7 +106,7 @@ PACK: dict = {
                     "properties": {
                         "op": {"type": "string", "enum": ["new", "update", "close", "reopen"]},
                         "kind": {"type": "string", "enum": ["service", "trial", "promo"]},
-                        "title": {"type": "string"},
+                        "title": {"type": "string", "maxLength": 120},
                         "entity_id": {"type": ["integer", "null"]},
                         "body": {"type": "string"},
                         "owner": {"type": ["string", "null"]},

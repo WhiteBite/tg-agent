@@ -90,6 +90,13 @@ def _norm(text: str | None) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+_TITLE_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_title(text: str) -> str:
+    return re.sub(r"\s+", " ", _TITLE_CTRL_RE.sub(" ", text)).strip()[:120]
+
+
 def _norm_cmp(text: str | None) -> str:
     """Детерминированная нормализация для сравнения цитат: NFKC + casefold +
     схлопывание пробелов + ё→е (LLM пишут е). Цитата обязана остаться
@@ -658,7 +665,7 @@ def _apply_link(db: DB, w: dict, op: dict, run_id: int, now: int,
 def _apply_new(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int,
                msg_by_id: dict | None = None) -> None:
     kind = op["kind"]
-    title = op.get("title") or ""
+    title = _sanitize_title(op.get("title") or "")
     hint = op.get("dedup_hint")
     hint = _norm(hint).lower() if isinstance(hint, str) else ""
     ident = f"{kind}|{hint or _norm(title).lower()}"
@@ -740,7 +747,7 @@ def _apply_update(db: DB, pack: dict, w: dict, op: dict, run_id: int, now: int,
         return
     _touch_source(db, entity_id, w, now)
     _apply_supersede(db, pack, op, entity_id, run_id, now, msg_by_id)
-    title = op.get("title") or row["title"]
+    title = _sanitize_title(op["title"]) if op.get("title") else row["title"]
     owner = (_norm_owner(db, op.get("owner")) if op.get("owner") is not None
              else row["owner"])
     op_due = op.get("due_ts")
