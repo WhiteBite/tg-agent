@@ -1824,6 +1824,9 @@ class DB:
             self.conn.execute(
                 "DELETE FROM entity_links WHERE from_entity_id=? OR to_entity_id=?",
                 (d["id"], d["id"]))
+            self.conn.execute(
+                "DELETE FROM entity_links WHERE from_entity_id=to_entity_id "
+                "AND from_entity_id=?", (keeper_id,))
             keeper_vec = self.conn.execute(
                 "SELECT 1 FROM entity_vec WHERE entity_id=?", (keeper_id,)).fetchone()
             if keeper_vec is None:

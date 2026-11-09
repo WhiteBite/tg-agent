@@ -600,6 +600,10 @@ def test_merge_reparent(tmp: Path) -> None:
                         "VALUES(?,?, 'dup2')", (other, keeper))
         db.conn.execute("INSERT INTO entity_links(from_entity_id, to_entity_id, link_kind) "
                         "VALUES(?,?, 'dup2')", (other, loser))
+        db.conn.execute("INSERT INTO entity_links(from_entity_id, to_entity_id, link_kind) "
+                        "VALUES(?,?, 'k2l')", (keeper, loser))
+        db.conn.execute("INSERT INTO entity_links(from_entity_id, to_entity_id, link_kind) "
+                        "VALUES(?,?, 'l2k')", (loser, keeper))
 
         db.conn.execute("INSERT INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
                         "VALUES(?, 'm', 2, X'0000', 5)", (loser,))
@@ -636,8 +640,12 @@ def test_merge_reparent(tmp: Path) -> None:
         self_pairs = db.conn.execute(
             "SELECT COUNT(*) FROM memory_candidates "
             "WHERE new_entity_id=candidate_entity_id").fetchone()[0]
+        link_self = db.conn.execute(
+            "SELECT COUNT(*) FROM entity_links "
+            "WHERE from_entity_id=to_entity_id").fetchone()[0]
 
     check(loser_links == 0, "merge: нет entity_links на лузера", str(loser_links))
+    check(link_self == 0, "merge: self-ссылки entity_links удалены", str(link_self))
     check(loser_vec == 0, "merge: нет entity_vec на лузера", str(loser_vec))
     check(loser_cands == 0, "merge: нет memory_candidates на лузера", str(loser_cands))
     check(self_pairs == 0, "merge: self-pair кандидаты удалены", str(self_pairs))
