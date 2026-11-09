@@ -572,6 +572,177 @@ def test_memory_migrations(tmp: Path) -> None:
           "reopen: идемпотентно, entities_fts не дублируется", f"{uv}/{total2}")
 
 
+def test_merge_reparent(tmp: Path) -> None:
+    print("=== merge_entities: репарент links/vec/candidates ===")
+    p = tmp / "merge_reparent.sqlite"
+    with DB(p) as db:
+        def add_entity(title: str, ts: int) -> int:
+            db.conn.execute(
+                "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+                "created_ts, updated_ts) VALUES('services', -1030, 1, 'service', ?, "
+                "'open', ?, ?)", (title, ts, ts))
+            return db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        keeper = add_entity("Кипер", 1)
+        loser = add_entity("Лузер", 2)
+        other = add_entity("Другой", 3)
+        db.conn.commit()
+
+        db.conn.execute("INSERT INTO entity_links(from_entity_id, to_entity_id, link_kind) "
+                        "VALUES(?,?, 'blocks')", (loser, other))
+        db.conn.execute("INSERT INTO entity_links(from_entity_id, to_entity_id, link_kind) "
+                        "VALUES(?,?, 'blocks')", (other, loser))
+        db.conn.execute("INSERT INTO entity_links(from_entity_id, to_entity_id, link_kind) "
+                        "VALUES(?,?, 'dup')", (keeper, other))
+        db.conn.execute("INSERT INTO entity_links(from_entity_id, to_entity_id, link_kind) "
+                        "VALUES(?,?, 'dup')", (loser, other))
+        db.conn.execute("INSERT INTO entity_links(from_entity_id, to_entity_id, link_kind) "
+                        "VALUES(?,?, 'dup2')", (other, keeper))
+        db.conn.execute("INSERT INTO entity_links(from_entity_id, to_entity_id, link_kind) "
+                        "VALUES(?,?, 'dup2')", (other, loser))
+
+        db.conn.execute("INSERT INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
+                        "VALUES(?, 'm', 2, X'0000', 5)", (loser,))
+
+        db.conn.execute("INSERT INTO memory_candidates(new_entity_id, candidate_entity_id, "
+                        "status) VALUES(?,?, 'pending')", (loser, other))
+        db.conn.execute("INSERT INTO memory_candidates(new_entity_id, candidate_entity_id, "
+                        "status) VALUES(?,?, 'pending')", (other, loser))
+        db.conn.execute("INSERT INTO memory_candidates(new_entity_id, candidate_entity_id, "
+                        "status) VALUES(?,?, 'pending')", (keeper, other))
+        db.conn.execute("INSERT INTO memory_candidates(new_entity_id, candidate_entity_id, "
+                        "status) VALUES(?,?, 'pending')", (loser, keeper))
+        db.conn.execute("INSERT INTO memory_candidates(new_entity_id, candidate_entity_id, "
+                        "status) VALUES(?,?, 'pending')", (keeper, loser))
+        db.conn.commit()
+
+        db.merge_entities(keeper, [loser], "test", 100)
+        db.conn.commit()
+
+        links = sorted(tuple(r) for r in db.conn.execute(
+            "SELECT from_entity_id, to_entity_id, link_kind FROM entity_links"))
+        vec_ids = [r["entity_id"] for r in db.conn.execute(
+            "SELECT entity_id FROM entity_vec ORDER BY entity_id")]
+        cands = sorted(tuple(r) for r in db.conn.execute(
+            "SELECT new_entity_id, candidate_entity_id FROM memory_candidates"))
+        loser_links = db.conn.execute(
+            "SELECT COUNT(*) FROM entity_links WHERE from_entity_id=? OR to_entity_id=?",
+            (loser, loser)).fetchone()[0]
+        loser_vec = db.conn.execute(
+            "SELECT COUNT(*) FROM entity_vec WHERE entity_id=?", (loser,)).fetchone()[0]
+        loser_cands = db.conn.execute(
+            "SELECT COUNT(*) FROM memory_candidates "
+            "WHERE new_entity_id=? OR candidate_entity_id=?", (loser, loser)).fetchone()[0]
+        self_pairs = db.conn.execute(
+            "SELECT COUNT(*) FROM memory_candidates "
+            "WHERE new_entity_id=candidate_entity_id").fetchone()[0]
+
+    check(loser_links == 0, "merge: нет entity_links на лузера", str(loser_links))
+    check(loser_vec == 0, "merge: нет entity_vec на лузера", str(loser_vec))
+    check(loser_cands == 0, "merge: нет memory_candidates на лузера", str(loser_cands))
+    check(self_pairs == 0, "merge: self-pair кандидаты удалены", str(self_pairs))
+    check(links == [(keeper, other, "blocks"), (keeper, other, "dup"),
+                    (other, keeper, "blocks"), (other, keeper, "dup2")],
+          "merge: links репарентнуты, коллизии схлопнуты", str(links))
+    check(vec_ids == [keeper], "merge: vec лузера перешёл киперу", str(vec_ids))
+    check(cands == [(keeper, other), (other, keeper)],
+          "merge: кандидаты репарентнуты, self-pair убраны", str(cands))
+
+    p2 = tmp / "merge_vec_keep.sqlite"
+    with DB(p2) as db:
+        def add2(title: str, ts: int) -> int:
+            db.conn.execute(
+                "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+                "created_ts, updated_ts) VALUES('services', -1031, 1, 'service', ?, "
+                "'open', ?, ?)", (title, ts, ts))
+            return db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        k2 = add2("Кипер2", 1)
+        l2 = add2("Лузер2", 2)
+        db.conn.execute("INSERT INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
+                        "VALUES(?, 'keep', 2, X'1111', 9)", (k2,))
+        db.conn.execute("INSERT INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
+                        "VALUES(?, 'lose', 2, X'2222', 8)", (l2,))
+        db.conn.commit()
+        db.merge_entities(k2, [l2], "test", 100)
+        db.conn.commit()
+        vec2 = [tuple(r) for r in db.conn.execute(
+            "SELECT entity_id, model FROM entity_vec ORDER BY entity_id")]
+    check(vec2 == [(k2, "keep")], "merge: vec кипера сохранён, vec лузера отброшен", str(vec2))
+
+
+def test_fts_probe_independent(tmp: Path) -> None:
+    print("=== FTS: messages_fts и entities_fts пробятся независимо ===")
+    p = tmp / "fts_probe.sqlite"
+    with DB(p) as db:
+        db.insert_message(msg(-1040, 1, text="x"))
+        both = (db.fts, db.fts_entities)
+    check(both == (True, True), "fresh: обе FTS-таблицы True", str(both))
+
+    raw = sqlite3.connect(str(p))
+    raw.execute("DROP TABLE entities_fts")
+    raw.commit()
+    raw.close()
+    ro = DB(p, readonly=True)
+    try:
+        ro_flags = (ro.fts, ro.fts_entities)
+    finally:
+        ro.close()
+    check(ro_flags == (True, False),
+          "readonly: только messages_fts -> fts=True, fts_entities=False", str(ro_flags))
+
+    rw = DB(p)
+    try:
+        rw_flags = (rw.fts, rw.fts_entities)
+    finally:
+        rw.close()
+    check(rw_flags == (True, False),
+          "version>=SCHEMA_VERSION: только messages_fts -> fts=True, fts_entities=False",
+          str(rw_flags))
+
+    p2 = tmp / "fts_probe_ent.sqlite"
+    with DB(p2) as db:
+        db.insert_message(msg(-1041, 1, text="y"))
+    raw = sqlite3.connect(str(p2))
+    raw.execute("DROP TABLE messages_fts")
+    raw.commit()
+    raw.close()
+    ro2 = DB(p2, readonly=True)
+    try:
+        ro2_flags = (ro2.fts, ro2.fts_entities)
+    finally:
+        ro2.close()
+    check(ro2_flags == (False, True),
+          "readonly: только entities_fts -> fts=False, fts_entities=True", str(ro2_flags))
+
+    p3 = tmp / "fts_probe_mig.sqlite"
+    with DB(p3) as db:
+        db.insert_message(msg(-1042, 1, text="z"))
+    raw = sqlite3.connect(str(p3))
+    raw.execute("DROP TABLE entities_fts")
+    raw.execute("PRAGMA user_version = 13")
+    raw.commit()
+    raw.close()
+    with DB(p3) as db:
+        mig_flags = (db.fts, db.fts_entities)
+    check(mig_flags == (True, True),
+          "миграция v13->v14: entities_fts создана, fts_entities=True", str(mig_flags))
+
+    p4 = tmp / "fts_probe_fail.sqlite"
+    with DB(p4) as db:
+        db.insert_message(msg(-1043, 1, text="w"))
+    raw = sqlite3.connect(str(p4))
+    raw.execute("DROP TABLE entities_fts")
+    raw.execute("CREATE TABLE entities_fts (bogus INTEGER)")
+    raw.execute("PRAGMA user_version = 13")
+    raw.commit()
+    raw.close()
+    with DB(p4) as db:
+        fail_flags = (db.fts, db.fts_entities)
+    check(fail_flags == (True, False),
+          "миграция v14 сбой: fts=True, fts_entities=False", str(fail_flags))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_db_core_"))
     try:
@@ -588,6 +759,8 @@ def main() -> int:
         test_entity_links_migration(tmp)
         test_via_migration(tmp)
         test_memory_migrations(tmp)
+        test_merge_reparent(tmp)
+        test_fts_probe_independent(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

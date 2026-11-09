@@ -366,7 +366,8 @@ class DB:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA busy_timeout=5000")
             self.conn.execute("PRAGMA query_only=ON")
-            self.fts = self._probe_fts()
+            self.fts = self._probe_table("messages_fts")
+            self.fts_entities = self._probe_table("entities_fts")
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path))
@@ -375,7 +376,8 @@ class DB:
         self.conn.execute("PRAGMA busy_timeout=5000")  # live.py + sync.py + ui.py могут писать одновременно
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if version >= SCHEMA_VERSION:
-            self.fts = self._probe_fts()
+            self.fts = self._probe_table("messages_fts")
+            self.fts_entities = self._probe_table("entities_fts")
             return
         self.conn.executescript(SCHEMA)
         try:
@@ -386,6 +388,7 @@ class DB:
             self.fts = True
         except sqlite3.OperationalError:
             self.fts = False  # поиск уедет на LIKE
+        self.fts_entities = self._probe_table("entities_fts")
         # свежая база тоже приходит с user_version=0 — миграции идемпотентны
         if version < 1:
             self._migrate_message_edits()
@@ -439,10 +442,9 @@ class DB:
     def __exit__(self, *_exc) -> None:
         self.close()
 
-    def _probe_fts(self) -> bool:
+    def _probe_table(self, name: str) -> bool:
         try:
-            self.conn.execute("SELECT 1 FROM messages_fts LIMIT 1")
-            self.conn.execute("SELECT 1 FROM entities_fts LIMIT 1")
+            self.conn.execute(f"SELECT 1 FROM {name} LIMIT 1")
         except sqlite3.OperationalError:
             return False
         return True
@@ -694,8 +696,9 @@ class DB:
             self.conn.execute(
                 "INSERT INTO entities_fts(rowid, entity_id, title, body) "
                 "SELECT id, id, title, COALESCE(body, '') FROM entities")
+            self.fts_entities = True
         except sqlite3.OperationalError:
-            self.fts = False
+            self.fts_entities = False
 
     def _migrate_v15(self) -> None:
         self.conn.execute(
@@ -1812,6 +1815,35 @@ class DB:
             self.conn.execute(
                 "INSERT INTO entity_aliases(old_entity_id, entity_id, merged_ts, reason) "
                 "VALUES(?,?,?,?)", (d["id"], keeper_id, now, reason))
+            self.conn.execute(
+                "UPDATE OR IGNORE entity_links SET from_entity_id=? WHERE from_entity_id=?",
+                (keeper_id, d["id"]))
+            self.conn.execute(
+                "UPDATE OR IGNORE entity_links SET to_entity_id=? WHERE to_entity_id=?",
+                (keeper_id, d["id"]))
+            self.conn.execute(
+                "DELETE FROM entity_links WHERE from_entity_id=? OR to_entity_id=?",
+                (d["id"], d["id"]))
+            keeper_vec = self.conn.execute(
+                "SELECT 1 FROM entity_vec WHERE entity_id=?", (keeper_id,)).fetchone()
+            if keeper_vec is None:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO entity_vec(entity_id, model, dim, vec, updated_ts) "
+                    "SELECT ?, model, dim, vec, updated_ts FROM entity_vec WHERE entity_id=?",
+                    (keeper_id, d["id"]))
+            self.conn.execute("DELETE FROM entity_vec WHERE entity_id=?", (d["id"],))
+            self.conn.execute(
+                "UPDATE OR IGNORE memory_candidates SET new_entity_id=? WHERE new_entity_id=?",
+                (keeper_id, d["id"]))
+            self.conn.execute(
+                "UPDATE OR IGNORE memory_candidates SET candidate_entity_id=? "
+                "WHERE candidate_entity_id=?", (keeper_id, d["id"]))
+            self.conn.execute(
+                "DELETE FROM memory_candidates WHERE new_entity_id=? OR candidate_entity_id=?",
+                (d["id"], d["id"]))
+            self.conn.execute(
+                "DELETE FROM memory_candidates WHERE new_entity_id=candidate_entity_id "
+                "AND new_entity_id=?", (keeper_id,))
             self.conn.execute(
                 "DELETE FROM entity_sources WHERE entity_id=?", (d["id"],))
             self.conn.execute("DELETE FROM entities WHERE id=?", (d["id"],))
