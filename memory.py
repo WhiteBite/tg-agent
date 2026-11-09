@@ -31,7 +31,7 @@ from env import load_env
 
 load_env()
 
-from db import DB
+from db import DB, ENTITIES_FTS_SCHEMA
 
 import llm_http
 import people
@@ -51,6 +51,10 @@ COS_AUTO = 0.85
 SEM_TOPN = 50
 EMBED_DEFAULT_MODEL = "text-embedding-3-small"
 EMBED_DEFAULT_URL = "https://api.openai.com/v1"
+RECALL_EMBED_TIMEOUT = 5.0
+EMBED_BATCH = 100
+SQL_CHUNK = 900
+TITLE_CAP = 120
 
 _CUE_RE = re.compile(
     r"передумал|по-другому|по другому|вместо|отмен|меняем|измен|пересмотр|"
@@ -119,8 +123,11 @@ def _pack_vec(vec: list[float]) -> bytes:
 def _unpack_vec(blob) -> list[float]:
     if not blob:
         return []
-    n = len(blob) // 4
-    return list(struct.unpack(f"<{n}f", bytes(blob)[:n * 4]))
+    b = bytes(blob)
+    if len(b) % 4 != 0:
+        return []
+    n = len(b) // 4
+    return list(struct.unpack(f"<{n}f", b))
 
 
 def _as_floats(v) -> list[float]:
@@ -155,6 +162,59 @@ def _load_vecs(db, model: str) -> dict[int, list[float]]:
     return out
 
 
+_VEC_CACHE: dict[tuple[str, str], tuple[int, dict[int, list[float]]]] = {}
+
+
+def _load_vecs_cached(db, model: str) -> dict[int, list[float]]:
+    try:
+        n = db.conn.execute("SELECT COUNT(*) FROM entity_vec").fetchone()[0]
+    except sqlite3.OperationalError:
+        return {}
+    key = (str(db.path), model)
+    cached = _VEC_CACHE.get(key)
+    if cached is not None and cached[0] == n:
+        return cached[1]
+    vecs = _load_vecs(db, model)
+    _VEC_CACHE[key] = (n, vecs)
+    return vecs
+
+
+def _chunks(seq, size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def _fetch_by_ids(db, where: str, args: list, ids) -> list[dict]:
+    out: list[dict] = []
+    for chunk in _chunks(list(ids), SQL_CHUNK):
+        marks = ",".join("?" * len(chunk))
+        out.extend(dict(r) for r in db.conn.execute(
+            f"SELECT * FROM entities WHERE {where} AND id IN ({marks})",
+            list(args) + list(chunk)))
+    return out
+
+
+def _recall_filter(pack, project, kind, prefix: str = "") -> tuple[str, list]:
+    where = "1=1"
+    args: list = []
+    if pack is not None:
+        where += f" AND {prefix}pack=?"
+        args.append(pack)
+    if project is not None:
+        where += f" AND {prefix}project=?"
+        args.append(project)
+    if kind is not None:
+        where += f" AND {prefix}kind=?"
+        args.append(kind)
+    return where, args
+
+
+def _title_for_prompt(title) -> str:
+    t = re.sub(r"[\r\n\t]+", " ", title or "")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:TITLE_CAP]
+
+
 def _importance(events: int, degree: int, kind: str) -> float:
     kw = _KIND_W.get(kind, 0.4)
     return min(1.0, 0.4 * math.log1p(events) / math.log1p(20)
@@ -182,13 +242,14 @@ def _embed_config() -> dict | None:
             "keys": llm_http.key_list(key_raw), "timeout": timeout}
 
 
-def _embed_texts(texts: list[str]) -> list[list[float]]:
+def _embed_texts(texts: list[str], timeout: float | None = None) -> list[list[float]]:
     cfg = _embed_config()
     if cfg is None:
         raise RuntimeError("embeddings provider not configured")
     payload = {"model": cfg["model"], "input": list(texts)}
+    t = cfg["timeout"] if timeout is None else min(cfg["timeout"], timeout)
     data = llm_http.post_json_keys(
-        f"{cfg['url']}/embeddings", cfg["keys"], payload, cfg["timeout"])
+        f"{cfg['url']}/embeddings", cfg["keys"], payload, t)
     items = sorted(data.get("data") or [], key=lambda d: d.get("index", 0))
     return [[float(x) for x in it["embedding"]] for it in items]
 
@@ -207,17 +268,18 @@ def _counts(db, ids: list[int]) -> tuple[dict[int, int], dict[int, int]]:
     degree: dict[int, int] = {}
     if not ids:
         return ev_count, degree
-    marks = ",".join("?" * len(ids))
-    for r in db.conn.execute(
-            f"SELECT entity_id, COUNT(*) n FROM entity_events "
-            f"WHERE entity_id IN ({marks}) GROUP BY entity_id", ids):
-        ev_count[r["entity_id"]] = r["n"]
-    for r in db.conn.execute(
-            f"SELECT entity_id, COUNT(*) n FROM ("
-            f"SELECT from_entity_id AS entity_id FROM entity_links WHERE link_kind='blocks' "
-            f"UNION ALL SELECT to_entity_id FROM entity_links WHERE link_kind='blocks') "
-            f"WHERE entity_id IN ({marks}) GROUP BY entity_id", ids):
-        degree[r["entity_id"]] = r["n"]
+    for chunk in _chunks(list(ids), SQL_CHUNK):
+        marks = ",".join("?" * len(chunk))
+        for r in db.conn.execute(
+                f"SELECT entity_id, COUNT(*) n FROM entity_events "
+                f"WHERE entity_id IN ({marks}) GROUP BY entity_id", chunk):
+            ev_count[r["entity_id"]] = r["n"]
+        for r in db.conn.execute(
+                f"SELECT entity_id, COUNT(*) n FROM ("
+                f"SELECT from_entity_id AS entity_id FROM entity_links WHERE link_kind='blocks' "
+                f"UNION ALL SELECT to_entity_id FROM entity_links WHERE link_kind='blocks') "
+                f"WHERE entity_id IN ({marks}) GROUP BY entity_id", chunk):
+            degree[r["entity_id"]] = r["n"]
     return ev_count, degree
 
 
@@ -253,7 +315,7 @@ def select_open_entities(db, pack, w, rows, now=None) -> list[str]:
 
     terms = _batch_terms(rows)
     lex_ids: list[int] = []
-    if terms and db.fts:
+    if terms and db.fts_entities:
         match = " OR ".join(t + "*" for t in terms)
         sql = ("SELECT e.*, bm25(entities_fts) AS rank FROM entities_fts "
                "JOIN entities e ON e.id = entities_fts.entity_id "
@@ -326,7 +388,7 @@ def select_open_entities(db, pack, w, rows, now=None) -> list[str]:
         scored.append((info["core"], score,
                        row["updated_ts"] or row["created_ts"] or 0, eid, row))
     scored.sort(key=lambda x: (not x[0], -x[1], -x[2], x[3]))
-    return [f"{r['id']} | {r['kind']} | {r['title']} | {r['owner'] or ''} | {r['due_ts'] or ''}"
+    return [f"{r['id']} | {r['kind']} | {_title_for_prompt(r['title'])} | {r['owner'] or ''} | {r['due_ts'] or ''}"
             for _, _, _, _, r in scored[:SELECT_K]]
 
 
@@ -385,9 +447,12 @@ def _cue_hit(db, ev) -> bool:
     row = db.conn.execute(
         "SELECT text FROM messages WHERE chat_id=? AND msg_id=?",
         (ev["chat_id"], ev["msg_id"])).fetchone()
-    if row is None or not row["text"]:
-        return False
-    return _CUE_RE.search(row["text"]) is not None
+    if row is not None and row["text"] and _CUE_RE.search(row["text"]):
+        return True
+    trow = db.conn.execute(
+        "SELECT text FROM media_assets WHERE chat_id=? AND msg_id=?",
+        (ev["chat_id"], ev["msg_id"])).fetchone()
+    return trow is not None and bool(trow["text"]) and _CUE_RE.search(trow["text"]) is not None
 
 
 def link(db_path=DB_PATH, days: int = 7, dry_run: bool = False, auto=None) -> dict:
@@ -399,7 +464,7 @@ def link(db_path=DB_PATH, days: int = 7, dry_run: bool = False, auto=None) -> di
     with DB(db_path) as db:
         try:
             cfg = _embed_config()
-            vecs = _load_vecs(db, cfg["model"]) if cfg is not None else {}
+            vecs = _load_vecs_cached(db, cfg["model"]) if cfg is not None else {}
             cursor = int(db.get_meta(CURSOR_KEY) or 0)
             sql = ("SELECT ev.id AS event_id, ev.entity_id, ev.op, ev.chat_id, "
                    "ev.msg_id, ev.quote, ev.ts FROM entity_events ev "
@@ -412,13 +477,11 @@ def link(db_path=DB_PATH, days: int = 7, dry_run: bool = False, auto=None) -> di
             args.append(SCAN_LIMIT)
             events = [dict(r) for r in db.conn.execute(sql, args)]
             max_id = cursor
-            seen: set[int] = set()
+            last_ev: dict[int, dict] = {}
             for ev in events:
                 max_id = max(max_id, ev["event_id"])
-                eid = ev["entity_id"]
-                if eid in seen:
-                    continue
-                seen.add(eid)
+                last_ev[ev["entity_id"]] = ev
+            for eid, ev in last_ev.items():
                 e = db.conn.execute(
                     "SELECT * FROM entities WHERE id=?", (eid,)).fetchone()
                 if e is None or e["closed_ts"] is not None:
@@ -436,7 +499,6 @@ def link(db_path=DB_PATH, days: int = 7, dry_run: bool = False, auto=None) -> di
                     do_auto = (bool(auto) and (sim >= SIM_AUTO or cos >= COS_AUTO)
                                and _cue_hit(db, ev))
                     if existing is None:
-                        status = "auto" if do_auto else "pending"
                         if not dry_run:
                             db.conn.execute(
                                 "INSERT OR IGNORE INTO memory_candidates("
@@ -444,20 +506,30 @@ def link(db_path=DB_PATH, days: int = 7, dry_run: bool = False, auto=None) -> di
                                 "quote, chat_id, msg_id, status, created_ts) "
                                 "VALUES(?,?,?,?,?,?,?,?,?)",
                                 (eid, p["id"], "similarity", score, ev["quote"],
-                                 ev["chat_id"], ev["msg_id"], status, now))
+                                 ev["chat_id"], ev["msg_id"], "pending", now))
                         result["new"] += 1
                         if do_auto:
+                            applied = False
                             if not dry_run:
-                                _apply_supersede(db, eid, p["id"], now, ev)
-                            result["auto"] += 1
+                                applied = _apply_supersede(db, eid, p["id"], now, ev)
+                                if applied:
+                                    db.conn.execute(
+                                        "UPDATE memory_candidates SET status='auto' "
+                                        "WHERE new_entity_id=? AND candidate_entity_id=?",
+                                        (eid, p["id"]))
+                            if applied or dry_run:
+                                result["auto"] += 1
                     else:
                         if do_auto:
+                            applied = False
                             if not dry_run:
-                                db.conn.execute(
-                                    "UPDATE memory_candidates SET status='auto', score=? "
-                                    "WHERE id=?", (score, existing["id"]))
-                                _apply_supersede(db, eid, p["id"], now, ev)
-                            result["auto"] += 1
+                                applied = _apply_supersede(db, eid, p["id"], now, ev)
+                                if applied:
+                                    db.conn.execute(
+                                        "UPDATE memory_candidates SET status='auto', score=? "
+                                        "WHERE id=?", (score, existing["id"]))
+                            if applied or dry_run:
+                                result["auto"] += 1
                         elif not dry_run:
                             db.conn.execute(
                                 "UPDATE memory_candidates SET score=? WHERE id=?",
@@ -467,15 +539,23 @@ def link(db_path=DB_PATH, days: int = 7, dry_run: bool = False, auto=None) -> di
                 if max_id > cursor:
                     db.set_meta(CURSOR_KEY, str(max_id))
         except Exception as exc:
+            db.conn.rollback()
             result["ok"] = False
             result["error"] = str(exc)
     return result
 
 
 def _resolve_alias(db, eid: int) -> int:
-    row = db.conn.execute(
-        "SELECT entity_id FROM entity_aliases WHERE old_entity_id=?", (eid,)).fetchone()
-    return row["entity_id"] if row else eid
+    seen: set[int] = set()
+    cur = eid
+    while cur not in seen:
+        seen.add(cur)
+        row = db.conn.execute(
+            "SELECT entity_id FROM entity_aliases WHERE old_entity_id=?", (cur,)).fetchone()
+        if row is None:
+            return cur
+        cur = row["entity_id"]
+    return cur
 
 
 def _supersede_chain(db, eid: int) -> dict:
@@ -515,57 +595,52 @@ def _changed_since(db, eid: int, since_ts) -> bool:
 def recall(db, query: str, project=None, kind=None, pack=None,
            since_ts=None, limit: int = 20) -> list[dict]:
     now = int(time.time())
-    where = "1=1"
-    args: list = []
-    if pack is not None:
-        where += " AND pack=?"
-        args.append(pack)
-    if project is not None:
-        where += " AND project=?"
-        args.append(project)
-    if kind is not None:
-        where += " AND kind=?"
-        args.append(kind)
+    where, args = _recall_filter(pack, project, kind)
+    where_e, args_e = _recall_filter(pack, project, kind, "e.")
     rows = [dict(r) for r in db.conn.execute(
         f"SELECT * FROM entities WHERE {where} "
         f"ORDER BY COALESCE(updated_ts, created_ts) DESC LIMIT 1000", args)]
+    have = {r["id"] for r in rows}
 
     fts_lex: dict[int, float] = {}
-    if db.fts:
+    if db.fts_entities:
         terms = _tokens(query)
         if terms:
             match = " OR ".join(t + "*" for t in terms)
             try:
                 frows = list(db.conn.execute(
-                    "SELECT entity_id, bm25(entities_fts) AS rank FROM entities_fts "
-                    "WHERE entities_fts MATCH ? ORDER BY rank LIMIT 200", (match,)))
+                    "SELECT e.id AS entity_id, bm25(entities_fts) AS rank FROM entities_fts "
+                    "JOIN entities e ON e.id = entities_fts.entity_id "
+                    f"WHERE entities_fts MATCH ? AND {where_e} ORDER BY rank LIMIT 200",
+                    [match] + args_e))
                 n = len(frows)
                 for i, r in enumerate(frows):
                     fts_lex[r["entity_id"]] = 1.0 - i / max(1, n)
             except sqlite3.OperationalError:
                 fts_lex = {}
+    for r in _fetch_by_ids(db, where, args, [eid for eid in fts_lex if eid not in have]):
+        rows.append(r)
+        have.add(r["id"])
 
     sem: dict[int, float] = {}
     cfg = _embed_config()
     if cfg is not None:
-        vecs = _load_vecs(db, cfg["model"])
+        vecs = _load_vecs_cached(db, cfg["model"])
         if vecs:
             try:
-                qv = _embed_texts([query])[0]
+                qv = _embed_texts([query], timeout=RECALL_EMBED_TIMEOUT)[0]
             except Exception:
                 qv = None
             if qv:
-                sims = {eid: _cosine(qv, v) for eid, v in vecs.items()}
+                corpus = {r["id"] for r in db.conn.execute(
+                    f"SELECT id FROM entities WHERE {where}", args)}
+                sims = {eid: _cosine(qv, v) for eid, v in vecs.items() if eid in corpus}
                 top = sorted(sims.items(), key=lambda kv: (-kv[1], kv[0]))[:SEM_TOPN]
                 sem = {eid: s for eid, s in top if s > 0.0}
-                have = {r["id"] for r in rows}
                 extra = [eid for eid, _ in top if eid not in have]
-                if extra:
-                    marks = ",".join("?" * len(extra))
-                    for r in db.conn.execute(
-                            f"SELECT * FROM entities WHERE {where} AND id IN ({marks})",
-                            args + extra):
-                        rows.append(dict(r))
+                for r in _fetch_by_ids(db, where, args, extra):
+                    rows.append(r)
+                    have.add(r["id"])
 
     ev_count, degree = _counts(db, [r["id"] for r in rows])
     scored = []
@@ -610,18 +685,24 @@ def embed(db_path=DB_PATH, limit: int = 500) -> dict:
                 "ORDER BY e.id LIMIT ?", (model, limit))]
             if not rows:
                 return {"ok": True, "embedded": 0, "model": model}
-            texts = [f"{r['title'] or ''}\n{r['body'] or ''}" for r in rows]
-            vecs = _embed_texts(texts)
             now = int(time.time())
             n = 0
-            for r, vec in zip(rows, vecs):
-                if not vec:
-                    continue
-                db.conn.execute(
-                    "INSERT OR REPLACE INTO entity_vec("
-                    "entity_id, model, dim, vec, updated_ts) VALUES(?,?,?,?,?)",
-                    (r["id"], model, len(vec), _pack_vec(vec), now))
-                n += 1
+            for i in range(0, len(rows), EMBED_BATCH):
+                batch = rows[i:i + EMBED_BATCH]
+                texts = [f"{r['title'] or ''}\n{r['body'] or ''}" for r in batch]
+                vecs = _embed_texts(texts)
+                if not isinstance(vecs, list) or len(vecs) != len(batch):
+                    got = len(vecs) if isinstance(vecs, list) else None
+                    return {"ok": False, "error": "embedding response size mismatch",
+                            "expected": len(batch), "got": got}
+                for r, vec in zip(batch, vecs):
+                    if not vec:
+                        continue
+                    db.conn.execute(
+                        "INSERT OR REPLACE INTO entity_vec("
+                        "entity_id, model, dim, vec, updated_ts) VALUES(?,?,?,?,?)",
+                        (r["id"], model, len(vec), _pack_vec(vec), now))
+                    n += 1
             db.conn.commit()
             return {"ok": True, "embedded": n, "model": model}
         except Exception as exc:
@@ -632,14 +713,14 @@ def rebuild(db_path=DB_PATH) -> dict:
     with DB(db_path) as db:
         try:
             db.conn.execute("DELETE FROM entities_fts")
-            db.conn.execute(
-                "INSERT INTO entities_fts(rowid, entity_id, title, body) "
-                "SELECT id, id, title, COALESCE(body, '') FROM entities")
-            n = db.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
-            db.conn.commit()
-            return {"ok": True, "indexed": n}
         except sqlite3.OperationalError:
-            return {"ok": True, "indexed": 0, "fts": False}
+            db.conn.executescript(ENTITIES_FTS_SCHEMA)
+        db.conn.execute(
+            "INSERT INTO entities_fts(rowid, entity_id, title, body) "
+            "SELECT id, id, title, COALESCE(body, '') FROM entities")
+        n = db.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        db.conn.commit()
+        return {"ok": True, "indexed": n}
 
 
 def gc(db_path=DB_PATH) -> dict:
@@ -648,6 +729,13 @@ def gc(db_path=DB_PATH) -> dict:
             "DELETE FROM memory_candidates WHERE "
             "new_entity_id NOT IN (SELECT id FROM entities) OR "
             "candidate_entity_id NOT IN (SELECT id FROM entities)").rowcount
+        stale = db.conn.execute(
+            "UPDATE memory_candidates SET status='stale' WHERE status='pending' AND ("
+            "new_entity_id NOT IN (SELECT id FROM entities) OR "
+            "candidate_entity_id NOT IN (SELECT id FROM entities) OR "
+            "new_entity_id IN (SELECT id FROM entities WHERE closed_ts IS NOT NULL) OR "
+            "candidate_entity_id IN (SELECT id FROM entities WHERE closed_ts IS NOT NULL))"
+        ).rowcount
         try:
             vec = db.conn.execute(
                 "DELETE FROM entity_vec WHERE entity_id NOT IN (SELECT id FROM entities)"
@@ -655,7 +743,7 @@ def gc(db_path=DB_PATH) -> dict:
         except sqlite3.OperationalError:
             vec = 0
         db.conn.commit()
-        return {"ok": True, "candidates": cand, "vectors": vec}
+        return {"ok": True, "candidates": cand, "vectors": vec, "stale": stale}
 
 
 def _arg_value(args: list[str], name: str):
@@ -672,12 +760,14 @@ def _accept(db, cand_id: int, now: int) -> dict:
     if row is None:
         return {"ok": False, "error": "candidate not found"}
     ev = {"chat_id": row["chat_id"], "msg_id": row["msg_id"], "quote": row["quote"]}
-    _apply_supersede(db, row["new_entity_id"], row["candidate_entity_id"], now, ev)
+    applied = _apply_supersede(db, row["new_entity_id"], row["candidate_entity_id"], now, ev)
+    if not applied:
+        return {"ok": True, "id": cand_id, "status": "pending", "applied": False}
     db.conn.execute(
         "UPDATE memory_candidates SET status='accepted', decided_ts=?, decided_by=? "
         "WHERE id=?", (now, "review", cand_id))
     db.conn.commit()
-    return {"ok": True, "id": cand_id, "status": "accepted"}
+    return {"ok": True, "id": cand_id, "status": "accepted", "applied": True}
 
 
 def _review(db_path, rest: list[str]) -> dict:
@@ -687,13 +777,23 @@ def _review(db_path, rest: list[str]) -> dict:
     now = int(time.time())
     with DB(db_path) as db:
         if accept is not None:
-            return _accept(db, int(accept), now)
+            try:
+                cand_id = int(accept)
+            except ValueError:
+                return {"ok": False, "error": f"invalid --accept: {accept}"}
+            return _accept(db, cand_id, now)
         if reject is not None:
-            db.conn.execute(
+            try:
+                cand_id = int(reject)
+            except ValueError:
+                return {"ok": False, "error": f"invalid --reject: {reject}"}
+            cur = db.conn.execute(
                 "UPDATE memory_candidates SET status='rejected', decided_ts=?, "
-                "decided_by=? WHERE id=?", (now, "review", int(reject)))
+                "decided_by=? WHERE id=?", (now, "review", cand_id))
             db.conn.commit()
-            return {"ok": True, "id": int(reject), "status": "rejected"}
+            if cur.rowcount == 0:
+                return {"ok": False, "error": "candidate not found"}
+            return {"ok": True, "id": cand_id, "status": "rejected"}
         rows = [dict(r) for r in db.conn.execute(
             "SELECT * FROM memory_candidates WHERE status=? ORDER BY score DESC, id",
             (status,))]
@@ -718,7 +818,15 @@ def main(argv=None) -> int:
         res = gc(db_path)
     elif cmd == "embed":
         lim = _arg_value(rest, "--limit")
-        res = embed(db_path, limit=int(lim) if lim else 500)
+        if lim is None:
+            res = embed(db_path, limit=500)
+        else:
+            try:
+                limit = int(lim)
+            except ValueError:
+                res = {"ok": False, "error": f"invalid --limit: {lim}"}
+            else:
+                res = embed(db_path, limit=limit)
     elif cmd == "review":
         res = _review(db_path, rest)
     else:

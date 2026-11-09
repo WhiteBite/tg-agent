@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import shutil
 import sys
@@ -411,7 +414,7 @@ def test_recall_semantic(tmp: Path) -> None:
         db.conn.commit()
 
     orig = memory._embed_texts
-    memory._embed_texts = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
+    memory._embed_texts = lambda texts, timeout=None: [[1.0, 0.0, 0.0] for _ in texts]
     try:
         with DB(path) as db:
             hits = memory.recall(db, "радиатор", limit=5)
@@ -478,6 +481,328 @@ def test_link_cosine(tmp: Path) -> None:
     clear_embed_env()
 
 
+def test_recall_reachability(tmp: Path) -> None:
+    print("=== recall: старое решение вне топ-1000 достижимо через FTS ===")
+    path = tmp / "recall_reach.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="decision", title="подключение радиаторов",
+                    created_ts=now - 400 * 86400, updated_ts=now - 400 * 86400)
+        for i in range(2, 1102):
+            seed_entity(db, i, kind="task", title=f"задача номер {i}",
+                        created_ts=now - 86400, updated_ts=now - 86400)
+        db.conn.commit()
+    with DB(path) as db:
+        hits = memory.recall(db, "радиатор", limit=20)
+    ids = {h["id"] for h in hits}
+    check(1 in ids, "recall H1: старое решение вне топ-1000 найдено", str(sorted(ids)[:5]))
+
+
+def test_recall_filter_rank(tmp: Path) -> None:
+    print("=== recall: фильтр не пропускает чужой ранг в лексику ===")
+    now = int(time.time())
+    p1 = tmp / "recall_f1.sqlite"
+    with DB(p1) as db:
+        seed_entity(db, 1, pack="construction", kind="task",
+                    title="подключение радиаторов", created_ts=now, updated_ts=now)
+        db.conn.commit()
+    p2 = tmp / "recall_f2.sqlite"
+    with DB(p2) as db:
+        seed_entity(db, 1, pack="construction", kind="task",
+                    title="подключение радиаторов", created_ts=now, updated_ts=now)
+        seed_entity(db, 2, pack="services", kind="task",
+                    title="радиаторы радиаторы радиаторы радиаторы",
+                    created_ts=now, updated_ts=now)
+        db.conn.commit()
+    with DB(p1) as db:
+        h1 = memory.recall(db, "радиаторы", pack="construction", limit=5)
+    with DB(p2) as db:
+        h2 = memory.recall(db, "радиаторы", pack="construction", limit=5)
+    s1 = next(h["score"] for h in h1 if h["id"] == 1)
+    s2 = next(h["score"] for h in h2 if h["id"] == 1)
+    check(abs(s1 - s2) < 1e-9, "recall M6: чужой пак не влияет на лексику", f"{s1} vs {s2}")
+    check(all(h["pack"] == "construction" for h in h2), "recall M6: только свой пак")
+
+
+def test_counts_chunk(tmp: Path) -> None:
+    print("=== _counts: чанки по SQL_CHUNK ===")
+    path = tmp / "counts.sqlite"
+    now = int(time.time())
+    n = 33000
+    with DB(path) as db:
+        db.conn.executemany(
+            "INSERT INTO entity_events(entity_id, ts, op, quote) VALUES(?,?,?,?)",
+            [(i, now, "new", "q") for i in range(1, n + 1)])
+        db.conn.commit()
+        ev, _deg = memory._counts(db, list(range(1, n + 1)))
+    check(len(ev) == n, "counts M5: все события посчитаны", str(len(ev)))
+    check(all(v == 1 for v in ev.values()), "counts M5: по одному событию")
+
+
+def test_link_last_event(tmp: Path) -> None:
+    print("=== linker: cue в позднем update -> auto ===")
+    path = tmp / "link_last.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="decision", title="подключение радиаторов",
+                    created_ts=now - 100, updated_ts=now - 100)
+        seed_entity(db, 2, kind="decision", title="подключение радиаторов",
+                    created_ts=now, updated_ts=now)
+        seed_event(db, 2, op="new", ts=now - 10, msg_id=10, quote="подключение радиаторов")
+        seed_event(db, 2, op="update", ts=now, msg_id=11, quote="отменяем")
+        seed_message(db, msg_id=10, text="подключение радиаторов", ts=now - 10)
+        seed_message(db, msg_id=11, text="передумали, отменяем подключение радиаторов", ts=now)
+        db.conn.commit()
+    res = memory.link(str(path), dry_run=False, auto=True)
+    check(res["auto"] == 1, "link M7: cue в позднем update сработал", str(res["auto"]))
+    with DB(path) as db:
+        cand = db.conn.execute(
+            "SELECT status, msg_id FROM memory_candidates WHERE new_entity_id=2 "
+            "AND candidate_entity_id=1").fetchone()
+        check(cand is not None and cand["status"] == "auto", "link M7: статус auto",
+              str(cand and cand["status"]))
+        check(cand["msg_id"] == 11, "link M7: evidence из последнего события",
+              str(cand and cand["msg_id"]))
+
+
+def test_link_rollback(tmp: Path) -> None:
+    print("=== linker: исключение -> rollback, курсор не двинулся ===")
+    path = tmp / "link_rb.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="decision", title="подключение радиаторов",
+                    created_ts=now - 100, updated_ts=now - 100)
+        seed_entity(db, 2, kind="decision", title="подключение радиаторов",
+                    created_ts=now, updated_ts=now)
+        seed_entity(db, 3, kind="decision", title="подключение радиаторов",
+                    created_ts=now, updated_ts=now)
+        seed_event(db, 2, op="new", ts=now - 5, msg_id=10, quote="цитата")
+        seed_event(db, 3, op="new", ts=now, msg_id=11, quote="цитата")
+        seed_message(db, msg_id=10, text="подключение радиаторов", ts=now - 5)
+        seed_message(db, msg_id=11, text="подключение радиаторов", ts=now)
+        db.conn.commit()
+    orig = memory._find_candidates
+    calls = {"n": 0}
+
+    def flaky(db, e, vecs=None):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("boom")
+        return orig(db, e, vecs)
+
+    memory._find_candidates = flaky
+    try:
+        res = memory.link(str(path), dry_run=False)
+    finally:
+        memory._find_candidates = orig
+    check(res["ok"] is False, "link M4: ok=False при исключении", str(res))
+    with DB(path) as db:
+        n = db.conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0]
+        check(n == 0, "link M4: частичные кандидаты откатаны", str(n))
+        cur = db.get_meta(memory.CURSOR_KEY)
+        check(cur is None, "link M4: курсор не двинулся", str(cur))
+
+
+def test_accept_honesty(tmp: Path) -> None:
+    print("=== review: accept при неудачном supersede не врёт ===")
+    path = tmp / "accept.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="decision", title="старое",
+                    status="done", closed_ts=now - 50,
+                    created_ts=now - 100, updated_ts=now - 100)
+        seed_entity(db, 2, kind="decision", title="новое",
+                    created_ts=now, updated_ts=now)
+        db.conn.execute(
+            "INSERT INTO memory_candidates(new_entity_id, candidate_entity_id, "
+            "status, created_ts) VALUES(2, 1, 'pending', 0)")
+        db.conn.commit()
+    res = memory._review(str(path), ["--accept", "1"])
+    check(res["ok"] is True, "accept M3: ok=True")
+    check(res["applied"] is False, "accept M3: applied=False", str(res))
+    check(res["status"] == "pending", "accept M3: статус остался pending", str(res))
+    with DB(path) as db:
+        st = db.conn.execute(
+            "SELECT status FROM memory_candidates WHERE id=1").fetchone()["status"]
+        check(st == "pending", "accept M3: в БД pending", st)
+
+
+def test_link_auto_gate(tmp: Path) -> None:
+    print("=== linker: auto не ставится при неудачном supersede ===")
+    path = tmp / "link_gate.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="decision", title="подключение радиаторов",
+                    created_ts=now - 100, updated_ts=now - 100)
+        seed_entity(db, 2, kind="decision", title="подключение радиаторов",
+                    created_ts=now, updated_ts=now)
+        seed_event(db, 2, op="new", ts=now, msg_id=10, quote="цитата")
+        seed_message(db, msg_id=10, text="передумали, отменяем подключение радиаторов", ts=now)
+        db.conn.commit()
+    orig = memory._apply_supersede
+    memory._apply_supersede = lambda *a, **k: False
+    try:
+        res = memory.link(str(path), dry_run=False, auto=True)
+    finally:
+        memory._apply_supersede = orig
+    check(res["auto"] == 0, "link L4: auto не сработал", str(res["auto"]))
+    with DB(path) as db:
+        cand = db.conn.execute(
+            "SELECT status FROM memory_candidates WHERE new_entity_id=2 "
+            "AND candidate_entity_id=1").fetchone()
+        check(cand is not None and cand["status"] == "pending",
+              "link L4: кандидат pending", str(cand and cand["status"]))
+
+
+def test_gc_stale(tmp: Path) -> None:
+    print("=== gc: закрытая сторона -> кандидат stale ===")
+    path = tmp / "gc_stale.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="decision", title="старое",
+                    status="done", closed_ts=now, created_ts=now - 100, updated_ts=now - 100)
+        seed_entity(db, 2, kind="decision", title="новое", created_ts=now, updated_ts=now)
+        db.conn.execute(
+            "INSERT INTO memory_candidates(new_entity_id, candidate_entity_id, "
+            "status, created_ts) VALUES(2, 1, 'pending', 0)")
+        db.conn.commit()
+    g = memory.gc(str(path))
+    check(g["stale"] == 1, "gc M9: один stale", str(g))
+    with DB(path) as db:
+        st = db.conn.execute("SELECT status FROM memory_candidates").fetchone()["status"]
+        check(st == "stale", "gc M9: статус stale", st)
+
+
+def test_rebuild_recreate(tmp: Path) -> None:
+    print("=== rebuild: пересоздаёт удалённый entities_fts ===")
+    path = tmp / "rebuild_re.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="task", title="задача один", created_ts=now, updated_ts=now)
+        seed_entity(db, 2, kind="task", title="задача два", created_ts=now, updated_ts=now)
+        db.conn.commit()
+        db.conn.execute("DROP TABLE entities_fts")
+        db.conn.commit()
+    r = memory.rebuild(str(path))
+    check(r["ok"] is True and r["indexed"] == 2, "rebuild LOW-b: indexed=2", str(r))
+    with DB(path) as db:
+        n = db.conn.execute("SELECT COUNT(*) FROM entities_fts").fetchone()[0]
+        check(n == 2, "rebuild LOW-b: таблица восстановлена", str(n))
+        hit = db.conn.execute(
+            "SELECT entity_id FROM entities_fts WHERE entities_fts MATCH ?",
+            ("задача*",)).fetchall()
+        check(len(hit) == 2, "rebuild LOW-b: поиск работает", str(len(hit)))
+
+
+def test_resolve_alias_chain(tmp: Path) -> None:
+    print("=== _resolve_alias: цепочка A->B->C ===")
+    path = tmp / "alias.sqlite"
+    with DB(path) as db:
+        db.conn.execute("INSERT INTO entity_aliases(old_entity_id, entity_id) VALUES(1, 2)")
+        db.conn.execute("INSERT INTO entity_aliases(old_entity_id, entity_id) VALUES(2, 3)")
+        db.conn.commit()
+        check(memory._resolve_alias(db, 1) == 3, "alias LOW-c: 1->3",
+              str(memory._resolve_alias(db, 1)))
+        check(memory._resolve_alias(db, 3) == 3, "alias LOW-c: 3->3")
+
+
+def test_reject_missing(tmp: Path) -> None:
+    print("=== review: reject несуществующего id -> ошибка ===")
+    path = tmp / "reject.sqlite"
+    with DB(path) as db:
+        db.conn.commit()
+    res = memory._review(str(path), ["--reject", "999"])
+    check(res["ok"] is False, "reject LOW-d: ok=False", str(res))
+    check(res.get("error") == "candidate not found", "reject LOW-d: ошибка", str(res))
+
+
+def test_cli_safe_int(tmp: Path) -> None:
+    print("=== CLI: нечисловой --accept/--limit -> структурная ошибка ===")
+    path = tmp / "cli.sqlite"
+    with DB(path) as db:
+        db.conn.commit()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = memory.main(["review", "--accept", "abc", "--db", str(path)])
+    check(rc == 1, "CLI LOW-a: review --accept abc rc=1", str(rc))
+    out = json.loads(buf.getvalue())
+    check(out.get("ok") is False, "CLI LOW-a: review структурная ошибка", str(out))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = memory.main(["embed", "--limit", "abc", "--db", str(path)])
+    check(rc == 1, "CLI LOW-a: embed --limit abc rc=1", str(rc))
+    out = json.loads(buf.getvalue())
+    check(out.get("ok") is False, "CLI LOW-a: embed структурная ошибка", str(out))
+
+
+def test_unpack_vec_guard(tmp: Path) -> None:
+    print("=== _unpack_vec: не кратно 4 -> [] ===")
+    check(memory._unpack_vec(b"\x00\x01\x02") == [], "unpack L5: 3 байта -> []")
+    check(memory._unpack_vec(b"\x00\x01\x02\x03\x04") == [], "unpack L5: 5 байт -> []")
+    check(memory._unpack_vec(b"") == [], "unpack L5: пусто -> []")
+    v = memory._unpack_vec(memory._pack_vec([1.5, -2.0]))
+    check(v == [1.5, -2.0], "unpack L5: кратно 4 round-trip", str(v))
+
+
+def test_cue_transcript(tmp: Path) -> None:
+    print("=== _cue_hit: cue в транскрипте медиа ===")
+    path = tmp / "cue_tr.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_message(db, msg_id=10, text="обычный текст без маркера", ts=now)
+        db.conn.execute(
+            "INSERT INTO media_assets(chat_id, msg_id, kind, status, text, ts) "
+            "VALUES(?,?,?,?,?,?)", (-100, 10, "voice", "done",
+                                    "передумали, отменяем решение", now))
+        db.conn.commit()
+        check(memory._cue_hit(db, {"chat_id": -100, "msg_id": 10}) is True,
+              "cue L6: маркер из транскрипта")
+        check(memory._cue_hit(db, {"chat_id": -100, "msg_id": 999}) is False,
+              "cue L6: нет сообщения -> False")
+
+
+def test_embed_mismatch(tmp: Path) -> None:
+    print("=== embed: короткий ответ не ok:true ===")
+    path = tmp / "embed_mm.sqlite"
+    now = int(time.time())
+    with DB(path) as db:
+        seed_entity(db, 1, kind="task", title="задача", created_ts=now, updated_ts=now)
+        db.conn.commit()
+    set_embed_env("test-embed")
+    orig = memory._embed_texts
+    memory._embed_texts = lambda texts, timeout=None: []
+    try:
+        res = memory.embed(str(path))
+        check(res["ok"] is False, "embed L7: короткий ответ -> ok=False", str(res))
+        with DB(path) as db:
+            n = db.conn.execute("SELECT COUNT(*) FROM entity_vec").fetchone()[0]
+            check(n == 0, "embed L7: ничего не записано", str(n))
+    finally:
+        memory._embed_texts = orig
+        clear_embed_env()
+
+
+def test_title_render(tmp: Path) -> None:
+    print("=== selector: title санитизируется в строке промпта ===")
+    path = tmp / "title.sqlite"
+    now = 1_700_000_000
+    with DB(path) as db:
+        seed_entity(db, 1, kind="task", title="строка\n" + "x" * 500,
+                    created_ts=now, updated_ts=now)
+        db.conn.commit()
+    pack = PACKS["construction"]
+    w = {"chat_id": -100, "topic_id": 5, "project": "Объекд",
+         "alias": "Стройка", "topic_title": "Стройка"}
+    with DB(path) as db:
+        lines = memory.select_open_entities(db, pack, w, [], now=now)
+    line = next((ln for ln in lines if ln.startswith("1 | ")), None)
+    check(line is not None, "render H2: строка сущности есть")
+    title_part = line.split(" | ")[2]
+    check("\n" not in title_part and "\r" not in title_part and "\t" not in title_part,
+          "render H2: переводы строк убраны", repr(title_part[:20]))
+    check(len(title_part) <= 120, "render H2: title обрезан до 120", str(len(title_part)))
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -497,6 +822,22 @@ def main() -> int:
         test_embed(tmp)
         test_recall_semantic(tmp)
         test_link_cosine(tmp)
+        test_recall_reachability(tmp)
+        test_recall_filter_rank(tmp)
+        test_counts_chunk(tmp)
+        test_link_last_event(tmp)
+        test_link_rollback(tmp)
+        test_accept_honesty(tmp)
+        test_link_auto_gate(tmp)
+        test_gc_stale(tmp)
+        test_rebuild_recreate(tmp)
+        test_resolve_alias_chain(tmp)
+        test_reject_missing(tmp)
+        test_cli_safe_int(tmp)
+        test_unpack_vec_guard(tmp)
+        test_cue_transcript(tmp)
+        test_embed_mismatch(tmp)
+        test_title_render(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()
