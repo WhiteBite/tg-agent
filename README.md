@@ -179,8 +179,8 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_changes` | Сущности с событиями новее `since_ts`: что менялось после отметки, у каждой — события с цитатой-доказательством; фильтры pack/project |
 | `tg_project_brief` | Сводка по проекту: counts по статусам, open, overdue, next_due, открытые вопросы, обещания без срока/ответственного, топ владельцев |
 | `tg_gaps` | Пробелы по проекту или пакету: открытые вопросы без ответа, обещания без срока и без ответственного, с причиной попадания |
-| `tg_recall` | Гибридный recall по сущностям (`memory.py`): лексика FTS5 + свежесть + важность; фильтры project/kind/pack, `since_ts` отмечает изменённые после отметки; у хита — score, цепочка supersede (successor/predecessor), последнее событие и `changed_since` |
-| `tg_memory_candidates` | Очередь кандидатов на замену решения (`memory_candidates`) для ревью: новая сущность против старой, signal/score/цитата, статус (pending/accepted/rejected/auto); фильтры status/project |
+| `tg_recall` | Гибридный recall по сущностям (`memory.py`) над отфильтрованным корпусом: лексика FTS5 + опциональная семантика (эмбеддинги) + свежесть + важность; фильтры project/kind/pack, `since_ts` отмечает изменённые после отметки; у хита — score, цепочка supersede (successor/predecessor), последнее событие и `changed_since`. Лексический и семантический отбор достают старые решения даже вне пула свежих |
+| `tg_memory_candidates` | Очередь кандидатов на замену решения (`memory_candidates`) для ревью: новая сущность против старой, signal/score/цитата, статус (pending/accepted/rejected/auto/stale — кандидат разрешается как stale, когда любая из сторон закрыта или слита); фильтры status/project. В строгом режиме (`TG_STRICT_WATCH`) обе стороны кандидата должны быть в watch-листе |
 
 Отправки нет вообще — пока не включён гейт: по умолчанию в `server.py` нет
 инструмента, который что-то пишет в Telegram. Пишущих модуля четыре, все вне
@@ -568,6 +568,8 @@ run `status='filtered'`, остальные сообщения обрабаты�
 «меняем»…), заводит кандидата на замену. Авто-замена по умолчанию ВЫКЛЮЧЕНА:
 кандидаты копятся в `memory_candidates` со статусом `pending` и ждут ревью;
 `MEMORY_AUTO_SUPERSEDE=1` включает авто-замену при высокой похожести и маркере.
+Статус `auto` ставится только когда замена реально применилась; если цель уже
+закрыта, ревью-принятие возвращает `applied: false` и ничего не меняет.
 
 **CLI.** `python3 memory.py link [--apply]` (по умолчанию dry-run),
 `rebuild` (перестроить `entities_fts`), `gc` (убрать осиротевшие кандидаты и
@@ -951,7 +953,7 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 1585 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс девятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1672 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс девятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -1019,7 +1021,7 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **1585 проверок: свои проверки плюс девятнадцать suites
+`python3 test_offline.py` — **1672 проверок: свои проверки плюс девятнадцать suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
