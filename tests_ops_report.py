@@ -1033,6 +1033,57 @@ def test_monitor_changes() -> None:
           "изменения: нули не добавляют строку", str(lines2))
 
 
+def test_monitor_backlog_scheduling() -> None:
+    print("=== monitor: к распределению и без срока ===")
+    import monitor as monitor_mod
+
+    db = TMP / "backlog.sqlite"
+    _seed_watch_db(db, project="стройка")
+    now = int(time.time())
+    with DB(db) as d:
+        d.conn.executemany(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "due_ts, project, created_ts, updated_ts) "
+            "VALUES('construction', -100900, 1, ?, ?, ?, ?, 'стройка', ?, ?)",
+            [("decision", "К распределению", "backlog", None, now, now),
+             ("task", "Задача без срока", "open", None, now, now),
+             ("approval", "Согласование без срока", "open", None, now, now),
+             ("promise", "Обещание со сроком", "open", now + 86400, now, now)])
+        d.conn.execute(
+            "INSERT INTO entities(pack, chat_id, topic_id, kind, title, status, "
+            "due_ts, project, created_ts, updated_ts, closed_ts) "
+            "VALUES('construction', -100900, 1, 'task', 'Закрытый backlog', 'backlog', "
+            "NULL, 'стройка', ?, ?, ?)", (now, now, now))
+        d.conn.commit()
+
+    s = monitor_mod.collect(str(db))
+    check(s["backlog_count"] == 1 and s["needs_scheduling_count"] == 2,
+          "backlog: открытый backlog и без срока посчитаны",
+          str((s["backlog_count"], s["needs_scheduling_count"])))
+    lines = monitor_mod.format_report(s)
+    check(any("к распределению: 1, без срока: 2" in ln for ln in lines),
+          "backlog: строка в сводке", "\n".join(lines)[:300])
+
+    r = monitor_mod.run(str(db))
+    check("backlog_count" in r and "needs_scheduling_count" in r,
+          "run(): новые ключи в возвращаемом подмножестве", str(sorted(r)))
+
+    filt = monitor_mod.collect(str(db), project="баня")
+    check(filt["backlog_count"] == 0 and filt["needs_scheduling_count"] == 0,
+          "backlog: фильтр по чужому проекту даёт нули",
+          str((filt["backlog_count"], filt["needs_scheduling_count"])))
+
+    empty = TMP / "backlog_empty.sqlite"
+    _seed_watch_db(empty)
+    s2 = monitor_mod.collect(str(empty))
+    check(s2["backlog_count"] == 0 and s2["needs_scheduling_count"] == 0,
+          "backlog: пустая БД — нули",
+          str((s2["backlog_count"], s2["needs_scheduling_count"])))
+    lines2 = monitor_mod.format_report(s2)
+    check(not any("к распределению" in ln or "без срока" in ln for ln in lines2),
+          "backlog: нули не добавляют строку", str(lines2))
+
+
 def test_engine_control() -> None:
     print("=== engine: статус по lockfile, пуск/стоп за гейтом ===")
     import engine as engine_mod
@@ -1167,6 +1218,7 @@ def main() -> int:
         test_monitor_stuck()
         test_monitor_mine()
         test_monitor_changes()
+        test_monitor_backlog_scheduling()
         test_engine_control()
         test_extract_report_rejected()
         test_doctor_quality()

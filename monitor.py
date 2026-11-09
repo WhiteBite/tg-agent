@@ -114,6 +114,13 @@ def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
             "SELECT * FROM entities WHERE kind='promise' AND closed_ts IS NULL "
             "AND (owner IS NULL OR owner='')" + proj_sql +
             " ORDER BY created_ts LIMIT 500", proj_args)]
+        backlog_count = d.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE status='backlog' AND closed_ts IS NULL"
+            + proj_sql, proj_args).fetchone()["c"]
+        needs_scheduling_count = d.conn.execute(
+            "SELECT COUNT(*) c FROM entities WHERE closed_ts IS NULL AND due_ts IS NULL "
+            "AND kind IN ('task','promise','approval')" + proj_sql,
+            proj_args).fetchone()["c"]
     overdue_ids = {e["id"] for e in overdue}
     upcoming = [e for e in window if e["id"] not in overdue_ids]
     me_owners = _me_owners()
@@ -145,7 +152,9 @@ def collect(db: str | Path, days_ahead: int = 0, project: str | None = None,
             "ops_rejected": rej["r"], "ops_overflow": rej["o"],
             "closed_count": closed_count, "moved_count": moved_count,
             "stuck": stuck, "promises_no_due": promises_no_due,
-            "promises_no_owner": promises_no_owner, "mine": mine}
+            "promises_no_owner": promises_no_owner, "mine": mine,
+            "backlog_count": backlog_count,
+            "needs_scheduling_count": needs_scheduling_count}
 
 
 def format_report(summary: dict) -> list[str]:
@@ -172,6 +181,9 @@ def format_report(summary: dict) -> list[str]:
     for e in summary["news"][:10]:
         age = max((now - e["created_ts"]) // 3600, 1)
         lines.append(f"  новое: [{e['pack']}/{e['kind']}] {e['title'][:120]} ({age}ч назад)")
+    if summary.get("backlog_count") or summary.get("needs_scheduling_count"):
+        lines.append(f"  к распределению: {summary.get('backlog_count', 0)}, "
+                     f"без срока: {summary.get('needs_scheduling_count', 0)}")
     if summary.get("closed_count") or summary.get("moved_count"):
         lines.append(f"  изменения за {summary['news_hours']}ч: закрыто "
                      f"{summary.get('closed_count', 0)}, перенесено сроков "
@@ -293,7 +305,9 @@ def _run_routed(db_path: str | Path, days_ahead: int, send: bool, dry_run: bool,
             "promises_no_due": summary["promises_no_due"],
             "promises_no_owner": summary["promises_no_owner"],
             "closed_count": summary["closed_count"], "moved_count": summary["moved_count"],
-            "mine": summary["mine"], "lines": lines, "notify": result}
+            "mine": summary["mine"], "lines": lines, "notify": result,
+            "backlog_count": summary["backlog_count"],
+            "needs_scheduling_count": summary["needs_scheduling_count"]}
 
 
 def run(db_path: str | Path = DB_PATH, days_ahead: int = 0, project: str | None = None,
@@ -327,7 +341,9 @@ def run(db_path: str | Path = DB_PATH, days_ahead: int = 0, project: str | None 
             "promises_no_due": summary["promises_no_due"],
             "promises_no_owner": summary["promises_no_owner"],
             "closed_count": summary["closed_count"], "moved_count": summary["moved_count"],
-            "mine": summary["mine"], "lines": lines, "notify": result}
+            "mine": summary["mine"], "lines": lines, "notify": result,
+            "backlog_count": summary["backlog_count"],
+            "needs_scheduling_count": summary["needs_scheduling_count"]}
 
 
 def _arg_value(args: list[str], name: str) -> str | None:
