@@ -1162,6 +1162,81 @@ def test_autoconfirm_reactions(root: Path) -> None:
               f"events={total} q2={q2['status']}")
 
 
+def test_approval_and_link(root: Path) -> None:
+    print("=== approval + link: согласование и зависимость blocks ===")
+    db_path = root / "approval_link.sqlite"
+    chat, topic = -100970, 17
+    msg_ts = ts_utc(2026, 6, 15)
+    with DB(db_path) as db:
+        db.upsert_chat(chat, "Объект-8", None, "supergroup", True, 6)
+        db.upsert_topic(chat, topic, "Объект-8")
+        db.watch_add(chat, topic, project="стройка")
+        seed_messages(db, chat, topic, {
+            1001: "согласовано: КП на инженерные сети",
+            1002: "задача: запросить КП",
+            1003: "задача: проект инженерных сетей",
+            1004: "задача: монтаж оборудования",
+            1005: "задача: пусконаладка",
+        }, msg_ts)
+        set_cursor(db, chat, topic, "construction", 1000)
+
+    pack = PACKS["construction"]
+
+    def new_op(kind, title, msg, quote):
+        return {"op": "new", "kind": kind, "title": title, "entity_id": None,
+                "body": None, "owner": None, "due_text": None, "due_ts": None,
+                "supersedes": None, "blocks": None,
+                "evidence": [{"chat_id": chat, "msg_id": msg, "quote": quote}]}
+
+    def link_op(src, dst, msg, quote):
+        return {"op": "link", "entity_id": src, "blocks": dst,
+                "evidence": [{"chat_id": chat, "msg_id": msg, "quote": quote}]}
+
+    def run_ops(ops, upto):
+        with DB(db_path) as db:
+            set_cursor(db, chat, topic, "construction", upto)
+        return extract_mod.run(str(db_path), packs=[pack], workers=1,
+                               provider=lambda prompt, pk: {"ops": ops})
+
+    run_ops([new_op("approval", "Согласование КП", 1001, "согласовано"),
+             new_op("task", "Запросить КП", 1002, "запросить КП"),
+             new_op("task", "Проект сетей", 1003, "проект инженерных сетей")], 1000)
+    with DB(db_path) as db:
+        e = db.conn.execute("SELECT * FROM entities WHERE id=1").fetchone()
+        check(e is not None and e["kind"] == "approval",
+              "approval: операция new создаёт сущность kind=approval",
+              f"kind={e and e['kind']}")
+
+    run_ops([link_op(2, 3, 1004, "монтаж")], 1003)
+    with DB(db_path) as db:
+        link = db.conn.execute(
+            "SELECT * FROM entity_links WHERE from_entity_id=2 AND to_entity_id=3"
+        ).fetchone()
+        check(link is not None and link["link_kind"] == "blocks",
+              "link: строка entity_links с link_kind=blocks",
+              f"link={dict(link) if link else None}")
+        ev = db.conn.execute(
+            "SELECT * FROM entity_events WHERE entity_id=2 AND op='link'").fetchone()
+        check(ev is not None and ev["field"] == "blocks" and ev["to_val"] == "3"
+              and ev["msg_id"] == 1004 and ev["quote"] == "монтаж",
+              "link: событие link/blocks на источнике с evidence",
+              f"ev={dict(ev) if ev else None}")
+
+    run_ops([link_op(2, 999, 1005, "пусконаладка")], 1004)
+    with DB(db_path) as db:
+        run = db.conn.execute(
+            "SELECT * FROM extraction_runs ORDER BY id DESC LIMIT 1").fetchone()
+        check(run["ops_applied"] == 0 and run["ops_rejected"] == 1,
+              "link: неизвестный blocks отклонён",
+              f"applied={run['ops_applied']} rejected={run['ops_rejected']}")
+        rejects = json.loads(run["rejects_json"])
+        check(any("blocks" in r["reason"] for r in rejects),
+              "link: причина отказа про blocks в rejects_json",
+              str([r["reason"] for r in rejects]))
+        n = db.conn.execute("SELECT COUNT(*) c FROM entity_links").fetchone()["c"]
+        check(n == 1, "link: отклонённая операция не пишет строку", str(n))
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="packs_semantics_"))
     test_parse_due_text()
@@ -1176,6 +1251,7 @@ def main() -> int:
     test_status_transitions(root)
     test_autoclose_replied_questions(root)
     test_autoconfirm_reactions(root)
+    test_approval_and_link(root)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

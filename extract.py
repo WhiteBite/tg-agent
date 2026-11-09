@@ -450,7 +450,7 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
     name = op.get("op")
     if name not in pack["ops"]:
         return False, f"op вне пакета: {name}"
-    if op.get("kind") not in pack["kinds"]:
+    if name != "link" and op.get("kind") not in pack["kinds"]:
         return False, f"kind вне пакета: {op.get('kind')}"
     for field in ("confidence", "due_ts"):
         value = op.get(field)
@@ -493,6 +493,25 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
             return False, f"supersedes {sup} вне скоупа"
         if srow["closed_ts"] is not None:
             return False, f"supersedes {sup}: сущность закрыта"
+    if name == "link":
+        src = op.get("entity_id")
+        dst = op.get("blocks")
+        if not isinstance(src, int):
+            return False, "link без entity_id"
+        if not isinstance(dst, int):
+            return False, "link без blocks"
+        for eid, label in ((src, "entity_id"), (dst, "blocks")):
+            row = db.conn.execute(
+                "SELECT closed_ts FROM entities WHERE id=? AND pack=?",
+                (eid, pack["id"])).fetchone()
+            member = row is not None and db.conn.execute(
+                "SELECT 1 FROM entity_sources WHERE entity_id=? AND chat_id=? AND topic_id=?",
+                (eid, w["chat_id"], w["topic_id"])).fetchone() is not None
+            if not member:
+                return False, f"link {label} {eid} вне скоупа"
+            if row["closed_ts"] is not None:
+                return False, f"link {label} {eid}: сущность закрыта"
+        return True, ""
     if name == "new":
         return True, ""
     entity_id = op.get("entity_id")
@@ -616,6 +635,25 @@ def _apply_supersede(db: DB, pack: dict, op: dict, new_id: int,
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, to_val, "
         "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (sup, run_id, now, "supersede", "superseded_by", str(new_id),
+         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"),
+         _actor_for(db, op.get("evidence"), msg_by_id)))
+
+
+def _apply_link(db: DB, w: dict, op: dict, run_id: int, now: int,
+                msg_by_id: dict | None = None) -> None:
+    src = op["entity_id"]
+    dst = op["blocks"]
+    ev = (op.get("evidence") or [{}])[0]
+    db.conn.execute(
+        "INSERT OR IGNORE INTO entity_links(from_entity_id, to_entity_id, link_kind, "
+        "run_id, chat_id, msg_id, quote, created_ts, updated_ts) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (src, dst, "blocks", run_id, ev.get("chat_id"), ev.get("msg_id"),
+         ev.get("quote"), now, now))
+    db.conn.execute(
+        "INSERT INTO entity_events(entity_id, run_id, ts, op, field, to_val, "
+        "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (src, run_id, now, "link", "blocks", str(dst),
          ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"),
          _actor_for(db, op.get("evidence"), msg_by_id)))
 
@@ -805,6 +843,8 @@ def _apply_ops(db: DB, pack: dict, w: dict, valid: list[dict], run_id: int,
             _apply_flip(db, w, op, run_id, now, "reopen", None, msg_by_id)
         elif name in _STATUS_TARGET:
             _apply_status(db, w, op, run_id, now, name, msg_by_id)
+        elif name == "link":
+            _apply_link(db, w, op, run_id, now, msg_by_id)
         else:
             _apply_new(db, pack, w, op, run_id, now, msg_by_id)
 

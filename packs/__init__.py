@@ -7,7 +7,7 @@ from packs.services import PACK as SERVICES
 
 PACKS: dict[str, dict] = {"construction": CONSTRUCTION, "services": SERVICES}
 
-_KNOWN_OPS = frozenset({"new", "update", "close", "reopen", "start", "block", "unblock"})
+_KNOWN_OPS = frozenset({"new", "update", "close", "reopen", "start", "block", "unblock", "link"})
 _PROMPT_PLACEHOLDERS = ("{scope_header}", "{messages}", "{open_entities}")
 _JSON_ENUM_PATH = ("properties", "ops", "items", "properties", "op", "enum")
 
