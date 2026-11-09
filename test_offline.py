@@ -1768,6 +1768,30 @@ def test_entities_mcp(db_path: Path) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
 
+    import server as server_mod
+    with DB(ent_db) as db:
+        watched_id = db.conn.execute(
+            "SELECT id FROM entities WHERE title = ?",
+            ("Вопрос без ответа",)).fetchone()["id"]
+        unwatched_id = db.conn.execute(
+            "SELECT id FROM entities WHERE title = ?",
+            ("Обещание мимо watch",)).fetchone()["id"]
+        db.conn.execute(
+            "INSERT INTO memory_candidates(new_entity_id, candidate_entity_id, "
+            "signal, score, quote, status, created_ts) VALUES(?,?,?,?,?,?,?)",
+            (watched_id, unwatched_id, "supersede", 0.9, "цитата", "pending", now))
+        for i in range(server_mod.MAX_LIMIT + 50):
+            cur = db.conn.execute(
+                "INSERT INTO entities(pack, chat_id, topic_id, kind, title, "
+                "status, project, created_ts, updated_ts) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("construction", -100999, 7, "task", f"Массовая {i}", "open",
+                 "баня", now, now))
+            db.conn.execute(
+                "INSERT INTO memory_candidates(new_entity_id, candidate_entity_id, "
+                "signal, score, quote, status, created_ts) VALUES(?,?,?,?,?,?,?)",
+                (cur.lastrowid, watched_id, "supersede", 0.5, "цитата", "pending", now))
+        db.conn.commit()
+
     env_strict = dict(os.environ, TG_DB=str(ent_db), TG_STRICT_WATCH="1")
     proc2 = subprocess.Popen(
         [sys.executable, str(Path(__file__).parent / "server.py")],
@@ -1799,6 +1823,19 @@ def test_entities_mcp(db_path: Path) -> None:
               and "Вопрос без ответа" in gaps2_titles,
               "strict: tg_gaps не отдаёт дыру вне watch-листа",
               str(gaps2_titles))
+        mc = scall("tg_memory_candidates", {"status": "pending"}, 23)
+        mc_titles = [it.get("candidate_title") for it in mc.get("items", [])]
+        check("Обещание мимо watch" not in mc_titles,
+              "strict: tg_memory_candidates не отдаёт кандидата из чужого чата",
+              str(mc_titles[:5]))
+        rc = scall("tg_recall", {"query": "задача", "limit": 10 ** 9}, 24)
+        check(rc.get("count") <= server_mod.MAX_LIMIT,
+              "strict: tg_recall клампит limit до MAX_LIMIT",
+              str(rc.get("count")))
+        mc2 = scall("tg_memory_candidates", {"status": "pending", "limit": 10 ** 9}, 25)
+        check(mc2.get("count") <= server_mod.MAX_LIMIT,
+              "strict: tg_memory_candidates клампит limit до MAX_LIMIT",
+              str(mc2.get("count")))
     finally:
         proc2.terminate()
         try:
