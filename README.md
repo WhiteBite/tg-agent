@@ -571,12 +571,16 @@ run `status='filtered'`, остальные сообщения обрабаты�
 
 **CLI.** `python3 memory.py link [--apply]` (по умолчанию dry-run),
 `rebuild` (перестроить `entities_fts`), `gc` (убрать осиротевшие кандидаты и
-векторы), `review [--status pending] [--accept ID] [--reject ID]` — принять или
+векторы), `embed [--limit N]` (посчитать эмбеддинги при включённом провайдере),
+`review [--status pending] [--accept ID] [--reject ID]` — принять или
 отклонить кандидата (принятие закрывает старую сущность событием op='supersede').
 
-**Семантический слой — opt-in.** Таблица `entity_vec` (миграция v15)
-зарезервирована под эмбеддинги; сейчас `memory.py` работает только на stdlib,
-эмбеддинги не используются.
+**Семантический слой — opt-in.** `MEMORY_EMBED_PROVIDER` (плюс `MEMORY_EMBED_URL`,
+`MEMORY_EMBED_KEY`, `MEMORY_EMBED_MODEL`, дефолт `text-embedding-3-small`)
+включает эмбеддинги: `python3 memory.py embed` считает векторы в `entity_vec`
+(миграция v15, float32 BLOB, stdlib), а `recall` и линкер домешивают косинус
+вторым сигналом (кандидат — при `cos >= 0.7`, авто-замена — при `cos >= 0.85`).
+Без провайдера слой молча выключен, поведение лексическое.
 
 Память — пересчитываемая проекция: `entities_fts` и `memory_candidates`
 перестраиваются из `entities`/`entity_events` (`rebuild`/`gc`), источник истины —
