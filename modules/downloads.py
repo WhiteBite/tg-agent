@@ -525,7 +525,7 @@ def _runner(job_id: int) -> dict:
     cmd = [sys.executable, str(HERE / "downloads.py"), "run", "--job", str(job_id)]
     kwargs: dict = {"cwd": str(HERE)}
     if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     else:
         kwargs["start_new_session"] = True
     log = open(HERE / "downloads.log", "ab")

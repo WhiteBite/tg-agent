@@ -72,7 +72,7 @@ def _spawn(name: str, minutes: int):
     kwargs: dict = {"cwd": str(HERE), "stdout": subprocess.DEVNULL,
                     "stderr": subprocess.DEVNULL}
     if os.name == "nt":
-        kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                                    | getattr(subprocess, "DETACHED_PROCESS", 0))
     else:
         kwargs["start_new_session"] = True
