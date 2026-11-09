@@ -1,0 +1,582 @@
+#!/usr/bin/env python3
+"""Долговременная память: отбор открытых сущностей в промпт, детерминированная
+связка кандидатов на замену, гибридный recall, обслуживание индекса.
+
+    python3 memory.py link [--apply]     # связка кандидатов (по умолчанию dry-run)
+    python3 memory.py rebuild            # перестроить entities_fts
+    python3 memory.py gc                 # убрать осиротевшие кандидаты/векторы
+    python3 memory.py review [--status pending] [--accept ID] [--reject ID]
+
+Только stdlib и модули репозитория; эмбеддинги не используются.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import sqlite3
+import sys
+import time
+import unicodedata
+from pathlib import Path
+
+HERE = Path(__file__).parent
+sys.path.insert(0, str(HERE))
+
+from env import load_env
+
+load_env()
+
+from db import DB
+
+import people
+
+DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
+
+CURSOR_KEY = "memory:link:cursor"
+SCAN_LIMIT = 500
+SELECT_K = 60
+LEX_CAP = 40
+CORE_CAP = 12
+CAND_CAP = 5
+SIM_CAND = 0.3
+SIM_AUTO = 0.5
+
+_CUE_RE = re.compile(
+    r"передумал|по-другому|по другому|вместо|отмен|меняем|измен|пересмотр|"
+    r"не так|иначе|замен|переигр|снимаем|другой вариант|пересоглас",
+    re.IGNORECASE)
+
+_KIND_W = {"decision": 1.0, "approval": 0.9, "task": 0.6, "promise": 0.5,
+           "question": 0.4, "service": 0.5, "trial": 0.4, "promo": 0.3}
+
+_STOPWORDS = frozenset({
+    "и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то",
+    "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за",
+    "бы", "по", "только", "ее", "мне", "было", "вот", "от", "меня", "еще",
+    "нет", "о", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг", "ли",
+    "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь",
+    "опять", "уж", "вам", "ведь", "там", "потом", "себя", "ничего", "ей",
+    "может", "они", "тут", "где", "есть", "надо", "ней", "для", "мы", "тебя",
+    "их", "чем", "была", "сам", "чтоб", "без", "будто", "чего", "раз", "тоже",
+    "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому",
+    "этого", "какой", "совсем", "ним", "здесь", "этом", "один", "почти",
+    "мой", "тем", "чтобы", "нее", "сейчас", "были", "куда", "зачем", "всех",
+    "никогда", "можно", "при", "наконец", "два", "об", "другой", "хоть",
+    "после", "над", "больше", "тот", "через", "эти", "нас", "про", "всего",
+    "них", "какая", "много", "разве", "три", "эту", "моя", "впрочем",
+    "хорошо", "свою", "этой", "перед", "иногда", "лучше", "чуть", "том",
+    "нельзя", "такой", "им", "более", "всегда", "конечно", "всю", "между",
+    "the", "and", "for", "are", "was", "were", "been", "this", "that", "with",
+    "from", "not", "but", "then", "they", "she", "does", "did", "has", "have",
+    "had", "will", "would", "can", "could", "should", "may", "might", "must",
+    "about", "into", "over", "after", "before", "than", "too", "very", "just",
+    "also", "only", "more", "most", "some", "any", "all", "yes",
+})
+
+
+def _norm(text: str | None) -> str:
+    t = unicodedata.normalize("NFKC", text or "").casefold()
+    chars = [ch if (ch.isalnum() or ch.isspace()) else " " for ch in t]
+    return re.sub(r"\s+", " ", "".join(chars)).strip()
+
+
+def _tokens(text: str | None) -> list[str]:
+    return [t for t in _norm(text).split() if len(t) >= 3 and t not in _STOPWORDS]
+
+
+def _grams(s: str) -> set[str]:
+    if len(s) < 4:
+        return {s} if s else set()
+    return {s[i:i + 4] for i in range(len(s) - 3)}
+
+
+def _similarity(a: str | None, b: str | None) -> float:
+    na, nb = _norm(a), _norm(b)
+    if not na or not nb:
+        return 0.0
+    ga, gb = _grams(na), _grams(nb)
+    if not ga or not gb:
+        return 0.0
+    union = len(ga | gb)
+    return len(ga & gb) / union if union else 0.0
+
+
+def _importance(events: int, degree: int, kind: str) -> float:
+    kw = _KIND_W.get(kind, 0.4)
+    return min(1.0, 0.4 * math.log1p(events) / math.log1p(20)
+               + 0.3 * min(degree, 5) / 5 + 0.3 * kw)
+
+
+def _recency(updated_ts, created_ts, now: int) -> float:
+    ts = updated_ts or created_ts or now
+    age_days = max(0.0, (now - ts) / 86400)
+    return 0.5 ** (age_days / 30)
+
+
+def _batch_terms(rows: list[dict]) -> list[str]:
+    freq: dict[str, int] = {}
+    for r in rows:
+        for t in _tokens(r.get("text") or ""):
+            freq[t] = freq.get(t, 0) + 1
+    top = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))[:20]
+    return [t for t, _ in top]
+
+
+def _counts(db, ids: list[int]) -> tuple[dict[int, int], dict[int, int]]:
+    ev_count: dict[int, int] = {}
+    degree: dict[int, int] = {}
+    if not ids:
+        return ev_count, degree
+    marks = ",".join("?" * len(ids))
+    for r in db.conn.execute(
+            f"SELECT entity_id, COUNT(*) n FROM entity_events "
+            f"WHERE entity_id IN ({marks}) GROUP BY entity_id", ids):
+        ev_count[r["entity_id"]] = r["n"]
+    for r in db.conn.execute(
+            f"SELECT entity_id, COUNT(*) n FROM ("
+            f"SELECT from_entity_id AS entity_id FROM entity_links WHERE link_kind='blocks' "
+            f"UNION ALL SELECT to_entity_id FROM entity_links WHERE link_kind='blocks') "
+            f"WHERE entity_id IN ({marks}) GROUP BY entity_id", ids):
+        degree[r["entity_id"]] = r["n"]
+    return ev_count, degree
+
+
+def select_open_entities(db, pack, w, rows, now=None) -> list[str]:
+    now = int(time.time()) if now is None else int(now)
+    pack_id = pack["id"]
+    chat_id, topic_id = w["chat_id"], w["topic_id"]
+    project = w.get("project") or ""
+
+    cand: dict[int, dict] = {}
+
+    def add(row, scope):
+        eid = row["id"]
+        cur = cand.get(eid)
+        if cur is None:
+            cand[eid] = {"row": row, "scope": scope, "lex": 0.0, "core": False}
+        elif scope > cur["scope"]:
+            cur["scope"] = scope
+
+    s1 = [dict(r) for r in db.conn.execute(
+        "SELECT e.* FROM entities e JOIN entity_sources s ON s.entity_id = e.id "
+        "WHERE e.pack=? AND s.chat_id=? AND s.topic_id=? AND e.closed_ts IS NULL",
+        (pack_id, chat_id, topic_id))]
+    s1_ids = {r["id"] for r in s1}
+    for r in s1:
+        add(r, 1.0)
+
+    if project:
+        for r in db.conn.execute(
+                "SELECT * FROM entities WHERE pack=? AND project=? AND closed_ts IS NULL",
+                (pack_id, project)):
+            add(dict(r), 0.6)
+
+    terms = _batch_terms(rows)
+    lex_ids: list[int] = []
+    if terms and db.fts:
+        match = " OR ".join(t + "*" for t in terms)
+        sql = ("SELECT e.*, bm25(entities_fts) AS rank FROM entities_fts "
+               "JOIN entities e ON e.id = entities_fts.entity_id "
+               "WHERE entities_fts MATCH ? AND e.pack=? AND e.closed_ts IS NULL")
+        args: list = [match, pack_id]
+        if project:
+            sql += " AND e.project=?"
+            args.append(project)
+        sql += " ORDER BY rank LIMIT ?"
+        args.append(LEX_CAP)
+        try:
+            for r in db.conn.execute(sql, args):
+                d = dict(r)
+                lex_ids.append(d["id"])
+                add(d, 0.0)
+        except sqlite3.OperationalError:
+            lex_ids = []
+    n_lex = len(lex_ids)
+    for pos, eid in enumerate(lex_ids):
+        if eid in cand:
+            cand[eid]["lex"] = 1.0 - pos / max(1, n_lex)
+
+    core_order: list[int] = []
+
+    def core_add(rows_):
+        for r in rows_:
+            eid = r["id"]
+            if eid not in cand:
+                add(r, 1.0 if eid in s1_ids else 0.0)
+            if eid not in core_order:
+                core_order.append(eid)
+
+    core_add([dict(r) for r in db.conn.execute(
+        "SELECT e.* FROM entities e JOIN entity_sources s ON s.entity_id = e.id "
+        "WHERE e.pack=? AND s.chat_id=? AND s.topic_id=? AND e.closed_ts IS NULL "
+        "AND e.status='blocked' "
+        "ORDER BY COALESCE(e.updated_ts,e.created_ts) DESC LIMIT 4",
+        (pack_id, chat_id, topic_id))])
+    core_add([dict(r) for r in db.conn.execute(
+        "SELECT e.* FROM entities e JOIN entity_sources s ON s.entity_id = e.id "
+        "WHERE e.pack=? AND s.chat_id=? AND s.topic_id=? AND e.closed_ts IS NULL "
+        "AND e.due_ts IS NOT NULL AND e.due_ts <= ? ORDER BY e.due_ts LIMIT 4",
+        (pack_id, chat_id, topic_id, now))])
+    core_add([dict(r) for r in db.conn.execute(
+        "SELECT e.* FROM entities e JOIN entity_sources s ON s.entity_id = e.id "
+        "WHERE e.pack=? AND s.chat_id=? AND s.topic_id=? AND e.closed_ts IS NULL "
+        "AND e.kind IN ('decision','approval') "
+        "ORDER BY COALESCE(e.updated_ts,e.created_ts) DESC LIMIT 4",
+        (pack_id, chat_id, topic_id))])
+    linked = [dict(r) for r in db.conn.execute(
+        "SELECT e.*, (SELECT COUNT(*) FROM entity_links l WHERE l.link_kind='blocks' "
+        "AND (l.from_entity_id=e.id OR l.to_entity_id=e.id)) AS degree "
+        "FROM entities e JOIN entity_sources s ON s.entity_id = e.id "
+        "WHERE e.pack=? AND s.chat_id=? AND s.topic_id=? AND e.closed_ts IS NULL "
+        "ORDER BY degree DESC, COALESCE(e.updated_ts,e.created_ts) DESC LIMIT 3",
+        (pack_id, chat_id, topic_id))]
+    core_add([r for r in linked if r.get("degree", 0) > 0])
+    core_ids = set(core_order[:CORE_CAP])
+    for eid in core_ids:
+        cand[eid]["core"] = True
+
+    ev_count, degree = _counts(db, list(cand))
+    scored = []
+    for eid, info in cand.items():
+        row = info["row"]
+        imp = _importance(ev_count.get(eid, 0), degree.get(eid, 0), row["kind"])
+        rec = _recency(row["updated_ts"], row["created_ts"], now)
+        score = (3.0 * info["lex"] + 2.0 * info["scope"] + 1.0 * rec
+                 + 1.5 * imp + 4.0 * (1.0 if info["core"] else 0.0))
+        scored.append((info["core"], score,
+                       row["updated_ts"] or row["created_ts"] or 0, eid, row))
+    scored.sort(key=lambda x: (not x[0], -x[1], -x[2], x[3]))
+    return [f"{r['id']} | {r['kind']} | {r['title']} | {r['owner'] or ''} | {r['due_ts'] or ''}"
+            for _, _, _, _, r in scored[:SELECT_K]]
+
+
+def _actor_for(db, chat_id, msg_id):
+    if chat_id is None or msg_id is None:
+        return None
+    row = db.conn.execute(
+        "SELECT sender_name FROM messages WHERE chat_id=? AND msg_id=?",
+        (chat_id, msg_id)).fetchone()
+    if row is None or not row["sender_name"]:
+        return None
+    person = people.resolve_owner(db, row["sender_name"])
+    return person["display_name"] if person else row["sender_name"]
+
+
+def _apply_supersede(db, new_id: int, old_id: int, now: int, ev: dict) -> bool:
+    cur = db.conn.execute(
+        "UPDATE entities SET closed_ts=?, status='done', updated_ts=? "
+        "WHERE id=? AND closed_ts IS NULL", (now, now, old_id))
+    if cur.rowcount == 0:
+        return False
+    db.conn.execute(
+        "INSERT INTO entity_events(entity_id, run_id, ts, op, field, to_val, "
+        "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (old_id, None, now, "supersede", "superseded_by", str(new_id),
+         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"),
+         _actor_for(db, ev.get("chat_id"), ev.get("msg_id"))))
+    return True
+
+
+def _find_candidates(db, e) -> list[tuple[dict, float]]:
+    rows = db.conn.execute(
+        "SELECT * FROM entities WHERE pack=? AND kind=? AND closed_ts IS NULL "
+        "AND id < ? AND COALESCE(project,'') = COALESCE(?,'')",
+        (e["pack"], e["kind"], e["id"], e["project"])).fetchall()
+    et = f"{e['title'] or ''} {e['body'] or ''}"
+    scored = []
+    for p in rows:
+        pt = f"{p['title'] or ''} {p['body'] or ''}"
+        sim = _similarity(et, pt)
+        if sim >= SIM_CAND:
+            scored.append((dict(p), sim))
+    scored.sort(key=lambda x: (-x[1], x[0]["id"]))
+    return scored[:CAND_CAP]
+
+
+def _cue_hit(db, ev) -> bool:
+    if ev.get("chat_id") is None or ev.get("msg_id") is None:
+        return False
+    row = db.conn.execute(
+        "SELECT text FROM messages WHERE chat_id=? AND msg_id=?",
+        (ev["chat_id"], ev["msg_id"])).fetchone()
+    if row is None or not row["text"]:
+        return False
+    return _CUE_RE.search(row["text"]) is not None
+
+
+def link(db_path=DB_PATH, days: int = 7, dry_run: bool = False, auto=None) -> dict:
+    now = int(time.time())
+    if auto is None:
+        auto = os.environ.get("MEMORY_AUTO_SUPERSEDE", "").strip().lower() in (
+            "1", "true", "yes", "on")
+    result = {"ok": True, "new": 0, "candidates": 0, "auto": 0, "dry": bool(dry_run)}
+    with DB(db_path) as db:
+        try:
+            cursor = int(db.get_meta(CURSOR_KEY) or 0)
+            sql = ("SELECT ev.id AS event_id, ev.entity_id, ev.op, ev.chat_id, "
+                   "ev.msg_id, ev.quote, ev.ts FROM entity_events ev "
+                   "WHERE ev.id > ? AND ev.op IN ('new','update')")
+            args: list = [cursor]
+            if cursor == 0:
+                sql += " AND ev.ts >= ?"
+                args.append(now - days * 86400)
+            sql += " ORDER BY ev.id LIMIT ?"
+            args.append(SCAN_LIMIT)
+            events = [dict(r) for r in db.conn.execute(sql, args)]
+            max_id = cursor
+            seen: set[int] = set()
+            for ev in events:
+                max_id = max(max_id, ev["event_id"])
+                eid = ev["entity_id"]
+                if eid in seen:
+                    continue
+                seen.add(eid)
+                e = db.conn.execute(
+                    "SELECT * FROM entities WHERE id=?", (eid,)).fetchone()
+                if e is None or e["closed_ts"] is not None:
+                    continue
+                for p, sim in _find_candidates(db, e):
+                    result["candidates"] += 1
+                    existing = db.conn.execute(
+                        "SELECT id, status FROM memory_candidates "
+                        "WHERE new_entity_id=? AND candidate_entity_id=?",
+                        (eid, p["id"])).fetchone()
+                    if existing is not None and existing["status"] in (
+                            "rejected", "accepted", "auto"):
+                        continue
+                    do_auto = bool(auto) and sim >= SIM_AUTO and _cue_hit(db, ev)
+                    if existing is None:
+                        status = "auto" if do_auto else "pending"
+                        if not dry_run:
+                            db.conn.execute(
+                                "INSERT OR IGNORE INTO memory_candidates("
+                                "new_entity_id, candidate_entity_id, signal, score, "
+                                "quote, chat_id, msg_id, status, created_ts) "
+                                "VALUES(?,?,?,?,?,?,?,?,?)",
+                                (eid, p["id"], "similarity", sim, ev["quote"],
+                                 ev["chat_id"], ev["msg_id"], status, now))
+                        result["new"] += 1
+                        if do_auto:
+                            if not dry_run:
+                                _apply_supersede(db, eid, p["id"], now, ev)
+                            result["auto"] += 1
+                    else:
+                        if do_auto:
+                            if not dry_run:
+                                db.conn.execute(
+                                    "UPDATE memory_candidates SET status='auto', score=? "
+                                    "WHERE id=?", (sim, existing["id"]))
+                                _apply_supersede(db, eid, p["id"], now, ev)
+                            result["auto"] += 1
+                        elif not dry_run:
+                            db.conn.execute(
+                                "UPDATE memory_candidates SET score=? WHERE id=?",
+                                (sim, existing["id"]))
+            if not dry_run:
+                db.conn.commit()
+                if max_id > cursor:
+                    db.set_meta(CURSOR_KEY, str(max_id))
+        except Exception as exc:
+            result["ok"] = False
+            result["error"] = str(exc)
+    return result
+
+
+def _resolve_alias(db, eid: int) -> int:
+    row = db.conn.execute(
+        "SELECT entity_id FROM entity_aliases WHERE old_entity_id=?", (eid,)).fetchone()
+    return row["entity_id"] if row else eid
+
+
+def _supersede_chain(db, eid: int) -> dict:
+    succ = db.conn.execute(
+        "SELECT to_val FROM entity_events WHERE entity_id=? AND op='supersede' "
+        "AND field='superseded_by' ORDER BY ts DESC, id DESC LIMIT 1",
+        (eid,)).fetchone()
+    successor = None
+    if succ is not None and succ["to_val"]:
+        try:
+            successor = _resolve_alias(db, int(succ["to_val"]))
+        except (TypeError, ValueError):
+            successor = None
+    pred = db.conn.execute(
+        "SELECT entity_id FROM entity_events WHERE op='supersede' "
+        "AND field='superseded_by' AND to_val=? ORDER BY ts DESC, id DESC LIMIT 1",
+        (str(eid),)).fetchone()
+    predecessor = _resolve_alias(db, pred["entity_id"]) if pred is not None else None
+    return {"successor": successor, "predecessor": predecessor}
+
+
+def _last_event(db, eid: int):
+    row = db.conn.execute(
+        "SELECT * FROM entity_events WHERE entity_id=? ORDER BY ts DESC, id DESC LIMIT 1",
+        (eid,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _changed_since(db, eid: int, since_ts) -> bool:
+    if since_ts is None:
+        return False
+    return db.conn.execute(
+        "SELECT 1 FROM entity_events WHERE entity_id=? AND ts > ? LIMIT 1",
+        (eid, since_ts)).fetchone() is not None
+
+
+def recall(db, query: str, project=None, kind=None, pack=None,
+           since_ts=None, limit: int = 20) -> list[dict]:
+    now = int(time.time())
+    sql = "SELECT * FROM entities WHERE 1=1"
+    args: list = []
+    if pack is not None:
+        sql += " AND pack=?"
+        args.append(pack)
+    if project is not None:
+        sql += " AND project=?"
+        args.append(project)
+    if kind is not None:
+        sql += " AND kind=?"
+        args.append(kind)
+    sql += " ORDER BY COALESCE(updated_ts, created_ts) DESC LIMIT 1000"
+    rows = [dict(r) for r in db.conn.execute(sql, args)]
+
+    fts_lex: dict[int, float] = {}
+    if db.fts:
+        terms = _tokens(query)
+        if terms:
+            match = " OR ".join(t + "*" for t in terms)
+            try:
+                frows = list(db.conn.execute(
+                    "SELECT entity_id, bm25(entities_fts) AS rank FROM entities_fts "
+                    "WHERE entities_fts MATCH ? ORDER BY rank LIMIT 200", (match,)))
+                n = len(frows)
+                for i, r in enumerate(frows):
+                    fts_lex[r["entity_id"]] = 1.0 - i / max(1, n)
+            except sqlite3.OperationalError:
+                fts_lex = {}
+
+    ev_count, degree = _counts(db, [r["id"] for r in rows])
+    scored = []
+    for r in rows:
+        eid = r["id"]
+        text = f"{r['title'] or ''} {r['body'] or ''}"
+        lex = fts_lex.get(eid, _similarity(query, text))
+        rec = _recency(r["updated_ts"], r["created_ts"], now)
+        imp = _importance(ev_count.get(eid, 0), degree.get(eid, 0), r["kind"])
+        scored.append((3.0 * lex + 1.0 * rec + 1.5 * imp, r))
+    scored.sort(key=lambda x: (-x[0], x[1]["id"]))
+    hits = []
+    for score, r in scored[:limit]:
+        eid = r["id"]
+        hits.append({
+            "id": eid, "pack": r["pack"], "kind": r["kind"], "title": r["title"],
+            "body": r["body"], "status": r["status"], "owner": r["owner"],
+            "due_ts": r["due_ts"], "project": r["project"], "closed_ts": r["closed_ts"],
+            "score": score,
+            "supersede": _supersede_chain(db, eid),
+            "last_event": _last_event(db, eid),
+            "changed_since": _changed_since(db, eid, since_ts),
+        })
+    return hits
+
+
+def rebuild(db_path=DB_PATH) -> dict:
+    with DB(db_path) as db:
+        try:
+            db.conn.execute("DELETE FROM entities_fts")
+            db.conn.execute(
+                "INSERT INTO entities_fts(rowid, entity_id, title, body) "
+                "SELECT id, id, title, COALESCE(body, '') FROM entities")
+            n = db.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+            db.conn.commit()
+            return {"ok": True, "indexed": n}
+        except sqlite3.OperationalError:
+            return {"ok": True, "indexed": 0, "fts": False}
+
+
+def gc(db_path=DB_PATH) -> dict:
+    with DB(db_path) as db:
+        cand = db.conn.execute(
+            "DELETE FROM memory_candidates WHERE "
+            "new_entity_id NOT IN (SELECT id FROM entities) OR "
+            "candidate_entity_id NOT IN (SELECT id FROM entities)").rowcount
+        try:
+            vec = db.conn.execute(
+                "DELETE FROM entity_vec WHERE entity_id NOT IN (SELECT id FROM entities)"
+            ).rowcount
+        except sqlite3.OperationalError:
+            vec = 0
+        db.conn.commit()
+        return {"ok": True, "candidates": cand, "vectors": vec}
+
+
+def _arg_value(args: list[str], name: str):
+    if name in args:
+        i = args.index(name)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
+def _accept(db, cand_id: int, now: int) -> dict:
+    row = db.conn.execute(
+        "SELECT * FROM memory_candidates WHERE id=?", (cand_id,)).fetchone()
+    if row is None:
+        return {"ok": False, "error": "candidate not found"}
+    ev = {"chat_id": row["chat_id"], "msg_id": row["msg_id"], "quote": row["quote"]}
+    _apply_supersede(db, row["new_entity_id"], row["candidate_entity_id"], now, ev)
+    db.conn.execute(
+        "UPDATE memory_candidates SET status='accepted', decided_ts=?, decided_by=? "
+        "WHERE id=?", (now, "review", cand_id))
+    db.conn.commit()
+    return {"ok": True, "id": cand_id, "status": "accepted"}
+
+
+def _review(db_path, rest: list[str]) -> dict:
+    status = _arg_value(rest, "--status") or "pending"
+    accept = _arg_value(rest, "--accept")
+    reject = _arg_value(rest, "--reject")
+    now = int(time.time())
+    with DB(db_path) as db:
+        if accept is not None:
+            return _accept(db, int(accept), now)
+        if reject is not None:
+            db.conn.execute(
+                "UPDATE memory_candidates SET status='rejected', decided_ts=?, "
+                "decided_by=? WHERE id=?", (now, "review", int(reject)))
+            db.conn.commit()
+            return {"ok": True, "id": int(reject), "status": "rejected"}
+        rows = [dict(r) for r in db.conn.execute(
+            "SELECT * FROM memory_candidates WHERE status=? ORDER BY score DESC, id",
+            (status,))]
+        return {"ok": True, "status": status, "count": len(rows), "items": rows}
+
+
+def main(argv=None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    db_path = DB_PATH
+    if "--db" in args:
+        i = args.index("--db")
+        if i + 1 < len(args):
+            db_path = args[i + 1]
+        del args[i:i + 2]
+    cmd = args[0] if args else "link"
+    rest = args[1:]
+    if cmd == "link":
+        res = link(db_path, dry_run="--apply" not in rest)
+    elif cmd == "rebuild":
+        res = rebuild(db_path)
+    elif cmd == "gc":
+        res = gc(db_path)
+    elif cmd == "review":
+        res = _review(db_path, rest)
+    else:
+        res = {"ok": False, "error": f"unknown command: {cmd}"}
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0 if res.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
