@@ -54,12 +54,12 @@ from llm_http import (
 from packs import PACKS
 
 import media as media_mod
+import memory
 import people
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
 MAX_OPS_PER_BATCH = 50
-OPEN_ENTITIES_CAP = 50
 MAX_MESSAGES_PER_RUN = 200
 _STATUS_OPS = {"start": ("open",), "block": ("open", "in_progress"),
                "unblock": ("blocked",)}
@@ -310,14 +310,7 @@ def build_prompt(db: DB, pack: dict, w: dict, rows: list[dict]) -> str:
     alias = w.get("alias") or w.get("topic_title") or ""
     scope_header = f"Тема «{alias}», чат {w['chat_id']}, новых сообщений: {len(rows)}"
     lines = _message_lines(db, w["chat_id"], rows)
-    open_rows = db.conn.execute(
-        "SELECT e.id, e.kind, e.title, e.owner, e.due_ts FROM entities e "
-        "JOIN entity_sources s ON s.entity_id = e.id "
-        "WHERE e.pack=? AND s.chat_id=? AND s.topic_id=? AND e.closed_ts IS NULL "
-        "ORDER BY COALESCE(e.updated_ts, e.created_ts) DESC LIMIT ?",
-        (pack["id"], w["chat_id"], w["topic_id"], OPEN_ENTITIES_CAP)).fetchall()
-    open_lines = [f"{r['id']} | {r['kind']} | {r['title']} | {r['owner'] or ''} | {r['due_ts'] or ''}"
-                  for r in open_rows]
+    open_lines = memory.select_open_entities(db, pack, w, rows)
     return pack["prompt_template"].format(
         scope_header=scope_header,
         messages="\n".join(lines),
@@ -484,11 +477,15 @@ def _op_valid(db: DB, pack: dict, w: dict, op: dict,
         if not isinstance(sup, int):
             return False, "supersedes не число"
         srow = db.conn.execute(
-            "SELECT closed_ts FROM entities WHERE id=? AND pack=?",
+            "SELECT closed_ts, project FROM entities WHERE id=? AND pack=?",
             (sup, pack["id"])).fetchone()
-        member = srow is not None and db.conn.execute(
-            "SELECT 1 FROM entity_sources WHERE entity_id=? AND chat_id=? AND topic_id=?",
-            (sup, w["chat_id"], w["topic_id"])).fetchone() is not None
+        if (srow is not None and pack.get("supersede_scope") == "project"
+                and w.get("project") and srow["project"] == w.get("project")):
+            member = True
+        else:
+            member = srow is not None and db.conn.execute(
+                "SELECT 1 FROM entity_sources WHERE entity_id=? AND chat_id=? AND topic_id=?",
+                (sup, w["chat_id"], w["topic_id"])).fetchone() is not None
         if not member:
             return False, f"supersedes {sup} вне скоупа"
         if srow["closed_ts"] is not None:

@@ -437,6 +437,27 @@ def test_supersedes(root: Path) -> None:
         check(e3["title"] == "Кровля металлочерепица",
               "supersedes: update применил и свои поля", str(e3["title"]))
 
+    with DB(db_path) as db:
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
+            "project, created_ts, updated_ts) VALUES(6, 'construction', ?, 99, 'decision', "
+            "'Соседний объект', 'open', 'стройка', ?, ?)", (chat, msg_ts, msg_ts))
+        db.conn.execute(
+            "INSERT INTO entity_sources(entity_id, chat_id, topic_id, first_seen_ts, "
+            "last_seen_ts) VALUES(6, ?, 99, ?, ?)", (chat, msg_ts, msg_ts))
+        db.conn.commit()
+    run_ops([op("decision", "Соседнее решение", 707, "металлочерепица",
+                supersedes=6)], 706)
+    with DB(db_path) as db:
+        run = last_run(db)
+        check(run["ops_applied"] == 1 and run["ops_rejected"] == 0,
+              "supersedes: цель того же проекта в другой теме принята",
+              f"applied={run['ops_applied']} rejected={run['ops_rejected']}")
+        e6 = db.conn.execute("SELECT * FROM entities WHERE id=6").fetchone()
+        check(e6["closed_ts"] is not None and e6["status"] == "done",
+              "supersedes: кросс-темная цель того же проекта закрыта",
+              f"closed_ts={e6 and e6['closed_ts']}")
+
 
 def test_scope_isolation(root: Path) -> None:
     print("=== scope: require_match изолирует construction ===")

@@ -12,6 +12,7 @@ PACK: dict = {
         "require_match": True,
     },
     "dedup_scope": "project",
+    "supersede_scope": "project",
     "kinds": {
         "decision": {
             "description": "Принятое решение по проекту.",
