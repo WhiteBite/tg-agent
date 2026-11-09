@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.20.0 — 2026-11-09
+Долговременная память: селектор открытых сущностей в промпт, линкер смены решений, гибридный recall:
+- `db.py`: три идемпотентные миграции — v14 `entities_fts` (FTS5 по title/body сущностей с триггерами insert/delete/update; при отсутствии FTS5 деградирует молча, `self.fts=False`), v15 `entity_vec` (зарезервирована под эмбеддинги), v16 `memory_candidates` (очередь кандидатов на замену: unique `(new_entity_id, candidate_entity_id)`, индекс по status); `SCHEMA_VERSION = 16`.
+- Новый `memory.py`: `select_open_entities` — селектор открытых сущностей в промпт извлечения (лексика FTS5 с префиксными термами и bm25 + скоуп тема/проект + свежесть + важность по событиям/связям/виду + всегда-включённое ядро: blocked, просроченные, свежие decision/approval, самые связанные); детерминированный линкер `link` — символьные n-граммы title+body плюс маркеры смены в полном тексте сообщения, авто-замена по умолчанию выключена (`MEMORY_AUTO_SUPERSEDE=1` включает), кандидаты копятся в `memory_candidates`; гибридный `recall` (лексика + свежесть + важность, цепочка supersede, последнее событие, `changed_since`); CLI `link [--apply]` / `rebuild` / `gc` / `review --accept/--reject`.
+- `extract.py`: `build_prompt` сеет открытые сущности через `memory.select_open_entities` (не топ-50 по свежести); `_op_valid` проверяет `supersedes` в скоупе проекта при `pack["supersede_scope"] == "project"`; `packs/construction.py` задаёт `supersede_scope: "project"`.
+- `server.py`: read-only инструменты `tg_recall` (гибридный recall: score, цепочка supersede, `changed_since`) и `tg_memory_candidates` (очередь кандидатов на замену для ревью); базовая поверхность 17 → 19.
+- `pipeline.py`: шаг `memory` (после fuzzy, перед export) — `memory.link` без авто-замены; `--skip memory`; порядок sync → bot → media → extract → shiftwatch → alerts → fuzzy → memory → export → digest → monitor.
+- Тесты: 18 → 19 suites (`tests_memory.py`), проверки 1520 → 1585.
+
 ## 0.19.0 — 2026-11-09
 Зависимости, авторство и контроль сроков; Bot-API ингест и реальный Notion:
 - `db.py`: три идемпотентные миграции — v11 `entity_events.actor` (кто сделал изменение), v12 таблица `entity_links` (зависимости, уникальный индекс `(from_entity_id, to_entity_id, link_kind)`), v13 `messages.via` (провенанс ингеста: `user` из Telethon, `bot` из Bot API, NULL = `user`); `SCHEMA_VERSION = 13`.

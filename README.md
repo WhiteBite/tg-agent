@@ -10,7 +10,7 @@ Read-only связка: **Telethon (твой аккаунт) → локальн�
 
 1. ты выделяешь нужное (папка в Telegram **или** точечно темы через `watch.py`),
 2. это синхронизируется в локальный индекс (инкрементально, старая история — чанками),
-3. агент получает 16 read-only инструментов, которые знают твои алиасы и «что нового с прошлого раза».
+3. агент получает 19 read-only инструментов, которые знают твои алиасы и «что нового с прошлого раза».
 
 ---
 
@@ -179,6 +179,8 @@ python3 sync.py --watched                    # синхронизировать 
 | `tg_changes` | Сущности с событиями новее `since_ts`: что менялось после отметки, у каждой — события с цитатой-доказательством; фильтры pack/project |
 | `tg_project_brief` | Сводка по проекту: counts по статусам, open, overdue, next_due, открытые вопросы, обещания без срока/ответственного, топ владельцев |
 | `tg_gaps` | Пробелы по проекту или пакету: открытые вопросы без ответа, обещания без срока и без ответственного, с причиной попадания |
+| `tg_recall` | Гибридный recall по сущностям (`memory.py`): лексика FTS5 + свежесть + важность; фильтры project/kind/pack, `since_ts` отмечает изменённые после отметки; у хита — score, цепочка supersede (successor/predecessor), последнее событие и `changed_since` |
+| `tg_memory_candidates` | Очередь кандидатов на замену решения (`memory_candidates`) для ревью: новая сущность против старой, signal/score/цитата, статус (pending/accepted/rejected/auto); фильтры status/project |
 
 Отправки нет вообще — пока не включён гейт: по умолчанию в `server.py` нет
 инструмента, который что-то пишет в Telegram. Пишущих модуля четыре, все вне
@@ -405,7 +407,7 @@ Messages).
 opencode mcp add telegram --global -- \
   ~/.venvs/tg-agent/bin/python ~/tg-agent/server.py
 opencode mcp list        # должно быть connected
-python3 server.py --list # проверить сервер отдельно: печатает 17 инструментов
+python3 server.py --list # проверить сервер отдельно: печатает 19 инструментов
 ```
 
 Файл `tg-agent.md` — пример промпта агента: порядок работы, требование начинать с
@@ -545,6 +547,41 @@ run `status='filtered'`, остальные сообщения обрабаты�
 `python3 watch.py project --chat @mygroup --topic 789 --project "Объекд"`.
 Проект у строки watch — сущности наследуют его от темы.
 
+## Память и поиск
+
+Тема затихает на недели, потом оживает — и старое решение выпадает из окна
+последних сообщений. Промпт извлечения видит только свежий хвост, поэтому
+«мы уже это решили» теряется. `memory.py` закрывает разрыв.
+
+**Селектор открытых сущностей.** `extract.build_prompt` больше не берёт просто
+топ-50 по свежести: `memory.select_open_entities` собирает открытые сущности
+пакета по скорам — лексическое совпадение с текстом пачки (FTS5 `entities_fts`,
+префиксные термы, bm25), скоуп (та же тема сильнее, чем тот же проект),
+свежесть и важность (число событий, степень связей, вес вида). Поверх — всегда
+включённое ядро: заблокированные, просроченные, свежие решения/согласования и
+самые связанные. Кросс-темный отбор идёт по проекту темы.
+
+**Детерминированный линкер смены решений.** `memory.py link` сканирует новые
+события `new`/`update`, ищет среди открытых сущностей того же пакета, вида и
+проекта похожие по символьным n-граммам (title+body) и, если в ПОЛНОМ тексте
+сообщения-доказательства есть маркер смены («вместо», «отменяем», «передумал»,
+«меняем»…), заводит кандидата на замену. Авто-замена по умолчанию ВЫКЛЮЧЕНА:
+кандидаты копятся в `memory_candidates` со статусом `pending` и ждут ревью;
+`MEMORY_AUTO_SUPERSEDE=1` включает авто-замену при высокой похожести и маркере.
+
+**CLI.** `python3 memory.py link [--apply]` (по умолчанию dry-run),
+`rebuild` (перестроить `entities_fts`), `gc` (убрать осиротевшие кандидаты и
+векторы), `review [--status pending] [--accept ID] [--reject ID]` — принять или
+отклонить кандидата (принятие закрывает старую сущность событием op='supersede').
+
+**Семантический слой — opt-in.** Таблица `entity_vec` (миграция v15)
+зарезервирована под эмбеддинги; сейчас `memory.py` работает только на stdlib,
+эмбеддинги не используются.
+
+Память — пересчитываемая проекция: `entities_fts` и `memory_candidates`
+перестраиваются из `entities`/`entity_events` (`rebuild`/`gc`), источник истины —
+сообщения.
+
 ## Контроль срыва сроков
 
 ```bash
@@ -564,9 +601,9 @@ Telegram ничего не пишется, гейт не нужен. В конв
 ## Автономный конвейер
 
 ```bash
-python3 pipeline.py                  # sync -> bot -> media -> extract -> shiftwatch -> alerts -> fuzzy -> export -> digest -> monitor
+python3 pipeline.py                  # sync -> bot -> media -> extract -> shiftwatch -> alerts -> fuzzy -> memory -> export -> digest -> monitor
 python3 pipeline.py --pack services  # один пакет извлечения
-python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram (--skip bot/media/shiftwatch/fuzzy/export тоже можно)
+python3 pipeline.py --skip sync      # офлайн-шаги, без Telegram (--skip bot/media/shiftwatch/fuzzy/memory/export тоже можно)
 python3 pipeline.py --days-ahead 7 --send
 python3 pipeline.py --loop 30 --send # демон: полный цикл каждые 30 минут
 ```
@@ -585,8 +622,9 @@ python3 pipeline.py --loop 30 --send # демон: полный цикл каж�
 `TG_ENTITY_ALERT_KINDS`, дефолт
 trial,question) в Saved Messages — гейт `TG_ENTITY_ALERTS`, курсор
 `entity_alerts:cursor` двигается только после реальной отправки. После извлечения `fuzzy` сливает дубли
-сущностей по нормализованному title (`FUZZY_MAX_MERGES`, дефолт 500), а
-`export` дописывает JSONL-фид для внешних потребителей (по умолчанию
+сущностей по нормализованному title (`FUZZY_MAX_MERGES`, дефолт 500), затем
+`memory` связывает кандидатов на замену решений (по умолчанию без авто-замены),
+а `export` дописывает JSONL-фид для внешних потребителей (по умолчанию
 `export.jsonl` рядом с базой, путь — `TG_EXPORT_PATH`; формат строки
 `{"entity", "events", "exported_ts"}`, курсор в `integrations`).
 Регулярность — `--loop N` (демон, cron не нужен) или cron; `live.py` остаётся
@@ -598,7 +636,7 @@ trial,question) в Saved Messages — гейт `TG_ENTITY_ALERTS`, курсор
 
 | Компонент | Роль | Запуск |
 |---|---|---|
-| `pipeline.py --loop 30` | полный цикл каждые 30 минут (sync → bot → media → extract → shiftwatch → fuzzy → export → digest → monitor) | при входе в систему: `tg-agent.cmd` в папке Startup |
+| `pipeline.py --loop 30` | полный цикл каждые 30 минут (sync → bot → media → extract → shiftwatch → fuzzy → memory → export → digest → monitor) | при входе в систему: `tg-agent.cmd` в папке Startup |
 | `live.py` | мгновенная подхватка новых сообщений в индекс | тот же `.cmd` |
 | задача `tg-agent-morning` (09:00) | утренняя сводка в Saved Messages (`pipeline.py --skip sync --skip media --send`) | Task Scheduler |
 
@@ -876,14 +914,15 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 | `manage.py` | Создание и управление чатами: группы, каналы, форумы, настройки, участники (гейт `TG_ALLOW_MANAGE=1`) |
 | `announce.py` | Релиз-посты: баннер PIL, шаблон YAML, readme тем из org.yaml, черновик из CHANGELOG; гейт `TG_ALLOW_MANAGE=1` |
 | `org.yaml` | Реестр продуктов WhiteBite: репо, ссылки, эмодзи, разметка тем |
-| `pipeline.py` | Автономный конвейер: sync → bot → media → extract → shiftwatch → alerts → fuzzy → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
-| `db.py` | Индекс: схема с миграциями по `PRAGMA user_version` (v11 `entity_events.actor`, v12 `entity_links`, v13 `messages.via`), FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
-| `server.py` | MCP-сервер (stdio): 16 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
+| `pipeline.py` | Автономный конвейер: sync → bot → media → extract → shiftwatch → alerts → fuzzy → memory → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
+| `db.py` | Индекс: схема с миграциями по `PRAGMA user_version` (v11 `entity_events.actor`, v12 `entity_links`, v13 `messages.via`, v14 `entities_fts`, v15 `entity_vec`, v16 `memory_candidates`; `SCHEMA_VERSION = 16`), FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
+| `server.py` | MCP-сервер (stdio): 19 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
 | `live.py` | Новые сообщения в реальном времени (`events.NewMessage`), правки и удаления (`MessageEdited` / `MessageDeleted`) |
 | `alerts.py` | Живые алерты live-демона: слова-триггеры и упоминания → Saved Messages (гейт `TG_ALERTS` + `TG_ALLOW_SEND`, cooldown на пару чат+правило); правила читаются из UI (`meta['ws:alerts']`) на лету; CLI `--status`/`--text` |
 | `entity_alerts.py` | Сущностные алерты после extract: новые сущности (виды из `TG_ENTITY_ALERT_KINDS`) → Saved Messages (гейт `TG_ENTITY_ALERTS`, курсор `entity_alerts:cursor`) |
 | `digest.py` | Дайджесты: stub или openai-совместимый LLM |
-| `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт, due_text→due_ts fallback (ru-месяцы, дни недели, относительные, конец дня), supersedes, op `link` (зависимость blocks), `actor` на каждом событии, авто-резолв owner по справочнику людей, причины отказа в `rejects_json`, перепрогон dirty |
+| `extract.py` | Извлечение сущностей по пакетам из `packs/`: stub или openai-LLM, evidence-гейт, due_text→due_ts fallback (ru-месяцы, дни недели, относительные, конец дня), supersedes (в скоупе проекта при `supersede_scope`), op `link` (зависимость blocks), `actor` на каждом событии, авто-резолв owner по справочнику людей, причины отказа в `rejects_json`, перепрогон dirty; открытые сущности в промпт сеет `memory.select_open_entities` (не топ-50 по свежести) |
+| `memory.py` | Память и поиск: селектор открытых сущностей для промпта (лексика bm25 + скоуп + свежесть + важность + всегда-включённое ядро), детерминированный линкер смены решений, гибридный recall; CLI `link/rebuild/gc/review` |
 | `packs/` | Декларативные пакеты извлечения: `construction` (decision/task/promise/question/approval), `services` (service/trial/promo); scope-фильтры (`require_match`, `exclude_project_regex`) и `dedup_scope` |
 | `monitor.py` | Сводка просроченного и дедлайнов по проектам, зависшие вопросы, блоки «изменения за Nч» (закрыто/перенесено сроков) и «к распределению» (backlog + без срока); `--send` через `notify.py`, дедуп по хэшу отчёта |
 | `shiftwatch.py` | Контроль срыва сроков: скан `entity_events` на отложенные `due_ts` по открытым сущностям, авто-создание одной задачи «Контрольно уточнить: …» на сущность (дедуп по `controller|<entity_id>`); локальная проекция, без гейта |
@@ -908,7 +947,7 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 1520 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс восемнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1585 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс девятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -927,6 +966,7 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 | `tests_shiftwatch.py` | контроль срыва сроков: скан отложенных `due_ts`, дедуп контроллеров, dry-run (запускается из `test_offline.py`) |
 | `tests_bot_ingest.py` | Bot-API ингест: `getUpdates` на фейк-транспорте, `via='bot'`, курсор, service-сообщения и дубли (запускается из `test_offline.py`) |
 | `tests_export_notion.py` | notion-провайдер против фейк-сервера: create/PATCH, идемпотентность по `external_id`, ретраи 429/529, без кредов (запускается из `test_offline.py`) |
+| `tests_memory.py` | память: селектор открытых сущностей, similarity, линкер кандидатов (pending/auto/rejected, идемпотентность, dry-run), recall, rebuild/gc (запускается из `test_offline.py`) |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -975,14 +1015,14 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **1520 проверок: свои проверки плюс восемнадцать suites
+`python3 test_offline.py` — **1585 проверок: свои проверки плюс девятнадцать suites
 подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
 `tests_watchdog.py`, `tests_ui_projects.py`, `tests_manage.py`,
 `tests_announce.py`, `tests_workspace_api.py`, `tests_question_signals.py`,
 `tests_downloads.py`, `tests_shiftwatch.py`, `tests_bot_ingest.py`,
-`tests_export_notion.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
+`tests_export_notion.py`, `tests_memory.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
   `--chat @канал`, `--folder`, `--watched`, `--dry-run`, раскладка по темам
@@ -1014,14 +1054,14 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 - **реакции в индексе**: `live.handle_reactions` + `db.update_reactions` (агрегатные счётчики)
 - **читалки агента**: изменения с прошлого раза, бриф проекта, пробелы (вопросы без
   ответа, обещания без срока/ответственного), фильтр по ответственному
-- **MCP**: 17 инструментов — `tg_transcripts` + `tg_changes` / `tg_project_brief` / `tg_gaps` + `owner` и `starred` в `tg_entities`
+- **MCP**: 19 инструментов — `tg_transcripts` + `tg_changes` / `tg_project_brief` / `tg_gaps` + `tg_recall` / `tg_memory_candidates` + `owner` и `starred` в `tg_entities`
 - **маршрутизация сводок** по проектам (`TG_NOTIFY_ROUTES`, персональные хэш-ключи);
   `monitor` показывает обещания без срока/ответственного и «застряло» (blocked+просрочка)
 - **наблюдаемость**: `doctor --cost`, штамп `pipeline:last_ok_ts` + `watchdog.py`, UI-панель
   `/api/projects` с курсором визита проекта
 - **гигиена**: валидация схем паков на импорте, провайдеры экспорта из конфига (`TG_EXTRA_PROVIDERS`)
 - **настоящий `server.py` как подпроцесс по MCP stdio**: `initialize` →
-  `tools/list` (17 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
+  `tools/list` (19 инструментов, `tg_sql` скрыт) → `tools/call` по каждому,
   включая сценарий «прочитал → отметил → непрочитанного нет»; `tg_new` честно
   держит `truncated` при лимите; `tg_mark_read` отклоняет id выше максимума
   индекса темы; отдельный прогон с `TG_ALLOW_LIVE=1` —
@@ -1035,8 +1075,8 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
   resume упавших пунктов
   (`--retry --force`), пауза/отмена задания, подборки каналов, реестр модулей
   и `TG_MODULES_OFF`, миграции v6→v8 и v7→v8 (таблицы пересылок довариваются
-  в существующую базу); MCP-гейты `TG_ALLOW_DOWNLOADS=1` (16+3) и
-  `TG_ALLOW_FORWARDS=1` (16+3), оба — 16+4; запуск и пересылка —
+  в существующую базу); MCP-гейты `TG_ALLOW_DOWNLOADS=1` (19+3) и
+  `TG_ALLOW_FORWARDS=1` (19+3), оба — 19+4; запуск и пересылка —
    `confirm=True`; фоновый загрузчик без кредов помечает задание
    failed и не зависает
 - **workspace-API**: реальный HTTP-сервер из `ui.py` (ThreadingHTTPServer,
@@ -1128,7 +1168,7 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
   кэш link_status host='mailru', mailru_refs фильтрует xcloud, refs_summary
   даёт сводку mailru_status, exclude_chat_id метит дубли, миграция v9→v10
   добавляет колонку title
-- `tg_send_message`: регистрируется только при `TG_ALLOW_SEND=1` (17
+- `tg_send_message`: регистрируется только при `TG_ALLOW_SEND=1` (19
   инструментов), без confirm=True — JSON-ошибка, без кредов — структурная
   ошибка вместо зависания сервера (SystemExit из make_client конвертируется
   в notify); адресат to=@username и числовой id доходят до транспорта
