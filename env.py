@@ -45,17 +45,20 @@ def _read_text(p: Path) -> str:
 
 def load_env(path: Path | None = None) -> None:
     harden_stdio()
-    pre = set(os.environ)
+    pre = {k.upper() for k in os.environ}
+    skip_base = False
     if path is None:
         override = os.environ.get("TG_ENV_FILE")
         if override is not None:
             if not override:
-                return  # TG_ENV_FILE="" — не читать .env вообще (тесты/CI)
-            path = Path(override)
+                skip_base = True
+                path = DEFAULT_PATH
+            else:
+                path = Path(override)
         else:
             path = DEFAULT_PATH
     p = path
-    if p.exists():
+    if not skip_base and p.exists():
         for line in _read_text(p).splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -127,7 +130,8 @@ def _apply_profile(main_path: Path, pre: set[str]) -> None:
     if pf.exists():
         values.update(_parse_env_text(_read_text(pf)))
     for key, val in values.items():
-        if key in _BOOTSTRAP_KEYS or key in pre:
+        upper = key.upper()
+        if upper in _BOOTSTRAP_KEYS or upper in pre:
             continue
         os.environ[key] = val
 

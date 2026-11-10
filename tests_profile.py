@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -125,6 +126,57 @@ def test_bootstrap_guard(tmp: Path) -> None:
               "bootstrap: обычный ключ применён", os.environ.get("FOO"))
 
 
+def test_bootstrap_guard_case_insensitive(tmp: Path) -> None:
+    print("=== bootstrap-ключи регистронезависимы (Windows) ===")
+    env_file = tmp / ".env"
+    if env_file.exists():
+        env_file.unlink()
+    (tmp / ".env.p1").write_text("tg_db=/evil\nFOO=ok\n", encoding="utf-8")
+    real_db = tmp / "real.sqlite"
+    with env_guard(TG_PROFILE="p1", TG_DB=str(real_db)):
+        env_mod.load_env(path=env_file)
+        check(os.environ.get("TG_DB") == str(real_db),
+              "case: TG_DB не перетёрт lowercase tg_db", os.environ.get("TG_DB"))
+        check("tg_db" not in set(os.environ),
+              "case: lowercase tg_db не задан профилем")
+        check(os.environ.get("FOO") == "ok",
+              "case: обычный ключ применён", os.environ.get("FOO"))
+
+
+def test_process_env_case_insensitive(tmp: Path) -> None:
+    print("=== lowercase ключ профиля не перетирает process env ===")
+    env_file = tmp / ".env"
+    if env_file.exists():
+        env_file.unlink()
+    (tmp / ".env.p1").write_text("foo=file\n", encoding="utf-8")
+    with env_guard(TG_PROFILE="p1", FOO="proc"):
+        env_mod.load_env(path=env_file)
+        check(os.environ.get("FOO") == "proc",
+              "case: FOO process env не перетёрт", os.environ.get("FOO"))
+        check("foo" not in set(os.environ),
+              "case: lowercase foo не задан профилем")
+
+
+def test_env_file_empty_profile_applies(tmp: Path) -> None:
+    print("=== TG_ENV_FILE='' -> базовый .env пропущен, профиль применён ===")
+    base = tmp / ".env"
+    base.write_text("BASE_ONLY=base\n", encoding="utf-8")
+    db = tmp / "empty.sqlite"
+    make_db(db, "p1", {"FOO": "meta"})
+    saved_default = env_mod.DEFAULT_PATH
+    env_mod.DEFAULT_PATH = base
+    try:
+        with env_guard(TG_ENV_FILE="", TG_PROFILE="p1", TG_DB=str(db),
+                       TG_PROFILE_FILE=str(tmp / "no_such.env")):
+            env_mod.load_env()
+            check(os.environ.get("FOO") == "meta",
+                  "empty env-file: профиль применён", os.environ.get("FOO"))
+            check("BASE_ONLY" not in os.environ,
+                  "empty env-file: базовый .env пропущен", os.environ.get("BASE_ONLY"))
+    finally:
+        env_mod.DEFAULT_PATH = saved_default
+
+
 def test_precedence(tmp: Path) -> None:
     print("=== env-файл профиля важнее meta; профиль важнее базового .env ===")
     env_file = tmp / ".env"
@@ -172,6 +224,26 @@ def test_profile_file_override(tmp: Path) -> None:
               "TG_PROFILE_FILE: значения из указанного файла", os.environ.get("FOO"))
 
 
+def test_remove_missing(tmp: Path) -> None:
+    print("=== profile.py remove отсутствующего профиля -> non-ok ===")
+    db = tmp / "remove.sqlite"
+    make_db(db, "keep", {"FOO": "x"})
+    env = dict(os.environ)
+    env["TG_ENV_FILE"] = ""
+    env["PYTHONUTF8"] = "1"
+    script = str(Path(__file__).parent / "profile.py")
+    miss = subprocess.run(
+        [sys.executable, script, "--db", str(db), "remove", "--name", "nope"],
+        capture_output=True, text=True, env=env, timeout=60)
+    check(miss.returncode != 0, "remove missing: ненулевой код", str(miss.returncode))
+    check('"ok": false' in miss.stdout, "remove missing: ok=false", miss.stdout.strip())
+    hit = subprocess.run(
+        [sys.executable, script, "--db", str(db), "remove", "--name", "keep"],
+        capture_output=True, text=True, env=env, timeout=60)
+    check(hit.returncode == 0, "remove existing: код 0", str(hit.returncode))
+    check('"ok": true' in hit.stdout, "remove existing: ok=true", hit.stdout.strip())
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -184,9 +256,13 @@ def main() -> int:
         test_envfile_applied(tmp)
         test_process_env_wins(tmp)
         test_bootstrap_guard(tmp)
+        test_bootstrap_guard_case_insensitive(tmp)
+        test_process_env_case_insensitive(tmp)
+        test_env_file_empty_profile_applies(tmp)
         test_precedence(tmp)
         test_full_precedence(tmp)
         test_profile_file_override(tmp)
+        test_remove_missing(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

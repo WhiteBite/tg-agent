@@ -77,6 +77,10 @@ def main() -> int:
             print(json.dumps(data, ensure_ascii=False, indent=2))
             return 0
         if args.cmd == "remove":
+            if db.get_meta(PREFIX + args.name) is None:
+                print(json.dumps({"ok": False, "name": args.name, "error": "not found"},
+                                 ensure_ascii=False))
+                return 2
             with db.conn:
                 db.conn.execute("DELETE FROM meta WHERE key=?", (PREFIX + args.name,))
             print(json.dumps({"ok": True, "name": args.name}, ensure_ascii=False))
