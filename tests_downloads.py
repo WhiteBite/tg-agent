@@ -935,6 +935,39 @@ def test_registry() -> None:
           "registry: битый путь TG_EXTRA_MODULES — EXTRA_ERROR, реестр не падает",
           (res.stderr or res.stdout)[-200:])
 
+    collide = TMP / "collide_module.py"
+    collide.write_text(
+        "MODULES = {'downloads': {'id': 'downloads', 'version': 1, 'mcp': []}}\n",
+        encoding="utf-8")
+    env = {**base_env, "TG_EXTRA_MODULES": str(collide)}
+    res = subprocess.run(
+        [sys.executable, "-c",
+         "import modules\n"
+         "assert set(modules.MODULES) == {'downloads'}, modules.MODULES\n"
+         "assert len(modules.mcp_specs()) == 4, modules.mcp_specs()\n"
+         "assert modules.EXTRA_ERROR and modules.EXTRA_ERROR['ok'] is False\n"
+         "assert 'downloads' in modules.EXTRA_ERROR['error']\n"
+         "print('OK')"],
+        capture_output=True, text=True, env=env, cwd=str(HERE), timeout=60)
+    check(res.returncode == 0 and "OK" in res.stdout,
+          "registry: сторонний модуль с id встроенного -> EXTRA_ERROR, встроенный цел",
+          (res.stderr or res.stdout)[-200:])
+
+    env_file = TMP / "off.env"
+    env_file.write_text("TG_MODULES_OFF=downloads\n", encoding="utf-8")
+    env = {**base_env, "TG_ENV_FILE": str(env_file)}
+    res = subprocess.run(
+        [sys.executable, "-c",
+         "import ui\n"
+         "import modules\n"
+         "assert 'downloads' not in modules.MODULES, modules.MODULES\n"
+         "assert not modules.mcp_specs()\n"
+         "print('OK')"],
+        capture_output=True, text=True, env=env, cwd=str(HERE), timeout=120)
+    check(res.returncode == 0 and "OK" in res.stdout,
+          "registry: TG_MODULES_OFF из .env действует до импорта реестра в ui",
+          (res.stderr or res.stdout)[-300:])
+
 
 def _rpc(proc, payload: dict) -> None:
     proc.stdin.write(json.dumps(payload) + "\n")
@@ -1132,6 +1165,24 @@ def test_mcp_gate() -> None:
               str(sorted(n for n in names7 if n.startswith("tg_fake"))))
     finally:
         _stop(proc7)
+
+    extra_space = TMP / "gate_module_space.py"
+    extra_space.write_text(
+        "def _ping() -> str:\n"
+        "    return 'pong'\n"
+        "MODULES = {'fake': {'id': 'fake', 'version': 1,\n"
+        "                    'mcp': [{'name': 'tg_fake_ping', 'description': 'пинг',\n"
+        "                             'fn': _ping, 'gate': 'TG_ALLOW_FAKE '}]}}\n",
+        encoding="utf-8")
+    proc8 = _start(_mcp_env(TG_DB=str(db_path), TG_EXTRA_MODULES=str(extra_space),
+                            TG_ALLOW_FAKE="1"))
+    try:
+        names8 = _init(proc8)
+        check(len(names8) == 20 and "tg_fake_ping" in names8,
+              "MCP: gate с хвостовым пробелом всё равно регистрирует инструмент",
+              str(sorted(n for n in names8 if n.startswith("tg_fake"))))
+    finally:
+        _stop(proc8)
 
 
 def test_runner_spawn() -> None:

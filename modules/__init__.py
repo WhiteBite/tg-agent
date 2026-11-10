@@ -102,6 +102,8 @@ try:
         if _mod["id"] in _OFF:
             continue
         _validate(_mod)
+        if _mod["id"] in MODULES:
+            raise ValueError(f"id {_mod['id']!r} уже занят встроенным модулем")
         MODULES[_mod["id"]] = _mod
 except Exception as exc:
     EXTRA_ERROR = {"ok": False, "error": f"TG_EXTRA_MODULES: {exc}"}

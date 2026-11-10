@@ -25,13 +25,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-import workspace_api
-from db import DB, clean_text
 from env import load_env
-from sanitize import sanitize_name
 
 load_env()
 
+import workspace_api
+from db import DB, clean_text
+from sanitize import sanitize_name
 import sync as sync_mod
 
 HERE = Path(__file__).parent

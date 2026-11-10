@@ -173,6 +173,41 @@ def test_extra_packs(root: Path) -> None:
           "TG_EXTRA_PACKS: битый путь не роняет импорт, ошибка в EXTRA_ERROR",
           (proc.stderr or proc.stdout).strip()[:300])
 
+    collide = root / "collide_packs.py"
+    collide.write_text(
+        "import copy\n"
+        "from packs.construction import PACK\n"
+        "p = copy.deepcopy(PACK)\n"
+        "PACKS = {'construction': p}\n",
+        encoding="utf-8")
+    proc = run_with(
+        "import packs\n"
+        "assert set(packs.PACKS) == {'construction', 'services'}\n"
+        "assert packs.PACKS['construction'] is packs.CONSTRUCTION\n"
+        "assert packs.EXTRA_ERROR and packs.EXTRA_ERROR['ok'] is False\n"
+        "assert 'construction' in packs.EXTRA_ERROR['error']\n"
+        "print('OK')", collide)
+    check(proc.returncode == 0 and "OK" in proc.stdout,
+          "TG_EXTRA_PACKS: id встроенного пака -> EXTRA_ERROR, встроенный цел",
+          (proc.stderr or proc.stdout).strip()[:300])
+
+    extra_list = root / "extra_packs_list.py"
+    extra_list.write_text(
+        "import copy\n"
+        "from packs.construction import PACK\n"
+        "p = copy.deepcopy(PACK)\n"
+        "p['id'] = 'extra_list'\n"
+        "PACKS = [p]\n",
+        encoding="utf-8")
+    proc = run_with(
+        "import packs\n"
+        "assert set(packs.PACKS) == {'construction', 'services', 'extra_list'}\n"
+        "assert packs.EXTRA_ERROR is None\n"
+        "print('OK')", extra_list)
+    check(proc.returncode == 0 and "OK" in proc.stdout,
+          "TG_EXTRA_PACKS: PACKS списком принимается",
+          (proc.stderr or proc.stdout).strip()[:300])
+
 
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="pack_schema_"))

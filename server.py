@@ -1093,6 +1093,7 @@ if ALLOW_SEND:
 
 
 def _module_gate_on(gate: str | None) -> bool:
+    gate = gate.strip() if isinstance(gate, str) else gate
     if gate in (None, "downloads"):
         return ALLOW_DOWNLOADS
     if gate == "forwards":

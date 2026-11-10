@@ -66,7 +66,12 @@ def _extra_packs() -> dict[str, dict]:
         raise ImportError(f"TG_EXTRA_PACKS: не py-модуль: {path}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return dict(mod.PACKS)
+    raw = getattr(mod, "PACKS", None)
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        return {p["id"]: p for p in raw}
+    raise ValueError("TG_EXTRA_PACKS: PACKS должен быть dict или list")
 
 
 for _pack in PACKS.values():
@@ -76,6 +81,8 @@ EXTRA_ERROR: dict | None = None
 try:
     for _pack in _extra_packs().values():
         _validate(_pack)
+        if _pack["id"] in PACKS:
+            raise ValueError(f"id {_pack['id']!r} уже занят встроенным паком")
         PACKS[_pack["id"]] = _pack
 except Exception as exc:
     EXTRA_ERROR = {"ok": False, "error": f"TG_EXTRA_PACKS: {exc}"}
