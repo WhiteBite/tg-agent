@@ -500,6 +500,82 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertEqual(m["counts"].get("pending"), 1)
         self.assertEqual(m["total"], 2)
 
+    def test_account_lens_filters_read_surfaces(self):
+        with DB(self.db_path) as db:
+            db.upsert_chat(-100222, "Второй", None, "supergroup", False, 3)
+            db.upsert_topic(-100222, 1, "Тема")
+            db.watch_add(-100222, 1, project="А", alias="Второй")
+            db.conn.execute("INSERT INTO chat_accounts(chat_id, account_id, is_primary) "
+                            "VALUES(-100111, 'work', 1)")
+            db.conn.execute("INSERT INTO chat_accounts(chat_id, account_id, is_primary) "
+                            "VALUES(-100222, 'home', 1)")
+            db.conn.execute(
+                "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,owner,project,created_ts,updated_ts) "
+                "VALUES(50,'construction',-100222,1,'task','Домашняя','open','Иван','А',?,?)",
+                (self.now - 500, self.now - 100))
+            db.conn.execute(
+                "INSERT INTO entity_events(entity_id,ts,op,chat_id,msg_id,quote) "
+                "VALUES(50,?,'new',-100222,1,'домашняя')", (self.now - 100,))
+            db.conn.execute("INSERT INTO refs(chat_id,msg_id,kind,value) "
+                            "VALUES(-100111,10,'invite','+WorkInvite')")
+            db.conn.execute("INSERT INTO refs(chat_id,msg_id,kind,value) "
+                            "VALUES(-100222,1,'invite','+HomeInvite')")
+            db.conn.execute(
+                "INSERT INTO entities(id,pack,chat_id,topic_id,kind,title,status,dedup_key,created_ts,updated_ts) "
+                "VALUES(60,'services',-100111,1,'trial','Общий сервис','open','shared.svc',?,?)",
+                (self.now - 500, self.now - 100))
+            db.conn.execute("INSERT INTO entity_sources(entity_id,chat_id,topic_id) VALUES(60,-100111,1)")
+            db.conn.execute("INSERT INTO entity_sources(entity_id,chat_id,topic_id) VALUES(60,-100222,1)")
+            db.insert_message({"chat_id": -100222, "msg_id": 1, "topic_id": 1,
+                               "ts": self.now + 1000, "sender_id": 5, "sender_name": "Иван",
+                               "text": "домашнее"})
+            db.conn.execute("INSERT INTO extraction_runs(pack,chat_id,topic_id,ts) "
+                            "VALUES('construction',-100111,1,?)", (self.now - 50,))
+            db.conn.execute("INSERT INTO extraction_runs(pack,chat_id,topic_id,ts) "
+                            "VALUES('construction',-100222,1,?)", (self.now + 500,))
+            db.conn.commit()
+
+        _, work = self.request("changes?account=work")
+        _, home = self.request("changes?account=home")
+        self.assertEqual({e["entity_id"] for e in work["items"]}, {1, 2, 3, 4})
+        self.assertEqual({e["entity_id"] for e in home["items"]}, {50})
+
+        _, wp = self.request("projects?account=work")
+        _, hp = self.request("projects?account=home")
+        wa = next(p for p in wp["items"] if p["name"] == "А")
+        ha = next(p for p in hp["items"] if p["name"] == "А")
+        self.assertEqual(wa["new_events"], 3)
+        self.assertEqual(ha["new_events"], 1)
+        self.assertEqual(wa["open"], 3)
+        self.assertEqual(ha["open"], 1)
+        self.assertEqual({t["chat_id"] for t in wa["topics"]}, {-100111})
+        self.assertEqual({t["chat_id"] for t in ha["topics"]}, {-100222})
+
+        _, wl = self.request("links?account=work")
+        _, hl = self.request("links?account=home")
+        self.assertEqual([c["id"] for c in wl["chats"]], [-100111])
+        self.assertEqual([c["id"] for c in hl["chats"]], [-100222])
+        self.assertEqual([i["value"] for i in wl["groups"]["invite"]], ["+WorkInvite"])
+        self.assertEqual([i["value"] for i in hl["groups"]["invite"]], ["+HomeInvite"])
+
+        _, wc = self.request("catalog?account=work")
+        _, hc = self.request("catalog?account=home")
+        wg = next(g for g in wc["items"] if g["key"] == "shared.svc")
+        hg = next(g for g in hc["items"] if g["key"] == "shared.svc")
+        self.assertEqual(wg["chat_count"], 1)
+        self.assertEqual(hg["chat_count"], 1)
+        self.assertEqual(wg["chats"], ["Объект"])
+        self.assertEqual(hg["chats"], ["Второй"])
+        _, ac = self.request("catalog")
+        self.assertEqual(next(g for g in ac["items"] if g["key"] == "shared.svc")["chat_count"], 2)
+
+        _, wh = self.request("home?account=work")
+        _, hh = self.request("home?account=home")
+        self.assertEqual(wh["freshness"]["messages_ts"], self.now - 100)
+        self.assertEqual(hh["freshness"]["messages_ts"], self.now + 1000)
+        self.assertEqual(wh["freshness"]["extraction_ts"], self.now - 50)
+        self.assertEqual(hh["freshness"]["extraction_ts"], self.now + 500)
+
     def test_global_search_gate(self):
         status, d = self.request_api_get("search_global?q=test")
         self.assertEqual(status, 200)

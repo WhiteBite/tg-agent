@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -291,6 +292,38 @@ def test_two_accounts_dedup(tmp: Path) -> None:
     check(rejected, "multi: глобальный dedup_key не даёт второй открытой сущности")
 
 
+def test_observe_chat_account_concurrent(tmp: Path) -> None:
+    print("=== observe_chat_account: параллельные вызовы — один primary, без IntegrityError ===")
+    db_path = tmp / "race.sqlite"
+    with DB(db_path) as db:
+        db.conn.execute("INSERT INTO chats(id, title) VALUES(-1001, 'A')")
+        db.conn.commit()
+    errors: list[Exception] = []
+    barrier = threading.Barrier(2)
+
+    def worker(account: str) -> None:
+        try:
+            with DB(db_path) as db:
+                barrier.wait()
+                db.observe_chat_account(-1001, account)
+                db.conn.commit()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(a,)) for a in ("work", "home")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    with DB(db_path) as db:
+        rows = db.chat_accounts(-1001)
+        primaries = [r["account_id"] for r in rows if r["is_primary"]]
+    check(not errors, "параллельно: без исключений", str(errors))
+    check(len(primaries) == 1, "параллельно: ровно один primary", str(primaries))
+    check({r["account_id"] for r in rows} == {"work", "home"},
+          "параллельно: оба аккаунта записаны", str(rows))
+
+
 def test_account_lens(tmp: Path) -> None:
     print("=== линза аккаунта: фильтр списков/счётчиков, мультиисточник ===")
     db_path = tmp / "lens.sqlite"
@@ -473,6 +506,7 @@ def main() -> int:
         test_migration_v18(tmp)
         test_single_account_noop(tmp)
         test_two_accounts_dedup(tmp)
+        test_observe_chat_account_concurrent(tmp)
         test_account_lens(tmp)
         test_boundary_documented(tmp)
         test_unknown_account_rejected(tmp)

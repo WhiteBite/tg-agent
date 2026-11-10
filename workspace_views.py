@@ -6,7 +6,7 @@ import time
 
 import engine as engine_mod
 from alerts import config as alerts_config
-from db import DB, account_lens
+from db import DB, account_chats_sql, account_lens
 from workspace_store import (
     REVIEW_JOINS,
     REVIEW_STATE_SQL,
@@ -65,8 +65,14 @@ def home(db: DB, params: dict) -> dict:
             attention.append({**e, "review_state": state, "reasons": reasons})
     attention.sort(key=lambda e: ("overdue" not in e["reasons"], "blocked" not in e["reasons"],
                                   e["due_ts"] or now + 864000, -e["updated_ts"]))
-    fresh = {"messages_ts": db.conn.execute("SELECT MAX(ts) FROM messages WHERE deleted=0").fetchone()[0],
-             "extraction_ts": db.conn.execute("SELECT MAX(ts) FROM extraction_runs").fetchone()[0],
+    chat_filter, chat_args = account_chats_sql(params.get("account"))
+    messages_sql = "SELECT MAX(ts) FROM messages WHERE deleted=0"
+    extraction_sql = "SELECT MAX(ts) FROM extraction_runs WHERE 1=1"
+    if chat_filter:
+        messages_sql += " AND " + chat_filter
+        extraction_sql += " AND " + chat_filter
+    fresh = {"messages_ts": db.conn.execute(messages_sql, chat_args).fetchone()[0],
+             "extraction_ts": db.conn.execute(extraction_sql, chat_args).fetchone()[0],
              "pipeline_ok_ts": int(db.get_meta("pipeline:last_ok_ts") or 0) or None}
     for key in tuple(fresh):
         fresh[key.replace("_ts", "_age_sec")] = max(0, now - fresh[key]) if fresh[key] else None
@@ -173,9 +179,12 @@ def catalog(db: DB, params: dict) -> dict:
     rows = [dict(r) for r in db.conn.execute(
         "SELECT e.* FROM entities e " + where + " ORDER BY e.updated_ts DESC, e.id DESC", args)]
     chat_titles = {r["id"]: r["title"] for r in db.conn.execute("SELECT id,title FROM chats")}
+    visible = db.account_chat_ids(params.get("account"))
     sources_pairs: dict[int, set[tuple[int, int]]] = {}
     sources_chats: dict[int, set[int]] = {}
     for s in db.conn.execute("SELECT entity_id,chat_id,topic_id FROM entity_sources"):
+        if visible is not None and s["chat_id"] not in visible:
+            continue
         sources_pairs.setdefault(s["entity_id"], set()).add((s["chat_id"], s["topic_id"]))
         sources_chats.setdefault(s["entity_id"], set()).add(s["chat_id"])
     now = int(time.time())
@@ -200,7 +209,9 @@ def catalog(db: DB, params: dict) -> dict:
             if e["due_ts"] and e["due_ts"] > now and (g["next_due"] is None or e["due_ts"] < g["next_due"]):
                 g["next_due"] = e["due_ts"]
         g["last_seen"] = max(g["last_seen"], e["updated_ts"] or 0)
-        g["chats"] |= {e["chat_id"], *sources_chats.get(e["id"], set())}
+        g["chats"] |= sources_chats.get(e["id"], set())
+        if visible is None or e["chat_id"] in visible:
+            g["chats"].add(e["chat_id"])
     items = [groups[k] for k in order]
     if status != "all":
         items = [g for g in items if g["status"] == status]
@@ -224,21 +235,37 @@ def catalog(db: DB, params: dict) -> dict:
 
 def projects(db: DB, params: dict | None = None) -> dict:
     params = params or {}
+    account = params.get("account")
+    lens, lens_args = account_lens(account)
+    chat_filter, chat_args = account_chats_sql(account, "w.chat_id")
     names = [r[0] for r in db.conn.execute(
         "SELECT project FROM watch WHERE project IS NOT NULL AND project!='' UNION "
         "SELECT project FROM entities WHERE project IS NOT NULL AND project!='' ORDER BY 1")]
     items = []
     for name in names:
-        brief = db.project_brief(name, account=params.get("account"))
-        topics = [dict(r) for r in db.conn.execute(
-            "SELECT w.chat_id,w.topic_id,w.alias,c.title AS chat_title,t.title AS topic_title "
-            "FROM watch w LEFT JOIN chats c ON c.id=w.chat_id LEFT JOIN topics t "
-            "ON t.chat_id=w.chat_id AND t.topic_id=w.topic_id WHERE w.project=?", (name,))]
-        last = db.conn.execute("SELECT COALESCE(MAX(ev.id),0) FROM entity_events ev JOIN entities e "
-                               "ON e.id=ev.entity_id WHERE e.project=?", (name,)).fetchone()[0]
+        brief = db.project_brief(name, account=account)
         read = int(db.get_meta(f"ws:project_review:{name}") or 0)
-        count = db.conn.execute("SELECT COUNT(*) FROM entity_events ev JOIN entities e "
-                                "ON e.id=ev.entity_id WHERE e.project=? AND ev.id>?", (name, read)).fetchone()[0]
+        topics_sql = ("SELECT w.chat_id,w.topic_id,w.alias,c.title AS chat_title,t.title AS topic_title "
+                      "FROM watch w LEFT JOIN chats c ON c.id=w.chat_id LEFT JOIN topics t "
+                      "ON t.chat_id=w.chat_id AND t.topic_id=w.topic_id WHERE w.project=?")
+        topics_args = [name]
+        if chat_filter:
+            topics_sql += " AND " + chat_filter
+            topics_args.extend(chat_args)
+        topics = [dict(r) for r in db.conn.execute(topics_sql, topics_args)]
+        last_sql = ("SELECT COALESCE(MAX(ev.id),0) FROM entity_events ev JOIN entities e "
+                    "ON e.id=ev.entity_id WHERE e.project=?")
+        last_args = [name]
+        count_sql = ("SELECT COUNT(*) FROM entity_events ev JOIN entities e "
+                     "ON e.id=ev.entity_id WHERE e.project=? AND ev.id>?")
+        count_args = [name, read]
+        if lens:
+            last_sql += " AND " + lens
+            last_args.extend(lens_args)
+            count_sql += " AND " + lens
+            count_args.extend(lens_args)
+        last = db.conn.execute(last_sql, last_args).fetchone()[0]
+        count = db.conn.execute(count_sql, count_args).fetchone()[0]
         items.append({**brief, "name": name, "last_event_id": last, "reviewed_event_id": read,
                       "new_events": count, "topics": topics})
     return {"items": items}
@@ -342,18 +369,27 @@ def links(db: DB, params: dict) -> dict:
             since = int(time.time()) - int(params["days"]) * 86400
         except (TypeError, ValueError) as exc:
             raise WorkspaceError("days: число дней") from exc
+    visible = db.account_chat_ids(params.get("account"))
     chat_id = params.get("chat_id")
     if chat_id:
         try:
             chat_id = int(chat_id)
         except (TypeError, ValueError) as exc:
             raise WorkspaceError("chat_id: число") from exc
-        groups = db.refs_summary(chat_id=chat_id, since_ts=since, limit=limit)
+        if visible is not None and chat_id not in visible:
+            groups = {}
+        else:
+            groups = db.refs_summary(chat_id=chat_id, since_ts=since, limit=limit)
     else:
         ids = [w["chat_id"] for w in db.watch_list()]
+        if visible is not None:
+            ids = [i for i in ids if i in visible]
         groups = db.refs_summary(chat_ids=ids or [-1], since_ts=since, limit=limit)
+    chats = db.chats(limit=2000)
+    if visible is not None:
+        chats = [c for c in chats if c["id"] in visible]
     return {"groups": groups,
-            "chats": [{"id": c["id"], "title": c["title"]} for c in db.chats(limit=2000)]}
+            "chats": [{"id": c["id"], "title": c["title"]} for c in chats]}
 
 
 def accounts_view(db: DB) -> dict:

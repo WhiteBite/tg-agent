@@ -134,9 +134,19 @@ def entities(db: DB, params: dict) -> dict:
         "SELECT e.*,COALESCE(recent.last_event_id,0) AS last_event_id," + REVIEW_STATE_SQL
         + " AS review_state" + REVIEW_JOINS + f"WHERE {where} ORDER BY e.{sort} {order},e.id LIMIT ? OFFSET ?",
         [*args, limit, offset])]
+    account = params.get("account")
+    lens, _ = account_lens(account)
     for row in selected:
-        row["source_count"] = db.conn.execute(
-            "SELECT COUNT(*) FROM entity_sources WHERE entity_id=?", (row["id"],)).fetchone()[0]
+        if lens:
+            row["source_count"] = db.conn.execute(
+                "SELECT COUNT(*) FROM entity_sources WHERE entity_id=? AND chat_id IN "
+                "(SELECT chat_id FROM chat_accounts WHERE account_id=? AND enabled=1)",
+                (row["id"], account)).fetchone()[0]
+            if row["source_count"] == 0:
+                row["source_count"] = 1
+        else:
+            row["source_count"] = db.conn.execute(
+                "SELECT COUNT(*) FROM entity_sources WHERE entity_id=?", (row["id"],)).fetchone()[0]
         ext = db.conn.execute(
             "SELECT external_id FROM integrations WHERE entity_id=? AND system='101'",
             (row["id"],)).fetchone()
@@ -194,6 +204,10 @@ def changes(db: DB, params: dict) -> dict:
     sql = ("FROM entity_events ev JOIN entities e ON e.id=ev.entity_id WHERE ev.id>?"
            + (" AND e.project=?" if project else ""))
     args = [after, project] if project else [after]
+    lens, lens_args = account_lens(params.get("account"))
+    if lens:
+        sql += " AND " + lens
+        args.extend(lens_args)
     total = db.conn.execute("SELECT COUNT(*) " + sql, args).fetchone()[0]
     items = [dict(r) for r in db.conn.execute(
         "SELECT ev.*,e.title,e.project,e.kind " + sql + " ORDER BY ev.id LIMIT ? OFFSET ?",

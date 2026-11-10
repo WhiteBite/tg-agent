@@ -50,6 +50,15 @@ def account_lens(account: str | None) -> tuple[str, list]:
         return "", []
     return ACCOUNT_LENS_SQL, [account, account]
 
+
+def account_chats_sql(account: str | None, column: str = "chat_id") -> tuple[str, list]:
+    """(SQL-условие по видимым аккаунту чатам, args) для чат-уровневых поверхностей;
+    пусто для None/'all' (нулевая цена)."""
+    if not account or account == "all":
+        return "", []
+    return (f"{column} IN (SELECT chat_id FROM chat_accounts WHERE account_id=? AND enabled=1)",
+            [account])
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chats (
     id          INTEGER PRIMARY KEY,
@@ -923,17 +932,25 @@ class DB:
     def observe_chat_account(self, chat_id: int, account_id: str,
                              access_state: str | None = None) -> None:
         """Отмечает, что аккаунт видит чат; первый наблюдатель становится primary
-        (частичный уникальный индекс держит не больше одного primary на чат)."""
-        has_primary = self.conn.execute(
-            "SELECT 1 FROM chat_accounts WHERE chat_id=? AND is_primary=1", (chat_id,)
-        ).fetchone()
+        (частичный уникальный индекс держит не больше одного primary на чат).
+        is_primary считается подзапросом внутри INSERT: вынесенный отдельно
+        SELECT гоняется с параллельным observe_chat_account того же чата."""
         self.conn.execute(
             "INSERT INTO chat_accounts(chat_id, account_id, enabled, is_primary, access_state) "
-            "VALUES(?,?,1,?,?) "
+            "VALUES(?,?,1,"
+            "(SELECT CASE WHEN EXISTS(SELECT 1 FROM chat_accounts WHERE chat_id=? AND is_primary=1) "
+            "THEN 0 ELSE 1 END),?) "
             "ON CONFLICT(chat_id, account_id) DO UPDATE SET enabled=1, "
             "access_state=COALESCE(excluded.access_state, chat_accounts.access_state)",
-            (chat_id, account_id, 0 if has_primary else 1, access_state),
+            (chat_id, account_id, chat_id, access_state),
         )
+
+    def account_chat_ids(self, account: str | None) -> set[int] | None:
+        """Видимые аккаунту чаты; None — линза выключена (нулевая цена)."""
+        if not account or account == "all":
+            return None
+        return {r["chat_id"] for r in self.conn.execute(
+            "SELECT chat_id FROM chat_accounts WHERE account_id=? AND enabled=1", (account,))}
 
     def accounts_list(self) -> list[dict]:
         return [dict(r) for r in self.conn.execute("SELECT * FROM accounts ORDER BY id")]
