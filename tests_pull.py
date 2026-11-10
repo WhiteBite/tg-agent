@@ -6,7 +6,10 @@
 converged, conflict), идемпотентность реплея ревизии, запись external_evidence,
 событие origin='external' с null chat/msg и цитатой-подстрокой снимка,
 эхо-гашение (не шлём обратно в ту же систему, шлём в другую), гейт
-TG_ALLOW_PULL + confirm, сохранение dedup_key, запись конфликта в state_json.
+TG_ALLOW_PULL + confirm, сохранение dedup_key, запись конфликта в state_json,
+маскировка секретов/bidi в снимке, полях и цитате, живучесть конфликта через
+no-op pull, ограничение external_evidence 20 ревизиями, отсутствие строки
+evidence без применения.
 """
 
 from __future__ import annotations
@@ -397,6 +400,109 @@ def test_echo_suppression(tmp: Path) -> None:
           "echo: внешнее изменение уходит в другую систему", str(recs))
 
 
+def test_sanitize_pull(tmp: Path) -> None:
+    print("=== pull: секреты и bidi не попадают в entities/entity_events/quote ===")
+    db_path = tmp / "sanitize.sqlite"
+    seed_linked(db_path, 1, "e1", "Задача", base={"title": "Задача"})
+    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    bidi = chr(0x202e)
+    os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+        "e1": {"revision": "r1",
+               "snapshot": f"Задача{bidi} {secret}\nНовая формулировка",
+               "fields": {"title": f"Новая{bidi} задача {secret}",
+                          "body": f"тело {secret}"},
+               "quote": "Новая формулировка"}})
+    os.environ["TG_ALLOW_PULL"] = "1"
+    res = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(res.get("ok") is True and res.get("imported") == 1, "sanitize: применение", str(res))
+    with DB(db_path) as db:
+        row = dict(db.conn.execute("SELECT title, body FROM entities WHERE id=1").fetchone())
+    check(secret not in (row["title"] or "") and bidi not in (row["title"] or ""),
+          "sanitize: title без секрета и bidi", str(row))
+    check(secret not in (row["body"] or "") and bidi not in (row["body"] or ""),
+          "sanitize: body без секрета и bidi", str(row))
+    evs = events_of(db_path, 1)
+    blob = json.dumps(evs, ensure_ascii=False)
+    check(secret not in blob and bidi not in blob,
+          "sanitize: entity_events без секрета и bidi", blob)
+    with DB(db_path) as db:
+        ev = db.conn.execute(
+            "SELECT snapshot FROM external_evidence WHERE system='fake' "
+            "AND external_id='e1' AND revision='r1'").fetchone()
+    check(ev is not None and secret not in (ev["snapshot"] or "")
+          and bidi not in (ev["snapshot"] or ""),
+          "sanitize: снимок external_evidence замаскирован", str(dict(ev) if ev else None))
+    ext = [e for e in evs if e["origin"] == "external"]
+    check(bool(ext) and ext[0]["quote"] and secret not in ext[0]["quote"]
+          and ext[0]["quote"] in ev["snapshot"],
+          "sanitize: цитата — подстрока замаскированного снимка", str(ext))
+
+
+def test_conflict_persistence(tmp: Path) -> None:
+    print("=== pull: конфликт переживает no-op pull, снимается при схождении ===")
+    db_path = tmp / "conflict.sqlite"
+    seed_linked(db_path, 1, "e1", "LocalC", base={"title": "Base"})
+    os.environ["TG_ALLOW_PULL"] = "1"
+    os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+        "e1": {"revision": "r1", "snapshot": "RemoteC", "fields": {"title": "RemoteC"}}})
+    first = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(first.get("ok") is True and first.get("imported") == 0,
+          "conflict: первое применение — конфликт, ничего не применено", str(first))
+    c1 = state_of(db_path, 1).get("conflicts") or []
+    check(len(c1) == 1 and c1[0]["field"] == "title" and c1[0]["local"] == "LocalC"
+          and c1[0]["remote"] == "RemoteC", "conflict: записан", str(c1))
+
+    os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+        "e1": {"revision": "r2", "snapshot": "RemoteC", "fields": {}}})
+    second = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(second.get("ok") is True and second.get("imported") == 0,
+          "conflict: no-op pull ничего не применяет", str(second))
+    c2 = state_of(db_path, 1).get("conflicts") or []
+    check(len(c2) == 1 and c2[0]["field"] == "title" and c2[0]["local"] == "LocalC"
+          and c2[0]["remote"] == "RemoteC",
+          "conflict: пережил no-op pull", str(c2))
+
+    os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+        "e1": {"revision": "r3", "snapshot": "LocalC", "fields": {"title": "LocalC"}}})
+    third = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(third.get("ok") is True, "conflict: схождение применилось", str(third))
+    check(not (state_of(db_path, 1).get("conflicts") or []),
+          "conflict: снят при схождении", str(state_of(db_path, 1).get("conflicts")))
+
+
+def test_evidence_bounded(tmp: Path) -> None:
+    print("=== pull: external_evidence ограничен 20 ревизиями ===")
+    db_path = tmp / "bounded.sqlite"
+    seed_linked(db_path, 1, "e1", "T0", base={"title": "T0"})
+    os.environ["TG_ALLOW_PULL"] = "1"
+    for i in range(1, 26):
+        os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+            "e1": {"revision": f"r{i}", "snapshot": f"T{i}", "fields": {"title": f"T{i}"}}})
+        export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    with DB(db_path) as db:
+        n = db.conn.execute(
+            "SELECT COUNT(*) FROM external_evidence WHERE system='fake' "
+            "AND external_id='e1'").fetchone()[0]
+    check(n == 20, "evidence: не больше 20 ревизий на (system, external_id)", str(n))
+    check(title_of(db_path, 1) == "T25", "evidence: последнее значение применено",
+          title_of(db_path, 1))
+
+
+def test_evidence_only_on_apply(tmp: Path) -> None:
+    print("=== pull: без применённых полей строка external_evidence не пишется ===")
+    db_path = tmp / "noapply.sqlite"
+    seed_linked(db_path, 1, "e1", "Same", base={"title": "Same"})
+    os.environ["TG_ALLOW_PULL"] = "1"
+    os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+        "e1": {"revision": "r1", "snapshot": "Same", "fields": {"title": "Same"}}})
+    res = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(res.get("ok") is True and res.get("imported") == 0,
+          "no-apply: ничего не применено", str(res))
+    with DB(db_path) as db:
+        n = db.conn.execute("SELECT COUNT(*) FROM external_evidence").fetchone()[0]
+    check(n == 0, "no-apply: external_evidence пуст", str(n))
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -424,6 +530,14 @@ def main() -> int:
         test_per_entity_error(tmp)
         set_env(tmp)
         test_echo_suppression(tmp)
+        set_env(tmp)
+        test_sanitize_pull(tmp)
+        set_env(tmp)
+        test_conflict_persistence(tmp)
+        set_env(tmp)
+        test_evidence_bounded(tmp)
+        set_env(tmp)
+        test_evidence_only_on_apply(tmp)
     finally:
         for k, v in saved.items():
             if v is None:

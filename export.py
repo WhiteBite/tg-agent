@@ -61,7 +61,7 @@ from env import load_env
 
 load_env()
 
-from db import DB
+from db import DB, clean_text, sanitize_title
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -444,6 +444,18 @@ def _norm_val(value):
     return None if value in (None, "") else str(value)
 
 
+def _sanitize_field(field: str, value):
+    if not isinstance(value, str):
+        return value
+    if field == "title":
+        return sanitize_title(clean_text(value))
+    return clean_text(value)
+
+
+def _sanitize_fields(fields: dict) -> dict:
+    return {k: _sanitize_field(k, v) for k, v in fields.items()}
+
+
 def _effective_revision(remote: dict) -> str:
     revision = str(remote.get("revision") or "")
     if revision:
@@ -473,6 +485,16 @@ def _merge_fields(ent, base: dict, fields: dict) -> tuple[dict, list[dict]]:
     return accepted, conflicts
 
 
+def _merge_conflicts(prior: list[dict], fresh: list[dict], fields: dict) -> list[dict]:
+    """Незакрытые конфликты прошлых pull'ов живут, пока поле не сойдётся:
+    поле из fields пересчитано (fresh или снято), отсутствующее — переносится."""
+    fresh_by_field = {c["field"]: c for c in fresh}
+    kept = [c for c in prior
+            if c.get("field") not in fresh_by_field and c.get("field") not in fields]
+    kept.extend(fresh_by_field.values())
+    return kept
+
+
 def _evidence_quote(snapshot: str, hint: str | None) -> str:
     if hint and hint in snapshot:
         return hint
@@ -494,14 +516,25 @@ def _store_external_evidence(db: DB, system: str, external_id: str, revision: st
         (system, external_id, revision)).fetchone()["id"]
 
 
+_EVIDENCE_KEEP = 20
+
+
+def _prune_external_evidence(db: DB, system: str, external_id: str) -> None:
+    db.conn.execute(
+        "DELETE FROM external_evidence WHERE system=? AND external_id=? AND id NOT IN "
+        "(SELECT id FROM external_evidence WHERE system=? AND external_id=? "
+        "ORDER BY id DESC LIMIT ?)",
+        (system, external_id, system, external_id, _EVIDENCE_KEEP))
+
+
 def _apply_pull(db: DB, system: str, entity_id: int, external_id: str,
                 remote: dict) -> bool:
     """Применяет удалённое состояние внутри BEGIN IMMEDIATE: доказательство,
     событие origin='external', state_json. Удалённые данные уже получены вне
     транзакции. Повтор той же ревизии событий не плодит."""
     revision = _effective_revision(remote)
-    snapshot = remote.get("snapshot") or ""
-    fields = remote.get("fields") or {}
+    snapshot = clean_text(remote.get("snapshot") or "") or ""
+    fields = _sanitize_fields(remote.get("fields") or {})
     now = int(time.time())
     db.conn.execute("BEGIN IMMEDIATE")
     try:
@@ -521,9 +554,12 @@ def _apply_pull(db: DB, system: str, entity_id: int, external_id: str,
             return False
         base = state.get("base") or {}
         accepted, conflicts = _merge_fields(ent, base, fields)
-        ev_id = _store_external_evidence(db, system, external_id, revision, snapshot)
+        merged_conflicts = _merge_conflicts(state.get("conflicts") or [], conflicts, fields)
         if accepted:
-            quote = _evidence_quote(snapshot, remote.get("quote"))
+            ev_id = _store_external_evidence(db, system, external_id, revision, snapshot)
+            _prune_external_evidence(db, system, external_id)
+            hint = remote.get("quote")
+            quote = _evidence_quote(snapshot, clean_text(hint) if hint else None)
             assigns = ", ".join(f"{f}=?" for f in accepted)
             db.conn.execute(f"UPDATE entities SET {assigns}, updated_ts=? WHERE id=?",
                             [*accepted.values(), now, entity_id])
@@ -539,10 +575,19 @@ def _apply_pull(db: DB, system: str, entity_id: int, external_id: str,
             if "title" in accepted or "body" in accepted:
                 db.conn.execute("DELETE FROM entity_vec WHERE entity_id=?", (entity_id,))
         new_base = dict(base)
-        new_base.update({k: v for k, v in fields.items() if k in _MERGEABLE_FIELDS})
+        for field, remote_val in fields.items():
+            if field not in _MERGEABLE_FIELDS:
+                continue
+            rv = _norm_val(remote_val)
+            bv = _norm_val(base.get(field))
+            lv = _norm_val(ent[field])
+            # база — общий предок: на конфликте не двигается, иначе следующий pull примет удалённое за «неизменное»
+            if rv == bv or lv == bv or lv == rv:
+                new_base[field] = remote_val
         db.conn.execute(
             "UPDATE integrations SET state_json=? WHERE entity_id=? AND system=?",
-            (json.dumps({"base": new_base, "revision": revision, "conflicts": conflicts,
+            (json.dumps({"base": new_base, "revision": revision,
+                         "conflicts": merged_conflicts,
                          "ack": {"revision": revision, "ts": now}}, ensure_ascii=False),
              entity_id, system))
         db.conn.commit()
@@ -589,7 +634,7 @@ def _pull_entities(db: DB, system: str, fetch, apply: bool) -> dict:
             if ent is None:
                 continue
             accepted, _ = _merge_fields(ent, state.get("base") or {},
-                                        remote.get("fields") or {})
+                                        _sanitize_fields(remote.get("fields") or {}))
             if accepted:
                 would += 1
     return {"imported": imported, "would": would, "failed": failed,
