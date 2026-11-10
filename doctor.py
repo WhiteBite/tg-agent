@@ -231,6 +231,16 @@ def run_checks(live: bool = False, providers: bool = False) -> list[dict]:
     except Exception as exc:
         add("sanitize self-test", False, str(exc))
 
+    try:
+        import modules
+        import packs
+        bad = [str(e["error"]) for e in (modules.EXTRA_ERROR, packs.EXTRA_ERROR)
+               if e and e["ok"] is False]
+        add("TG_EXTRA_MODULES / TG_EXTRA_PACKS", not bad,
+            "; ".join(bad) if bad else "битых доп. путей нет")
+    except Exception as exc:
+        add("TG_EXTRA_MODULES / TG_EXTRA_PACKS", False, str(exc))
+
     if live:
         try:
             import asyncio

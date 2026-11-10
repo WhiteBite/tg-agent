@@ -730,6 +730,27 @@ def test_doctor_cost() -> None:
           "doctor --cost (CLI): exit 0 и рендер сумм", f"rc={proc.returncode} {out[-300:]}")
 
 
+def test_doctor_extra_error() -> None:
+    print("=== doctor: битый TG_EXTRA_MODULES — ❌ проверка с текстом EXTRA_ERROR ===")
+    db = TMP / "extra_error.sqlite"
+    _seed_watch_db(db)
+    broken = TMP / "broken_extra.py"
+    broken.write_text('raise RuntimeError("битый доп. модуль")\n', encoding="utf-8")
+    env = dict(os.environ, TG_DB=str(db), TG_ENV_FILE="",
+               TELEGRAM_API_ID="1", TELEGRAM_API_HASH="h",
+               TG_EXTRA_MODULES=str(broken))
+    proc = subprocess.run(
+        [sys.executable, "-X", "utf8",
+         str(Path(__file__).parent / "doctor.py")],
+        capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
+    out = proc.stdout + proc.stderr
+    line = next((ln for ln in out.splitlines() if "TG_EXTRA_MODULES" in ln), "")
+    check(proc.returncode == 1 and line.startswith("❌")
+          and "битый доп. модуль" in line,
+          "doctor: битый TG_EXTRA_MODULES даёт ❌ проверку с текстом EXTRA_ERROR",
+          f"rc={proc.returncode} {line[:200]}")
+
+
 def test_digest_bound() -> None:
     print("=== digest: лимит строк не теряет хвост (курсор подбирает) ===")
     import digest as digest_mod
@@ -1223,6 +1244,7 @@ def main() -> int:
         test_extract_report_rejected()
         test_doctor_quality()
         test_doctor_cost()
+        test_doctor_extra_error()
         test_digest_bound()
         test_loop_until_done_false()
         test_entity_alerts()
