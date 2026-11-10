@@ -233,7 +233,13 @@ window.WS = (() => {
     try {
       const data = await api("/api/workspace/accounts");
       const items = data.items || [];
-      if (items.length <= 1) {
+      if (!items.some((a) => a.id === account)) {
+        account = "all";
+        store("ws:account", account);
+        render();
+        refreshHealth();
+      }
+      if (items.filter((a) => a.id !== "all").length < 2) {
         sel.hidden = true;
         return;
       }
@@ -279,6 +285,8 @@ window.WS = (() => {
       document.documentElement.dataset.theme === "dark" ? "light" : "dark";
     store("ws:theme", next);
     applyTheme(next);
+    const sel = $("#theme");
+    if (sel) sel.value = next;
   }
   async function offerAddChat(nodeId) {
     const node = $("#" + nodeId);
@@ -289,7 +297,9 @@ window.WS = (() => {
       node.innerHTML =
         '<button class="button primary" data-add-chat>Добавить чат из Telegram</button>';
       node.querySelector("[data-add-chat]").onclick = () => window.WS.addChat?.();
-    } catch {}
+    } catch (e) {
+      toast(e.message || "Не удалось проверить состояние");
+    }
   }
   function setMenu(on) {
     $("#navigation").classList.toggle("visible", on);
@@ -306,7 +316,14 @@ window.WS = (() => {
       params: new URLSearchParams(params),
     };
     document.body.dataset.screen = route.name;
-    const heading = headings[route.name];
+    const heading =
+      route.name === "tasks" &&
+      (route.params.get("kind") || route.params.get("kinds"))
+        ? [
+            "Записи",
+            "Все виды записей: задачи, обещания, решения, вопросы и сервисы.",
+          ]
+        : headings[route.name];
     document.title = `TG Agent · ${heading[0]}`;
     $("#page-eyebrow").textContent = "Контроль по переписке";
     $("#page-title").textContent = heading[0];
