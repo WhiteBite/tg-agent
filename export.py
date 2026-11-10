@@ -437,8 +437,19 @@ def _extra_pullers() -> dict[str, Callable[[DB, dict], dict]]:
     return dict(getattr(mod, "PULLERS", {}) or {}) if mod is not None else {}
 
 
+_MERGEABLE_FIELDS = frozenset({"title", "body", "owner", "due_ts", "status"})
+
+
 def _norm_val(value):
     return None if value in (None, "") else str(value)
+
+
+def _effective_revision(remote: dict) -> str:
+    revision = str(remote.get("revision") or "")
+    if revision:
+        return revision
+    snapshot = remote.get("snapshot") or ""
+    return hashlib.sha1(snapshot.encode("utf-8")).hexdigest()
 
 
 def _merge_fields(ent, base: dict, fields: dict) -> tuple[dict, list[dict]]:
@@ -446,7 +457,7 @@ def _merge_fields(ent, base: dict, fields: dict) -> tuple[dict, list[dict]]:
     accepted: dict = {}
     conflicts: list[dict] = []
     for field, remote_val in fields.items():
-        if field not in ent.keys():
+        if field not in _MERGEABLE_FIELDS or field not in ent.keys():
             continue
         local_val = ent[field]
         base_val = base.get(field)
@@ -488,7 +499,7 @@ def _apply_pull(db: DB, system: str, entity_id: int, external_id: str,
     """Применяет удалённое состояние внутри BEGIN IMMEDIATE: доказательство,
     событие origin='external', state_json. Удалённые данные уже получены вне
     транзакции. Повтор той же ревизии событий не плодит."""
-    revision = str(remote.get("revision") or "")
+    revision = _effective_revision(remote)
     snapshot = remote.get("snapshot") or ""
     fields = remote.get("fields") or {}
     now = int(time.time())
@@ -528,7 +539,7 @@ def _apply_pull(db: DB, system: str, entity_id: int, external_id: str,
             if "title" in accepted or "body" in accepted:
                 db.conn.execute("DELETE FROM entity_vec WHERE entity_id=?", (entity_id,))
         new_base = dict(base)
-        new_base.update(fields)
+        new_base.update({k: v for k, v in fields.items() if k in _MERGEABLE_FIELDS})
         db.conn.execute(
             "UPDATE integrations SET state_json=? WHERE entity_id=? AND system=?",
             (json.dumps({"base": new_base, "revision": revision, "conflicts": conflicts,
@@ -560,9 +571,8 @@ def _pull_entities(db: DB, system: str, fetch, apply: bool) -> dict:
             continue
         if remote is None:
             continue
-        revision = str(remote.get("revision") or "")
-        if revision:
-            cursor = revision
+        revision = _effective_revision(remote)
+        cursor = revision
         state = json.loads(r["state_json"] or "{}")
         if state.get("revision") == revision:
             continue
@@ -570,7 +580,7 @@ def _pull_entities(db: DB, system: str, fetch, apply: bool) -> dict:
             try:
                 if _apply_pull(db, system, r["entity_id"], r["external_id"], remote):
                     imported += 1
-            except _EntityFailed as exc:
+            except Exception as exc:
                 failed.append(r["entity_id"])
                 errors.append(f"сущность {r['entity_id']}: {exc}")
         else:

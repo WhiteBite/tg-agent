@@ -293,6 +293,74 @@ def test_preserve_dedup_key(tmp: Path) -> None:
     check(key == "stable-key", "pull: dedup_key сохранён при внешней правке title", str(key))
 
 
+def test_allowlist(tmp: Path) -> None:
+    print("=== pull: allowlist — identity/system-поля не перезаписываются ===")
+    db_path = tmp / "allow.sqlite"
+    seed_linked(db_path, 1, "e1", "Сервис", base={"title": "Сервис"}, dedup_key="stable-key")
+    os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+        "e1": {"revision": "r1", "snapshot": "Сервис v2",
+               "fields": {"title": "Сервис v2", "id": 999, "dedup_key": "hacked",
+                          "pack": "hacked", "chat_id": -1, "created_ts": 42,
+                          "closed_ts": 43, "updated_ts": 44}}})
+    os.environ["TG_ALLOW_PULL"] = "1"
+    res = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(res.get("ok") is True and res.get("imported") == 1,
+          "allowlist: применение без ошибок (updated_ts не даёт дубль колонки)", str(res))
+    with DB(db_path) as db:
+        row = dict(db.conn.execute(
+            "SELECT id, pack, chat_id, dedup_key, created_ts, closed_ts, updated_ts, title "
+            "FROM entities WHERE id=1").fetchone())
+    check(row["title"] == "Сервис v2", "allowlist: разрешённое поле применено", str(row))
+    check(row["id"] == 1 and row["pack"] == "services" and row["chat_id"] == -100999
+          and row["dedup_key"] == "stable-key" and row["created_ts"] == 1
+          and row["closed_ts"] is None and row["updated_ts"] != 44,
+          "allowlist: identity/system-поля не тронуты", str(row))
+
+
+def test_empty_revision(tmp: Path) -> None:
+    print("=== pull: пустая ревизия -> sha1(snapshot), повтор не пропускается ===")
+    db_path = tmp / "norev.sqlite"
+    seed_linked(db_path, 1, "e1", "T1", base={"title": "T1"})
+    os.environ["TG_ALLOW_PULL"] = "1"
+    os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+        "e1": {"snapshot": "S1", "fields": {"title": "T2"}}})
+    first = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(first.get("ok") is True and first.get("imported") == 1,
+          "пустая ревизия: первое применение", str(first))
+    check(title_of(db_path, 1) == "T2", "пустая ревизия: title применён", title_of(db_path, 1))
+    check(bool(state_of(db_path, 1).get("revision")),
+          "пустая ревизия: в state_json записан sha1, не пусто", str(state_of(db_path, 1)))
+
+    replay = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(replay.get("ok") is True and replay.get("imported") == 0,
+          "пустая ревизия: реплей того же снимка — без изменений", str(replay))
+
+    os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+        "e1": {"snapshot": "S2", "fields": {"title": "T3"}}})
+    second = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(second.get("ok") is True and second.get("imported") == 1,
+          "пустая ревизия: изменённый снимок применяется повторно", str(second))
+    check(title_of(db_path, 1) == "T3", "пустая ревизия: новое значение применено",
+          title_of(db_path, 1))
+
+
+def test_per_entity_error(tmp: Path) -> None:
+    print("=== pull: не-_EntityFailed сбой одной сущности не роняет остальные ===")
+    db_path = tmp / "pererr.sqlite"
+    seed_linked(db_path, 1, "e1", "Bad", base={"title": "Bad"})
+    seed_linked(db_path, 2, "e2", "Good", base={"title": "Good"})
+    os.environ["FAKE_PULL_FILE"] = write_pull_file(tmp, {
+        "e1": {"revision": "r1", "snapshot": "Bad2",
+               "fields": {"title": {"nested": "dict"}}},
+        "e2": {"revision": "r2", "snapshot": "Good2", "fields": {"title": "Good2"}}})
+    os.environ["TG_ALLOW_PULL"] = "1"
+    res = export_mod.run(str(db_path), system="fake", direction="pull", apply=True, confirm=True)
+    check(res.get("ok") is False and res.get("failed") == [1] and res.get("imported") == 1,
+          "pull: не-_EntityFailed сбой в failed, здоровая применена", str(res))
+    check(title_of(db_path, 2) == "Good2", "pull: здоровая сущность применена после сбоя")
+    check(title_of(db_path, 1) == "Bad", "pull: упавшая сущность не изменена")
+
+
 def test_echo_suppression(tmp: Path) -> None:
     print("=== pull: эхо-гашение — не шлём обратно в ту же систему, шлём в другую ===")
     db_path = tmp / "echo.sqlite"
@@ -348,6 +416,12 @@ def main() -> int:
         test_failed_entity(tmp)
         set_env(tmp)
         test_preserve_dedup_key(tmp)
+        set_env(tmp)
+        test_allowlist(tmp)
+        set_env(tmp)
+        test_empty_revision(tmp)
+        set_env(tmp)
+        test_per_entity_error(tmp)
         set_env(tmp)
         test_echo_suppression(tmp)
     finally:
