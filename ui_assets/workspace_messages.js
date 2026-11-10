@@ -442,6 +442,7 @@
     }
   }, 5000);
   W.screens.messages = messages;
+  W.addChat = addChat;
   W.bubble = bubble;
   W.regroup = regroup;
 })();

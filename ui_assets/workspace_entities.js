@@ -79,13 +79,13 @@
       return W.empty(
         "Ничего не найдено",
         "Измените фильтры или подключите темы проекта.",
-        '<a class="button" href="#settings">Настроить проект</a>',
+        '<span id="register-empty-action"><a class="button" href="#settings">Настроить проект</a></span>',
       );
     const row_actions = (e) =>
       e.closed_ts
         ? "<td></td>"
         : `<td class="row-actions optional" data-label="Действия"><button class="icon-button" data-row-action="approve" data-id="${e.id}" aria-label="Отметить проверенной" title="Проверено">${icon("check")}</button><button class="icon-button" data-row-action="close" data-id="${e.id}" aria-label="Закрыть запись" title="Закрыть">${icon("close")}</button><button class="icon-button" data-row-action="defer" data-id="${e.id}" aria-label="Отложить на неделю" title="Отложить">${icon("clock")}</button></td>`;
-    return `<div class="panel"><table class="register"><thead><tr><th class="title-col"><button data-sort="title" style="display:inline-flex;align-items:center;gap:var(--s1)">Название ${sortGlyph}</button></th><th>Ответственный</th><th><button data-sort="due_ts" style="display:inline-flex;align-items:center;gap:var(--s1)">Срок ${sortGlyph}</button></th><th>Статус</th><th class="optional">Проверка</th><th class="optional">101</th><th class="optional">Действия</th></tr></thead><tbody>${items.map((e) => `<tr data-entity="${e.id}"><td><button class="row-title">${esc(e.title)}</button><small>${esc(e.project || "Без проекта")} · ${esc(kinds[e.kind] || e.kind)}</small></td><td data-label="Ответственный">${esc(e.owner || "Не определён")}</td><td data-label="Срок"><span class="${e.due_ts && !e.closed_ts && e.due_ts < Date.now() / 1000 ? "row-due" : ""}">${date(e.due_ts)}</span></td><td data-label="Статус">${badge(e.status)}</td><td data-label="Проверка" class="optional">${badge(e.review_state || "pending", reviews[e.review_state || "pending"])}</td><td data-label="101" class="optional"><small>${e.external_id ? "Есть локальная запись" : "Нет локальной записи"}</small></td>${row_actions(e)}</tr>`).join("")}</tbody></table></div>`;
+    return `<div class="panel"><table class="register"><thead><tr><th class="title-col"><button data-sort="title" style="display:inline-flex;align-items:center;gap:var(--s1)">Название ${sortGlyph}</button></th><th>Ответственный</th><th><button data-sort="due_ts" style="display:inline-flex;align-items:center;gap:var(--s1)">Срок ${sortGlyph}</button></th><th>Статус</th><th class="optional">Проверка</th><th class="optional">Действия</th></tr></thead><tbody>${items.map((e) => `<tr data-entity="${e.id}"><td><button class="row-title">${esc(e.title)}</button><small>${esc(e.project || "Без проекта")} · ${esc(kinds[e.kind] || e.kind)}</small></td><td data-label="Ответственный">${esc(e.owner || "Не определён")}</td><td data-label="Срок"><span class="${e.due_ts && !e.closed_ts && e.due_ts < Date.now() / 1000 ? "row-due" : ""}">${date(e.due_ts)}</span></td><td data-label="Статус">${badge(e.status)}</td><td data-label="Проверка" class="optional">${badge(e.review_state || "pending", reviews[e.review_state || "pending"])}</td>${row_actions(e)}</tr>`).join("")}</tbody></table></div>`;
   }
   async function entities(params, seq) {
     const forced = { decisions: "decision", questions: "question" }[
@@ -96,7 +96,10 @@
     const data = await get("entities", {
       ...p,
       kind,
-      kinds: !kind && W.route.name === "tasks" ? "task,promise" : undefined,
+      kinds:
+        !kind && !p.kinds && W.route.name === "tasks"
+          ? "task,promise"
+          : p.kinds,
       limit: 30,
     });
     const filterHtml = await filters(params);
@@ -110,6 +113,7 @@
     );
     $("#view").innerHTML =
       `${filterHtml}<div class="cluster" style="margin-bottom:var(--s4)"><span class="muted">${data.total} записей</span>${params.get("review_state") === "pending" ? `<button class="button saved-view" id="clear-review-filter">Только непроверенные ${icon("close")}</button>` : ""}${pending.length ? '<button class="button" id="bulk-approve">Проверить все показанные</button>' : ""}${W.route.name === "tasks" ? '<button class="button" id="bulk-close-rotten">Закрыть протухшие триалы</button>' : ""}<button class="text-button" id="save-view">Сохранить представление</button><span class="cluster" id="save-view-form" hidden><input id="save-view-name" placeholder="Название представления" size="18"><button class="button" type="button" id="save-view-confirm">Сохранить</button><button class="text-button" type="button" id="save-view-cancel">Отменить</button></span>${saved.map(({ view, index }) => `<button class="button saved-view" data-saved-view="${index}">${esc(view.name)}</button><button class="icon-button" data-delete-view="${index}" aria-label="Удалить представление ${esc(view.name)}">${icon("close")}</button>`).join("")}</div>${register(data.items)}<div class="pagination"><span>${data.total ? Number(data.offset) + 1 : 0}–${Math.min(Number(data.offset) + data.items.length, data.total)} из ${data.total}</span><div class="cluster"><button class="button" id="prev-page" ${!Number(data.offset) ? "disabled" : ""}>Назад</button><button class="button" id="next-page" ${Number(data.offset) + data.items.length >= data.total ? "disabled" : ""}>Далее</button></div></div>`;
+    if (!data.items.length) W.offerAddChat("register-empty-action");
     $("#entity-filters").onsubmit = (e) => {
       e.preventDefault();
       pageLink(params, {
@@ -361,7 +365,7 @@
     const e = d.entity,
       body = $("#entity-drawer .drawer-body"),
       duePrefill = e.due_ts ? localDate(e.due_ts) : "";
-    body.innerHTML = `<form id="entity-edit" class="stack"><h3>Исправление записи</h3><div class="field"><label for="edit-title">Название</label><input id="edit-title" name="title" required maxlength="500" value="${esc(e.title)}"></div><div class="field"><label for="edit-body">Описание</label><textarea id="edit-body" name="body">${esc(e.body)}</textarea></div><div class="field"><label for="edit-owner">Ответственный</label><input id="edit-owner" name="owner" value="${esc(e.owner)}"></div><div class="field"><label for="edit-due">Срок (местная дата)</label><input id="edit-due" name="due" type="date" value="${duePrefill}"></div><div class="field"><label for="edit-status">Статус</label><select id="edit-status" name="status">${options({ open: "Открыто", in_progress: "В работе", blocked: "Заблокировано", done: "Завершено", backlog: "К распределению" }, e.status, "Выберите статус")}</select></div><div class="cluster"><button class="button primary" type="submit">Сохранить исправления</button><button class="button" type="button" id="cancel-edit">Отменить</button></div><div id="edit-error" role="status"></div><div class="notice warning" id="unsaved-guard" role="status" hidden>Изменения не сохранены<div class="cluster"><button type="button" class="button danger" id="discard-changes">Всё равно закрыть</button><button type="button" class="button" id="keep-editing">Продолжить правку</button></div></div></form>`;
+    body.innerHTML = `<form id="entity-edit" class="stack"><h3>Исправление записи</h3><div class="field"><label for="edit-title">Название</label><input id="edit-title" name="title" required maxlength="500" value="${esc(e.title)}"></div><div class="field"><label for="edit-body">Описание</label><textarea id="edit-body" name="body">${esc(e.body)}</textarea></div><div class="field"><label for="edit-owner">Ответственный</label><input id="edit-owner" name="owner" value="${esc(e.owner)}"></div><div class="field"><label for="edit-due">Срок (местная дата)</label><input id="edit-due" name="due" type="date" value="${duePrefill}"></div><div class="field"><label for="edit-status">Статус</label><select id="edit-status" name="status">${options({ open: "Открыто", in_progress: "В работе", blocked: "Заблокировано", done: "Завершено", backlog: "К распределению" }, e.status, "Выберите статус")}</select></div><div class="cluster"><button class="button primary" type="submit">Сохранить исправления</button><button class="button" type="button" id="cancel-edit">Отменить</button></div><div id="edit-error" role="status"></div><div class="notice warning" id="entity-unsaved-guard" role="status" hidden>Изменения не сохранены<div class="cluster"><button type="button" class="button danger" id="entity-discard-changes">Всё равно закрыть</button><button type="button" class="button" id="entity-keep-editing">Продолжить правку</button></div></div></form>`;
     armGuard($("#entity-edit"));
     $("#edit-title").focus();
     $("#cancel-edit").onclick = () => {
@@ -403,14 +407,14 @@
     const mark = () => (g.dirty = true);
     form.addEventListener("input", mark);
     form.addEventListener("change", mark);
-    $("#discard-changes").onclick = () => {
-      $("#unsaved-guard").hidden = true;
+    $("#entity-discard-changes").onclick = () => {
+      $("#entity-unsaved-guard").hidden = true;
       const discard = guard?.discard;
       guard = null;
       discard?.();
     };
-    $("#keep-editing").onclick = () => {
-      $("#unsaved-guard").hidden = true;
+    $("#entity-keep-editing").onclick = () => {
+      $("#entity-unsaved-guard").hidden = true;
       g.warned = false;
     };
   }
@@ -418,7 +422,7 @@
     if (!guard || !guard.dirty || guard.warned) return false;
     guard.warned = true;
     guard.discard = discard;
-    $("#unsaved-guard").hidden = false;
+    $("#entity-unsaved-guard").hidden = false;
     return true;
   }
   function closeDrawer() {

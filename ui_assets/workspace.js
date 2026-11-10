@@ -50,6 +50,8 @@ window.WS = (() => {
     star: '<path d="m12 3 2.6 5.6 6.1.8-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6L3.3 9.4l6.1-.8z"/>',
     starFilled:
       '<path d="m12 3 2.6 5.6 6.1.8-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6L3.3 9.4l6.1-.8z" fill="currentColor"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>',
+    moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"/>',
   };
   const icon = (name) =>
     `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.tasks}</svg>`;
@@ -132,6 +134,7 @@ window.WS = (() => {
     promo: "Предложение",
     approval: "Согласование",
   };
+  const allKinds = Object.keys(kinds).join(",");
   const badge = (value, text) =>
     `<span class="badge ${esc(value)}">${esc(text || statuses[value] || value)}</span>`;
   const empty = (title, text, action = "", iconName = "tasks") =>
@@ -165,7 +168,7 @@ window.WS = (() => {
       "Сводка по теме: записи, пробелы и свежие сообщения.",
     ],
     catalog: [
-      "Каталог",
+      "Сервисы",
       "Сервисы, триалы и промо — по одной строке на сервис.",
     ],
     downloads: [
@@ -173,10 +176,10 @@ window.WS = (() => {
       "Скачивание и пересылка медиа из отмеченных источников.",
     ],
     integrations: [
-      "Интеграции",
+      "Экспорт 101",
       "Локальное состояние выгрузки и запросы-кандидаты.",
     ],
-    engine: ["Движок", "Фоновые демоны: статус, запуск и остановка."],
+    engine: ["Демоны", "Фоновые демоны: статус, запуск и остановка."],
     links: ["Ссылки", "Что шерили: упоминания, публичные ссылки, инвайты и их статус."],
     global: ["Поиск в Telegram", "Глобальный поиск каналов и групп — не добавляет их в индекс."],
     settings: ["Настройки", "Проекты, люди, уведомления и внешний вид."],
@@ -184,11 +187,11 @@ window.WS = (() => {
     search: ["Поиск", "Задачи, решения и сообщения с контекстом."],
   };
   const nav = [
-    ["Обзор", [["attention", "Требует внимания"], ["projects", "Проекты"], ["catalog", "Каталог"]]],
+    ["Обзор", [["attention", "Требует внимания"], ["projects", "Проекты"], ["catalog", "Сервисы"]]],
     ["Работа", [["tasks", "Задачи"], ["decisions", "Решения"], ["questions", "Вопросы"]]],
     ["Переписка", [["messages", "Переписка"], ["links", "Ссылки"], ["global", "Поиск в Telegram"]]],
-    ["Данные", [["downloads", "Загрузки"], ["integrations", "Интеграции"]]],
-    ["Система", [["engine", "Движок"], ["settings", "Настройки"]]],
+    ["Данные", [["downloads", "Загрузки"], ["integrations", "Экспорт 101"]]],
+    ["Система", [["engine", "Демоны"], ["settings", "Настройки"]]],
   ];
   let route = { name: "attention", params: new URLSearchParams() };
   const screens = {};
@@ -227,6 +230,35 @@ window.WS = (() => {
           ? "dark"
           : "light"
         : value;
+    updateThemeToggle();
+  }
+  function updateThemeToggle() {
+    const btn = $("#theme-toggle");
+    if (!btn) return;
+    const dark = document.documentElement.dataset.theme === "dark";
+    btn.innerHTML = icon(dark ? "sun" : "moon");
+    btn.setAttribute(
+      "aria-label",
+      dark ? "Включить светлую тему" : "Включить тёмную тему",
+    );
+    btn.title = dark ? "Светлая тема" : "Тёмная тема";
+  }
+  function toggleTheme() {
+    const next =
+      document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    store("ws:theme", next);
+    applyTheme(next);
+  }
+  async function offerAddChat(nodeId) {
+    const node = $("#" + nodeId);
+    if (!node) return;
+    try {
+      const s = await api("/api/state");
+      if (s.chats?.length) return;
+      node.innerHTML =
+        '<button class="button primary" data-add-chat>Добавить чат из Telegram</button>';
+      node.querySelector("[data-add-chat]").onclick = () => window.WS.addChat?.();
+    } catch {}
   }
   function setMenu(on) {
     $("#navigation").classList.toggle("visible", on);
@@ -344,6 +376,7 @@ window.WS = (() => {
   window.addEventListener("hashchange", render);
   document.addEventListener("DOMContentLoaded", () => {
     applyTheme(saved("ws:theme", "dark"));
+    $("#theme-toggle").onclick = toggleTheme;
     matchMedia("(prefers-color-scheme: dark)").addEventListener(
       "change",
       () => {
@@ -390,6 +423,8 @@ window.WS = (() => {
     applyTheme,
     render,
     refreshHealth,
+    offerAddChat,
+    allKinds,
     screens,
     get route() {
       return route;

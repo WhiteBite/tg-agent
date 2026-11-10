@@ -22,7 +22,7 @@
     $("#view").innerHTML =
       `<div class="metric-grid"><button class="metric urgent" data-home-filter="overdue"><span>Просрочено</span><strong>${c.overdue || 0}</strong><small>Срок прошёл, запись открыта</small></button><button class="metric" data-home-filter="upcoming"><span>Истекает</span><strong>${c.upcoming || 0}</strong><small>На ближайшей неделе</small></button><button class="metric" data-home-filter="blocked"><span>Заблокировано</span><strong>${c.blocked || 0}</strong><small>Нужно убрать препятствие</small></button><button class="metric" data-home-filter="questions"><span>Без ответа</span><strong>${c.open_questions || 0}</strong><small>Открытые вопросы</small></button></div>
       <div class="section-heading"><h2>Очередь внимания</h2><a href="#tasks?due=overdue">Все задачи ${icon("arrow")}</a></div>
-      <div class="panel">${rows.length ? rows.map((e) => `<article class="attention-row"><div class="row-icon ${e.reasons?.includes("overdue") ? "danger" : ""}">${icon(e.kind === "question" ? "questions" : "clock")}</div><div class="row-body"><button class="row-title" data-entity="${e.id}">${esc(e.title)}</button><div class="row-meta"><span>${esc(e.project || "Без проекта")}</span><span>${esc(e.owner || "Ответственный не определён")}</span><span>${esc((e.reasons || []).map((r) => reasonLabels[r] || r).join(" · "))}</span></div></div>${badge(e.status)}${e.due_ts ? `<span class="row-due">${W.date(e.due_ts)}</span>` : ""}</article>`).join("") : W.empty("Сейчас ничего не требует внимания", "Это данные локального индекса. Убедитесь, что переписка синхронизируется.", '<a class="button" href="#settings">Проверить подключение</a>')}</div>
+      <div class="panel">${rows.length ? rows.map((e) => `<article class="attention-row"><div class="row-icon ${e.reasons?.includes("overdue") ? "danger" : ""}">${icon(e.kind === "question" ? "questions" : "clock")}</div><div class="row-body"><button class="row-title" data-entity="${e.id}">${esc(e.title)}</button><div class="row-meta"><span>${esc(e.project || "Без проекта")}</span><span>${esc(e.owner || "Ответственный не определён")}</span><span>${esc((e.reasons || []).map((r) => reasonLabels[r] || r).join(" · "))}</span></div></div>${badge(e.status)}${e.due_ts ? `<span class="row-due">${W.date(e.due_ts)}</span>` : ""}</article>`).join("") : W.empty("Сейчас ничего не требует внимания", "Это данные локального индекса. Убедитесь, что переписка синхронизируется.", '<span id="attention-empty-action"><a class="button" href="#settings">Проверить подключение</a></span>')}</div>
       <div class="section-heading section-gap"><h2>Последние изменения</h2><a href="#projects">По проектам</a></div><div class="panel">${
         (d.recent_changes || []).length
           ? d.recent_changes
@@ -38,13 +38,21 @@
             )
       }</div>`;
     $("#new-project").onclick = () => W.setupProject();
+    if (!rows.length) W.offerAddChat("attention-empty-action");
     document.querySelectorAll("[data-home-filter]").forEach(
       (b) =>
         (b.onclick = () => {
           const f = b.dataset.homeFilter;
           if (f === "questions") W.go("questions");
-          else if (f === "upcoming") W.go("catalog", { due: "upcoming" });
-          else W.go("tasks", f === "overdue" ? { due: "overdue" } : { status: "blocked" });
+          else if (f === "upcoming")
+            W.go("tasks", { due: "upcoming", kinds: W.allKinds });
+          else
+            W.go(
+              "tasks",
+              f === "overdue"
+                ? { due: "overdue", kinds: W.allKinds }
+                : { status: "blocked", kinds: W.allKinds },
+            );
         }),
     );
   }
