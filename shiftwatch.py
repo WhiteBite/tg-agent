@@ -84,9 +84,9 @@ def _create_controller(db: DB, t: dict, dedup_key: str, recheck_ts: int,
         (controller_id, t["ent_chat"], t["topic_id"], now, now))
     db.conn.execute(
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, chat_id, "
-        "msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?)",
+        "msg_id, quote, actor, origin) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (controller_id, None, now, "new", None, t["chat_id"], t["msg_id"],
-         t["quote"], "shiftwatch"))
+         t["quote"], "shiftwatch", "system"))
     return controller_id
 
 

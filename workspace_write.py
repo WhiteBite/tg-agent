@@ -13,11 +13,13 @@ def put_meta(db: DB, key: str, value) -> None:
                     (key, json.dumps(value, ensure_ascii=False)))
 
 
-def human_event(db: DB, entity_id: int, op: str, field: str, old, new, note: str = "") -> int:
+def human_event(db: DB, entity_id: int, op: str, field: str, old, new, note: str = "",
+                origin: str = "human") -> int:
     return db.conn.execute(
-        "INSERT INTO entity_events(entity_id,ts,op,field,from_val,to_val,quote) VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO entity_events(entity_id,ts,op,field,from_val,to_val,quote,origin) "
+        "VALUES(?,?,?,?,?,?,?,?)",
         (entity_id, int(time.time()), op, field, None if old is None else str(old),
-         None if new is None else str(new), clean_text(note))).lastrowid
+         None if new is None else str(new), clean_text(note), origin)).lastrowid
 
 
 def checked_entity(db: DB, body: dict) -> dict:
@@ -138,7 +140,7 @@ def autoclose_stale_trials(db: DB, grace_days: int = 7, batch: int = 500) -> int
             db.conn.execute("UPDATE entities SET status='done', closed_ts=?, updated_ts=? WHERE id=?",
                             (r["due_ts"], now, r["id"]))
             human_event(db, r["id"], "auto_close", "status", r["status"], "done",
-                        "триал давно истёк")
+                        "триал давно истёк", origin="system")
             put_meta(db, f"ws:review:{r['id']}",
                      {"state": "pending", "revision": revision(db, r["id"])})
             closed.append(r["id"])

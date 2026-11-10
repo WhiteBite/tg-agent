@@ -28,7 +28,8 @@ ENT_COLS = {"id", "pack", "chat_id", "topic_id", "kind", "title", "body", "statu
             "owner", "due_ts", "project", "confidence", "attrs_json", "dedup_key",
             "created_ts", "updated_ts", "closed_ts"}
 
-EVENT_COLS = {"ts", "op", "field", "from_val", "to_val", "chat_id", "msg_id", "quote"}
+EVENT_COLS = {"ts", "op", "field", "from_val", "to_val", "chat_id", "msg_id", "quote",
+              "origin", "external_evidence_id"}
 
 
 def check(cond: bool, label: str, extra: str = "") -> None:

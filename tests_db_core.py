@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -751,6 +752,98 @@ def test_fts_probe_independent(tmp: Path) -> None:
           "миграция v14 сбой: fts=True, fts_entities=False", str(fail_flags))
 
 
+def test_v17_migration(tmp: Path) -> None:
+    print("=== миграция v17: origin/external_evidence_id, external_evidence ===")
+    p = tmp / "prov.sqlite"
+    with DB(p) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(entity_events)")}
+        tables = {r[0] for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+    check({"origin", "external_evidence_id"} <= cols,
+          "fresh: entity_events.origin/external_evidence_id", str(sorted(cols)))
+    check("external_evidence" in tables, "fresh: таблица external_evidence", str(sorted(tables)))
+    check(uv == SCHEMA_VERSION, "fresh: user_version = SCHEMA_VERSION", str(uv))
+
+    with DB(p) as db:
+        db.conn.execute("INSERT INTO entity_events(entity_id, ts, op) VALUES(1, 100, 'new')")
+        db.conn.commit()
+        default_origin = db.conn.execute(
+            "SELECT origin FROM entity_events WHERE ts=100").fetchone()["origin"]
+    check(default_origin == "telegram", "fresh: origin по умолчанию telegram", default_origin)
+
+    rejected = False
+    with DB(p) as db:
+        try:
+            db.conn.execute("INSERT INTO entity_events(entity_id, ts, op, origin) "
+                            "VALUES(1, 101, 'new', 'bogus')")
+            db.conn.commit()
+        except sqlite3.IntegrityError:
+            rejected = True
+    check(rejected, "fresh: CHECK(origin) отклоняет чужое значение")
+
+    p2 = tmp / "prov_old.sqlite"
+    with DB(p2) as db:
+        db.conn.execute("INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, "
+                        "created_ts) VALUES(7, 'services', -1050, 1, 'service', 'X', 1)")
+        db.conn.execute("INSERT INTO entity_events(entity_id, ts, op, quote) "
+                        "VALUES(7, 100, 'new', 'старое')")
+        db.conn.commit()
+    raw = sqlite3.connect(str(p2))
+    raw.execute("ALTER TABLE entity_events DROP COLUMN origin")
+    raw.execute("ALTER TABLE entity_events DROP COLUMN external_evidence_id")
+    raw.execute("DROP TABLE IF EXISTS external_evidence")
+    raw.execute("PRAGMA user_version = 16")
+    raw.commit()
+    raw.close()
+    with DB(p2) as db:
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(entity_events)")}
+        tables = {r[0] for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        uv = db.conn.execute("PRAGMA user_version").fetchone()[0]
+        kept = db.conn.execute(
+            "SELECT COUNT(*) FROM entity_events WHERE entity_id=7").fetchone()[0]
+        origin = db.conn.execute(
+            "SELECT origin FROM entity_events WHERE entity_id=7").fetchone()["origin"]
+    check({"origin", "external_evidence_id"} <= cols,
+          "v16->v17: колонки добавлены", str(sorted(cols)))
+    check("external_evidence" in tables, "v16->v17: external_evidence создана")
+    check(uv == SCHEMA_VERSION, "v16->v17: user_version поднят", str(uv))
+    check(kept == 1 and origin == "telegram",
+          "v16->v17: данные целы, историческое событие = telegram", f"{kept}/{origin}")
+
+
+def test_origin_defaults(tmp: Path) -> None:
+    print("=== origin: telegram/human/system по источникам записи ===")
+    import workspace_write
+    p = tmp / "origin.sqlite"
+    now = int(time.time())
+    with DB(p) as db:
+        for eid, title in ((1, "A"), (2, "B")):
+            db.conn.execute(
+                "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, created_ts) "
+                "VALUES(?, 'services', -1060, 1, 'service', ?, ?)", (eid, title, now))
+        db.conn.execute(
+            "INSERT INTO entities(id, pack, chat_id, topic_id, kind, title, status, "
+            "due_ts, created_ts) VALUES(3, 'services', -1060, 1, 'trial', 'T', 'open', ?, ?)",
+            (now - 30 * 86400, now))
+        db.conn.commit()
+        db.conn.execute("INSERT INTO entity_events(entity_id, ts, op) VALUES(1, ?, 'new')",
+                        (now,))
+        workspace_write.human_event(db, 1, "human_edit", "owner", None, "Иван")
+        db.conn.commit()
+        db.merge_entities(1, [2], "test", now)
+        db.conn.commit()
+        workspace_write.autoclose_stale_trials(db, grace_days=7)
+        db.conn.commit()
+        origins = {r["op"]: r["origin"] for r in db.conn.execute(
+            "SELECT op, origin FROM entity_events ORDER BY id")}
+    check(origins.get("new") == "telegram", "origin: событие извлечения = telegram", str(origins))
+    check(origins.get("human_edit") == "human", "origin: правка человека = human", str(origins))
+    check(origins.get("merge") == "system", "origin: merge = system", str(origins))
+    check(origins.get("auto_close") == "system", "origin: auto_close = system", str(origins))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="tg_db_core_"))
     try:
@@ -769,6 +862,8 @@ def main() -> int:
         test_memory_migrations(tmp)
         test_merge_reparent(tmp)
         test_fts_probe_independent(tmp)
+        test_v17_migration(tmp)
+        test_origin_defaults(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

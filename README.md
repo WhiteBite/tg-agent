@@ -847,6 +847,29 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 показать без сети. 429/529 ретраятся с `Retry-After`, 4xx не ретраится; курсор
 двигается только после 2xx; без кредов — структурированная ошибка.
 
+### Обратная синхронизация (pull)
+
+```bash
+python3 export.py --system X --pull            # превью: что применилось бы
+TG_ALLOW_PULL=1 python3 export.py --system X --pull --apply   # применить
+```
+
+Тянет изменения **только по уже связанным объектам** (`integrations.external_id`)
+и не выдумывает удалённых идентичностей. Реестр `PULLERS` параллелен `PROVIDERS`
+и читается из того же `TG_EXTRA_PROVIDERS`. По каждому полю считается 3-way merge
+`base/local/remote`: база — последнее синхронизированное значение из
+`integrations.state_json`; удалённое == базе → остаётся локальное; локальное ==
+базе → применяется удалённое; стороны сошлись → подтверждение без события; обе
+изменились по-разному → конфликт, не перезаписывается ни одна сторона. Снимок
+удалённого объекта ложится в `external_evidence` (system, external_id, revision,
+snapshot, content_hash), а изменение — событием `entity_events` с
+`origin='external'`, пустыми `chat_id/msg_id` и `quote` — точной подстрокой
+снимка (доказательство, а не телеграм-цитата). Реплей той же ревизии событий не
+плодит. Эхо-гашение: изменение, пришедшее pull'ом из системы X, не уходит назад в
+X, но уезжает в другую систему. По умолчанию pull — только превью; применение —
+за `TG_ALLOW_PULL=1` и `--apply` (в API — `confirm=True`). Pull-курсор хранится
+отдельно от push (`pull_cursor:<system>` в `meta`), `synced_ts` не переиспользуется.
+
 ## Безопасность
 
 - **Отправить сообщение агент не может — пока не включён гейт.** По умолчанию
@@ -921,7 +944,7 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 | `announce.py` | Релиз-посты: баннер PIL, шаблон YAML, readme тем из org.yaml, черновик из CHANGELOG; гейт `TG_ALLOW_MANAGE=1` |
 | `org.yaml` | Реестр продуктов WhiteBite: репо, ссылки, эмодзи, разметка тем |
 | `pipeline.py` | Автономный конвейер: sync → bot → media → extract → shiftwatch → alerts → fuzzy → memory → export → digest → monitor одним прогоном; бюджет шага, proclock-лок, ops-сводка в отчёте |
-| `db.py` | Индекс: схема с миграциями по `PRAGMA user_version` (v11 `entity_events.actor`, v12 `entity_links`, v13 `messages.via`, v14 `entities_fts`, v15 `entity_vec`, v16 `memory_candidates`; `SCHEMA_VERSION = 16`), FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
+| `db.py` | Индекс: схема с миграциями по `PRAGMA user_version` (v11 `entity_events.actor`, v12 `entity_links`, v13 `messages.via`, v14 `entities_fts`, v15 `entity_vec`, v16 `memory_candidates`, v17 `entity_events.origin`/`external_evidence_id` + таблица `external_evidence`; `SCHEMA_VERSION = 17`), FTS5, watch-лист, refs, пины, дайджесты, правки/удаления сообщений (`update_message` / `mark_deleted`, удалённые скрыты от читалок и FTS), read-only соединение (`DB(path, readonly=True)`), каскад проекта в `watch_set_project`, `run_sql` с блокировками |
 | `server.py` | MCP-сервер (stdio): 19 read-only инструментов; `tg_mark_read` отклоняет id выше максимума индекса темы |
 | `live.py` | Новые сообщения в реальном времени (`events.NewMessage`), правки и удаления (`MessageEdited` / `MessageDeleted`) |
 | `alerts.py` | Живые алерты live-демона: слова-триггеры и упоминания → Saved Messages (гейт `TG_ALERTS` + `TG_ALLOW_SEND`, cooldown на пару чат+правило); правила читаются из UI (`meta['ws:alerts']`) на лету; CLI `--status`/`--text` |
@@ -953,7 +976,7 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 | `redact.py` / `sanitize.py` | Маскировка секретов / чистка bidi-инъекций (sanitize — из chigwell, Apache-2.0) |
 | `doctor.py` | Диагностика окружения; `--providers` (opt-in health-check провайдера), `--quality` (заполненность полей и гистограмма отказов), `--cost` (расход токенов по `extraction_runs`) |
 | `seed_demo.py` | Демо-база без Telegram: `python3 seed_demo.py demo.sqlite` |
-| `test_offline.py` | 1672 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс девятнадцать suites ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
+| `test_offline.py` | 1751 офлайн-проверок (без аккаунта Telegram) — свои проверки плюс двадцать одна suite ниже подпроцессами, гоняются в CI; своя temp-база через `tempfile.mkdtemp` |
 | `tests_index_media.py` | правки/удаления сообщений в индекс, гейт медиа-очереди (запускается из `test_offline.py`) |
 | `tests_packs_semantics.py` | пак: срок из due_text, no-downgrade, изоляция по проекту, supersedes, схемы пакетов (запускается из `test_offline.py`) |
 | `tests_export_101.py` | HTTP-экспорт 101 против локального фейк-сервера (запускается из `test_offline.py`) |
@@ -973,6 +996,7 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 | `tests_bot_ingest.py` | Bot-API ингест: `getUpdates` на фейк-транспорте, `via='bot'`, курсор, service-сообщения и дубли (запускается из `test_offline.py`) |
 | `tests_export_notion.py` | notion-провайдер против фейк-сервера: create/PATCH, идемпотентность по `external_id`, ретраи 429/529, без кредов (запускается из `test_offline.py`) |
 | `tests_memory.py` | память: селектор открытых сущностей, similarity, линкер кандидатов (pending/auto/rejected, идемпотентность, dry-run), recall, rebuild/gc (запускается из `test_offline.py`) |
+| `tests_pull.py` | обратная синхронизация export.py на фейковом транспорте: превью vs применение, 3-way merge (remote-only/local-only/converged/conflict), идемпотентность реплея, `external_evidence`, событие `origin='external'`, эхо-гашение, гейт `TG_ALLOW_PULL` (запускается из `test_offline.py`) |
 | `opencode.v1.json` / `opencode.v2.json` | Готовые конфиги подключения к opencode |
 | `tg-agent.md` | Памятка-промпт для агента |
 
@@ -1021,14 +1045,15 @@ urllib): `NOTION_TOKEN` + `NOTION_DATABASE_ID`, страницы создают�
 
 ## Проверено / не проверено
 
-`python3 test_offline.py` — **1672 проверок: свои проверки плюс девятнадцать suites
-подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
+`python3 test_offline.py` — **1751 проверок: свои проверки плюс двадцать одна
+suite подпроцессами (`tests_index_media.py`, `tests_packs_semantics.py`,
 `tests_export_101.py`, `tests_ops_report.py`, `tests_media_ingest.py`,
 `tests_db_core.py`, `tests_readers.py`, `tests_pack_schema.py`,
 `tests_watchdog.py`, `tests_ui_projects.py`, `tests_manage.py`,
 `tests_announce.py`, `tests_workspace_api.py`, `tests_question_signals.py`,
 `tests_downloads.py`, `tests_shiftwatch.py`, `tests_bot_ingest.py`,
-`tests_export_notion.py`, `tests_memory.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
+`tests_export_notion.py`, `tests_memory.py`, `tests_pull.py`,
+`tests_profile.py`) — все зелёные** (работают и на Linux, и на Windows). Реально исполняются:
 
 - `sync.run()` на подставном клиенте: определение групп/каналов, `--pattern`,
   `--chat @канал`, `--folder`, `--watched`, `--dry-run`, раскладка по темам

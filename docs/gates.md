@@ -34,6 +34,7 @@
 
 | Переменная | Что включает | Читает |
 |---|---|---|
+| `TG_ALLOW_PULL=1` | применение обратной синхронизации `export.py --pull --apply` (импорт изменений из внешней системы в индекс) | `export.py` |
 | `TG_ALERTS=1` | живые алерты `live.py` (слова-триггеры и упоминания → Saved Messages) | `alerts.py`, `live.py` |
 | `TG_ENTITY_ALERTS=1` | сущностные алерты после шага extract (виды из `TG_ENTITY_ALERT_KINDS`, дефолт trial,question) | `entity_alerts.py`, `pipeline.py` |
 | `TG_MODULES_OFF="downloads,…"` | убирает модуль из реестра: ни маршрутов, ни MCP-инструментов, ни схемы, ни исполнителя; файл модуля не импортируется | `modules/__init__.py` |

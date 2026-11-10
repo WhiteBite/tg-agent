@@ -32,6 +32,12 @@
     kind: "Тип",
     review_state: "Проверка",
   };
+  const origins = {
+    telegram: "из переписки",
+    external: "из внешней системы",
+    human: "человек",
+    system: "система",
+  };
   const values = {
     ...statuses,
     ...kinds,
@@ -313,7 +319,7 @@
       <div class="notice">${esc(e.body || "Дополнительного описания нет.")}</div>
       <section class="stack"><h3>Проверка человеком</h3><p class="muted">Исправления и проверка сохраняются отдельно от отметок прочтения.</p><div class="field"><label for="review-note">Комментарий к проверке</label><textarea id="review-note" placeholder="Почему нужно исправить или отклонить"></textarea></div><div class="cluster"><button class="button primary" id="approve-entity">${icon("check")}Подтвердить</button><button class="button" id="edit-entity">Исправить</button><button class="button danger" id="reject-entity">Отклонить</button></div><p class="muted" style="font-size:var(--text-xs)">Отклонение — локальная отметка. Экспортёр пока не использует её как запрет отправки.</p><div id="review-result" role="status"></div></section>
       <section class="stack"><h3>Сообщения-доказательства</h3>${d.evidence.length ? d.evidence.map((ev) => `<article class="evidence"><div class="row-meta"><strong>${esc(ev.sender_name || "Автор неизвестен")}</strong><time>${time(ev.ts)}</time></div><blockquote>${esc(ev.quote || ev.text || "Цитата отсутствует")}</blockquote>${ev.missing ? '<p class="error-text">Сообщения нет в индексе</p>' : ev.deleted ? '<p class="error-text">Сообщение удалено. Цитата сохранена в истории.</p>' : `<a class="button" href="#messages?${W.query({ chat_id: ev.chat_id, topic_id: ev.topic_id || e.topic_id, msg_id: ev.msg_id })}">${icon("source")}Открыть в переписке</a>`}</article>`).join("") : W.empty("Нет доказательств", "Для этой записи пока нет сохранённых цитат.")}</section>
-      <section class="stack"><h3>История изменений</h3><div class="timeline">${d.events.length ? d.events.map((ev) => `<article class="timeline-item"><strong>${esc(ops[ev.op] || ev.op)}</strong>${ev.field ? `<p>${esc(W.fieldLabel(ev.field))}: ${esc(showValue(ev.field, ev.from_val))} → ${esc(showValue(ev.field, ev.to_val))}</p>` : ""}<small>${time(ev.ts)}</small>${ev.quote ? `<p>«${esc(ev.quote)}»</p>` : ""}</article>`).join("") : '<p class="muted">История пуста.</p>'}</div></section>
+      <section class="stack"><h3>История изменений</h3><div class="timeline">${d.events.length ? d.events.map((ev) => `<article class="timeline-item"><strong>${esc(ops[ev.op] || ev.op)}</strong>${ev.field ? `<p>${esc(W.fieldLabel(ev.field))}: ${esc(showValue(ev.field, ev.from_val))} → ${esc(showValue(ev.field, ev.to_val))}</p>` : ""}<small>${time(ev.ts)}${ev.origin ? ` · ${esc(origins[ev.origin] || ev.origin)}` : ""}</small>${ev.quote ? `<p>«${esc(ev.quote)}»</p>` : ""}</article>`).join("") : '<p class="muted">История пуста.</p>'}</div></section>
       <section class="notice"><strong>101: ${d.integration?.external_id ? "есть локальная запись" : "не выгружалось"}</strong><p>Совместимость с API не подтверждена. Наличие GUID не доказывает актуальность данных в 101.</p></section></div>`;
       $("#drawer-title").focus();
       $("#drawer-prev")?.addEventListener("click", () => stepEntity(e.id, -1));

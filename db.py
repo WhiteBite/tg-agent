@@ -180,7 +180,10 @@ CREATE TABLE IF NOT EXISTS entity_events (
     to_val      TEXT,
     chat_id     INTEGER,
     msg_id      INTEGER,
-    quote       TEXT
+    quote       TEXT,
+    origin      TEXT NOT NULL DEFAULT 'telegram'
+                CHECK(origin IN ('telegram','external','human','system')),
+    external_evidence_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS extraction_runs (
@@ -259,6 +262,18 @@ CREATE TABLE IF NOT EXISTS integrations (
     state_json  TEXT,
     synced_ts   INTEGER,
     PRIMARY KEY (entity_id, system)
+);
+
+-- снимки внешних объектов (pull): доказательство для событий origin='external'
+CREATE TABLE IF NOT EXISTS external_evidence (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    system       TEXT NOT NULL,
+    external_id  TEXT NOT NULL,
+    revision     TEXT NOT NULL,
+    snapshot     TEXT,
+    content_hash TEXT,
+    receipt_ts   INTEGER,
+    UNIQUE(system, external_id, revision)
 );
 
 -- сущность может происходить из нескольких (chat, topic): дедуп глобальный по (pack, dedup_key)
@@ -361,7 +376,7 @@ CREATE TRIGGER IF NOT EXISTS trg_ent_au AFTER UPDATE OF title, body ON entities 
 END;
 """
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 class DB:
@@ -396,6 +411,8 @@ class DB:
         except sqlite3.OperationalError:
             self.fts = False  # поиск уедет на LIKE
         self.fts_entities = self._probe_table("entities_fts")
+        # колонки провенанса нужны легаси-миграциям (merge в _migrate_global_dedup)
+        self._ensure_event_provenance()
         # свежая база тоже приходит с user_version=0 — миграции идемпотентны
         if version < 1:
             self._migrate_message_edits()
@@ -436,6 +453,8 @@ class DB:
             self._migrate_v15()
         if version < 16:
             self._migrate_v16()
+        if version < 17:
+            self._migrate_v17()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -728,6 +747,26 @@ class DB:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_memcand_status "
             "ON memory_candidates(status)")
+
+    def _ensure_event_provenance(self) -> None:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(entity_events)")}
+        if "origin" not in cols:
+            self.conn.execute(
+                "ALTER TABLE entity_events ADD COLUMN origin TEXT NOT NULL "
+                "DEFAULT 'telegram' "
+                "CHECK(origin IN ('telegram','external','human','system'))")
+        if "external_evidence_id" not in cols:
+            self.conn.execute(
+                "ALTER TABLE entity_events ADD COLUMN external_evidence_id INTEGER")
+
+    def _migrate_v17(self) -> None:
+        self._ensure_event_provenance()
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS external_evidence("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "system TEXT NOT NULL, external_id TEXT NOT NULL, revision TEXT NOT NULL, "
+            "snapshot TEXT, content_hash TEXT, receipt_ts INTEGER, "
+            "UNIQUE(system, external_id, revision))")
 
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
@@ -1792,9 +1831,9 @@ class DB:
                 (keeper_id, d["id"]))
             self.conn.execute(
                 "INSERT INTO entity_events(entity_id, run_id, ts, op, field, from_val, "
-                "to_val, chat_id, msg_id, quote) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "to_val, chat_id, msg_id, quote, origin) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (keeper_id, None, now, "merge", "dedup", str(d["id"]), str(keeper_id),
-                 None, None, None))
+                 None, None, None, "system"))
             for s in self.conn.execute(
                     "SELECT chat_id, topic_id, first_seen_ts, last_seen_ts "
                     "FROM entity_sources WHERE entity_id=?", (d["id"],)).fetchall():
@@ -1911,7 +1950,8 @@ class DB:
         for r in self.conn.execute(sql, [since_ts, *args, limit]):
             d = dict(r)
             d["events"] = [dict(ev) for ev in self.conn.execute(
-                "SELECT ts, op, field, from_val, to_val, chat_id, msg_id, quote "
+                "SELECT ts, op, field, from_val, to_val, chat_id, msg_id, quote, "
+                "origin, external_evidence_id "
                 "FROM entity_events WHERE entity_id = ? AND ts > ? ORDER BY ts, id",
                 (d["id"], since_ts))]
             items.append(d)

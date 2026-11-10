@@ -33,10 +33,16 @@ NOTION_DRY=1 — показать без сети; 429/529 ретраятся с
 GET, 4xx не ретраится; без кредов — словарь-ошибка, исключений не бросает.
 TG_EXTRA_PROVIDERS=<путь к .py-модулю со словарём PROVIDERS> — сторонний реестр
 мержится поверх встроенных; битый модуль бросает ImportError/FileNotFoundError.
+Обратная синхронизация: python3 export.py --system X --pull [--apply]. Тянет
+изменения только по уже связанным объектам (integrations.external_id), мержит
+base/local/remote из state_json, пишет снимок в external_evidence и событие
+origin='external' с цитатой из снимка; по умолчанию превью, применение — за
+TG_ALLOW_PULL=1 и --apply; реестр PULLERS читается из того же TG_EXTRA_PROVIDERS.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -64,9 +70,15 @@ class _EntityFailed(Exception):
     """Сбой одной сущности: остальные выгружаются, курсор этой не двигается."""
 
 
-def _pending_events(db: DB, ent: dict, synced: dict[int, int], now: int) -> list[dict]:
+def _pending_events(db: DB, ent: dict, synced: dict[int, int], now: int,
+                    system: str | None = None) -> list[dict]:
     sql = "SELECT * FROM entity_events WHERE entity_id=? AND ts<?"
     args: list = [ent["id"], now]
+    if system is not None:
+        # эхо-гашение: изменение, пришедшее pull'ом из этой же системы, назад не шлём
+        sql += (" AND NOT (origin='external' AND external_evidence_id IN "
+                "(SELECT id FROM external_evidence WHERE system=?))")
+        args.append(system)
     if ent["id"] in synced:
         # id>synced даёт новые события; ts>=synced не даёт всплывать старее курсора
         sql += " AND id>? AND ts>=?"
@@ -106,7 +118,7 @@ def _export_entities(
     errors: list[str] = []
     ents = [dict(r) for r in db.conn.execute("SELECT * FROM entities ORDER BY id")]
     for ent in ents:
-        events = _pending_events(db, ent, synced, now)
+        events = _pending_events(db, ent, synced, now, system)
         if not events:
             continue
         try:
@@ -240,7 +252,7 @@ def _provider_101(db: DB, out: str | None) -> dict:
     if dry:
         now = int(time.time())
         would = sum(1 for ent in (dict(r) for r in db.conn.execute("SELECT * FROM entities"))
-                    if ent["kind"] in kinds and _pending_events(db, ent, synced, now))
+                    if ent["kind"] in kinds and _pending_events(db, ent, synced, now, "101"))
         return {"ok": True, "dry": True, "would_export": would, "url": api._url(path)}
 
     def _retry(method: str, p: str, payload: dict | None) -> dict:
@@ -355,7 +367,7 @@ def _provider_notion(db: DB, out: str | None) -> dict:
     if dry:
         now = int(time.time())
         would = sum(1 for ent in (dict(r) for r in db.conn.execute("SELECT * FROM entities"))
-                    if ent["kind"] in kinds and _pending_events(db, ent, synced, now))
+                    if ent["kind"] in kinds and _pending_events(db, ent, synced, now, "notion"))
         return {"ok": True, "dry": True, "would_export": would, "database_id": database_id}
 
     def _retry(method: str, path: str, payload: dict | None) -> dict:
@@ -400,21 +412,205 @@ def _provider_notion(db: DB, out: str | None) -> dict:
 
 
 PROVIDERS = {"file": _provider_file, "101": _provider_101, "notion": _provider_notion}
+PULLERS: dict[str, Callable[[DB, dict], dict]] = {}
 
 
-def _extra_providers() -> dict[str, Callable[[DB, str | None], dict]]:
+def _load_extra_module():
     path = os.environ.get("TG_EXTRA_PROVIDERS")
     if not path:
-        return {}
+        return None
     spec = importlib.util.spec_from_file_location("tg_extra_providers", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"TG_EXTRA_PROVIDERS: не py-модуль: {path}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return dict(mod.PROVIDERS)
+    return mod
 
 
-def run(db_path: str = DB_PATH, system: str = "file", out: str | None = None) -> dict:
+def _extra_providers() -> dict[str, Callable[[DB, str | None], dict]]:
+    mod = _load_extra_module()
+    return dict(getattr(mod, "PROVIDERS", {}) or {}) if mod is not None else {}
+
+
+def _extra_pullers() -> dict[str, Callable[[DB, dict], dict]]:
+    mod = _load_extra_module()
+    return dict(getattr(mod, "PULLERS", {}) or {}) if mod is not None else {}
+
+
+def _norm_val(value):
+    return None if value in (None, "") else str(value)
+
+
+def _merge_fields(ent, base: dict, fields: dict) -> tuple[dict, list[dict]]:
+    """3-way merge base/local/remote -> (принятые поля, конфликты)."""
+    accepted: dict = {}
+    conflicts: list[dict] = []
+    for field, remote_val in fields.items():
+        if field not in ent.keys():
+            continue
+        local_val = ent[field]
+        base_val = base.get(field)
+        rv, lv, bv = _norm_val(remote_val), _norm_val(local_val), _norm_val(base_val)
+        if rv == bv:
+            continue
+        if lv == bv:
+            accepted[field] = remote_val
+        elif lv == rv:
+            continue
+        else:
+            conflicts.append({"field": field, "local": local_val, "remote": remote_val})
+    return accepted, conflicts
+
+
+def _evidence_quote(snapshot: str, hint: str | None) -> str:
+    if hint and hint in snapshot:
+        return hint
+    return snapshot[:500]
+
+
+def _store_external_evidence(db: DB, system: str, external_id: str, revision: str,
+                             snapshot: str) -> int:
+    content_hash = hashlib.sha1(snapshot.encode("utf-8")).hexdigest()
+    db.conn.execute(
+        "INSERT INTO external_evidence(system, external_id, revision, snapshot, "
+        "content_hash, receipt_ts) VALUES(?,?,?,?,?,?) "
+        "ON CONFLICT(system, external_id, revision) DO UPDATE SET "
+        "snapshot=excluded.snapshot, content_hash=excluded.content_hash, "
+        "receipt_ts=excluded.receipt_ts",
+        (system, external_id, revision, snapshot, content_hash, int(time.time())))
+    return db.conn.execute(
+        "SELECT id FROM external_evidence WHERE system=? AND external_id=? AND revision=?",
+        (system, external_id, revision)).fetchone()["id"]
+
+
+def _apply_pull(db: DB, system: str, entity_id: int, external_id: str,
+                remote: dict) -> bool:
+    """Применяет удалённое состояние внутри BEGIN IMMEDIATE: доказательство,
+    событие origin='external', state_json. Удалённые данные уже получены вне
+    транзакции. Повтор той же ревизии событий не плодит."""
+    revision = str(remote.get("revision") or "")
+    snapshot = remote.get("snapshot") or ""
+    fields = remote.get("fields") or {}
+    now = int(time.time())
+    db.conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = db.conn.execute(
+            "SELECT state_json FROM integrations WHERE entity_id=? AND system=?",
+            (entity_id, system)).fetchone()
+        if row is None:
+            db.conn.rollback()
+            return False
+        state = json.loads(row["state_json"] or "{}")
+        if state.get("revision") == revision:
+            db.conn.rollback()
+            return False
+        ent = db.conn.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
+        if ent is None:
+            db.conn.rollback()
+            return False
+        base = state.get("base") or {}
+        accepted, conflicts = _merge_fields(ent, base, fields)
+        ev_id = _store_external_evidence(db, system, external_id, revision, snapshot)
+        if accepted:
+            quote = _evidence_quote(snapshot, remote.get("quote"))
+            assigns = ", ".join(f"{f}=?" for f in accepted)
+            db.conn.execute(f"UPDATE entities SET {assigns}, updated_ts=? WHERE id=?",
+                            [*accepted.values(), now, entity_id])
+            for field, remote_val in accepted.items():
+                db.conn.execute(
+                    "INSERT INTO entity_events(entity_id, run_id, ts, op, field, "
+                    "from_val, to_val, chat_id, msg_id, quote, origin, "
+                    "external_evidence_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (entity_id, None, now, "update", field,
+                     None if ent[field] is None else str(ent[field]),
+                     None if remote_val is None else str(remote_val),
+                     None, None, quote, "external", ev_id))
+            if "title" in accepted or "body" in accepted:
+                db.conn.execute("DELETE FROM entity_vec WHERE entity_id=?", (entity_id,))
+        new_base = dict(base)
+        new_base.update(fields)
+        db.conn.execute(
+            "UPDATE integrations SET state_json=? WHERE entity_id=? AND system=?",
+            (json.dumps({"base": new_base, "revision": revision, "conflicts": conflicts,
+                         "ack": {"revision": revision, "ts": now}}, ensure_ascii=False),
+             entity_id, system))
+        db.conn.commit()
+        return bool(accepted)
+    except Exception:
+        db.conn.rollback()
+        raise
+
+
+def _pull_entities(db: DB, system: str, fetch, apply: bool) -> dict:
+    """Общий движок pull: только связанные объекты (integrations.external_id),
+    удалённые данные тянутся вне транзакции, применение — в _apply_pull."""
+    rows = [dict(r) for r in db.conn.execute(
+        "SELECT entity_id, external_id, state_json FROM integrations "
+        "WHERE system=? AND external_id IS NOT NULL ORDER BY entity_id", (system,))]
+    imported = would = 0
+    failed: list[int] = []
+    errors: list[str] = []
+    cursor = None
+    for r in rows:
+        try:
+            remote = fetch(r["entity_id"], r["external_id"])
+        except _EntityFailed as exc:
+            failed.append(r["entity_id"])
+            errors.append(f"сущность {r['entity_id']}: {exc}")
+            continue
+        if remote is None:
+            continue
+        revision = str(remote.get("revision") or "")
+        if revision:
+            cursor = revision
+        state = json.loads(r["state_json"] or "{}")
+        if state.get("revision") == revision:
+            continue
+        if apply:
+            try:
+                if _apply_pull(db, system, r["entity_id"], r["external_id"], remote):
+                    imported += 1
+            except _EntityFailed as exc:
+                failed.append(r["entity_id"])
+                errors.append(f"сущность {r['entity_id']}: {exc}")
+        else:
+            ent = db.conn.execute(
+                "SELECT * FROM entities WHERE id=?", (r["entity_id"],)).fetchone()
+            if ent is None:
+                continue
+            accepted, _ = _merge_fields(ent, state.get("base") or {},
+                                        remote.get("fields") or {})
+            if accepted:
+                would += 1
+    return {"imported": imported, "would": would, "failed": failed,
+            "error": "; ".join(errors), "cursor": cursor}
+
+
+def _pull_allowed() -> bool:
+    return os.environ.get("TG_ALLOW_PULL", "").lower() in ("1", "true", "yes")
+
+
+def _run_pull(db_path: str, system: str, apply: bool = False,
+              confirm: bool = False) -> dict:
+    puller = {**PULLERS, **_extra_pullers()}.get(system)
+    if puller is None:
+        return {"ok": False, "error": f"нет puller для системы: {system}"}
+    if apply and not (confirm and _pull_allowed()):
+        return {"ok": False, "preview": True, "imported": 0, "failed": [],
+                "error": "применение pull требует TG_ALLOW_PULL=1 и confirm=True"}
+    with DB(db_path) as db:
+        res = puller(db, {"system": system, "apply": bool(apply)})
+        if res.get("ok") and apply and res.get("cursor") is not None:
+            # pull-курсор отдельно от push (synced_ts хранит id события)
+            db.set_meta(f"pull_cursor:{system}", str(res["cursor"]))
+            db.conn.commit()
+    return res
+
+
+def run(db_path: str = DB_PATH, system: str = "file", out: str | None = None,
+        direction: str = "push", apply: bool = False, confirm: bool = False) -> dict:
+    if direction == "pull":
+        return _run_pull(db_path, system, apply=apply, confirm=confirm)
     prov = {**PROVIDERS, **_extra_providers()}.get(system)
     if prov is None:
         return {"ok": False, "error": f"неизвестная система: {system}"}
@@ -432,11 +628,20 @@ def _arg_value(args: list[str], name: str) -> str | None:
 
 def main() -> None:
     args = sys.argv[1:]
+    direction = "pull" if "--pull" in args else "push"
+    applying = "--apply" in args
     res = run(_arg_value(args, "--db") or DB_PATH,
               system=_arg_value(args, "--system") or "file",
-              out=_arg_value(args, "--out"))
+              out=_arg_value(args, "--out"),
+              direction=direction, apply=applying, confirm=applying)
     if res.get("ok"):
-        print(f"экспортировано: {res['exported']} -> {res.get('path') or res.get('url')}")
+        if direction == "pull":
+            if res.get("preview"):
+                print(f"pull (превью): изменилось бы {res.get('would', 0)}")
+            else:
+                print(f"pull: применено {res.get('imported', 0)}")
+        else:
+            print(f"экспортировано: {res['exported']} -> {res.get('path') or res.get('url')}")
     else:
         print(f"ошибка: {res['error']}")
         sys.exit(1)

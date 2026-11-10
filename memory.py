@@ -404,7 +404,8 @@ def _actor_for(db, chat_id, msg_id):
     return person["display_name"] if person else row["sender_name"]
 
 
-def _apply_supersede(db, new_id: int, old_id: int, now: int, ev: dict) -> bool:
+def _apply_supersede(db, new_id: int, old_id: int, now: int, ev: dict,
+                     origin: str = "system") -> bool:
     cur = db.conn.execute(
         "UPDATE entities SET closed_ts=?, status='done', updated_ts=? "
         "WHERE id=? AND closed_ts IS NULL", (now, now, old_id))
@@ -412,10 +413,10 @@ def _apply_supersede(db, new_id: int, old_id: int, now: int, ev: dict) -> bool:
         return False
     db.conn.execute(
         "INSERT INTO entity_events(entity_id, run_id, ts, op, field, to_val, "
-        "chat_id, msg_id, quote, actor) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "chat_id, msg_id, quote, actor, origin) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (old_id, None, now, "supersede", "superseded_by", str(new_id),
-         ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"),
-         _actor_for(db, ev.get("chat_id"), ev.get("msg_id"))))
+          ev.get("chat_id"), ev.get("msg_id"), ev.get("quote"),
+          _actor_for(db, ev.get("chat_id"), ev.get("msg_id")), origin))
     return True
 
 
@@ -468,7 +469,8 @@ def link(db_path=DB_PATH, days: int = 7, dry_run: bool = False, auto=None) -> di
             cursor = int(db.get_meta(CURSOR_KEY) or 0)
             sql = ("SELECT ev.id AS event_id, ev.entity_id, ev.op, ev.chat_id, "
                    "ev.msg_id, ev.quote, ev.ts FROM entity_events ev "
-                   "WHERE ev.id > ? AND ev.op IN ('new','update')")
+                   "WHERE ev.id > ? AND ev.op IN ('new','update') "
+                   "AND ev.origin != 'external'")
             args: list = [cursor]
             if cursor == 0:
                 sql += " AND ev.ts >= ?"
@@ -760,7 +762,8 @@ def _accept(db, cand_id: int, now: int) -> dict:
     if row is None:
         return {"ok": False, "error": "candidate not found"}
     ev = {"chat_id": row["chat_id"], "msg_id": row["msg_id"], "quote": row["quote"]}
-    applied = _apply_supersede(db, row["new_entity_id"], row["candidate_entity_id"], now, ev)
+    applied = _apply_supersede(db, row["new_entity_id"], row["candidate_entity_id"], now,
+                               ev, origin="human")
     if not applied:
         return {"ok": True, "id": cand_id, "status": "pending", "applied": False}
     db.conn.execute(
