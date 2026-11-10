@@ -207,6 +207,33 @@ def test_sources() -> None:
             check(True, "sources: пустое имя отклонено")
 
 
+def test_sources_account() -> None:
+    print("=== sources: folder резолвится в разрезе аккаунта ===")
+    db_path = TMP / "sources_account.sqlite"
+    with DB(db_path) as db:
+        db.upsert_chat(chat_id=-100111, title="Канал A", username="chan_a",
+                       kind="channel", is_forum=False, members=None)
+        db.upsert_chat(chat_id=-100222, title="Канал B", username="chan_b",
+                       kind="channel", is_forum=False, members=None)
+        db.conn.execute(
+            "INSERT INTO folders(folder_id, title, synced_at) VALUES(7, 'F', 0)")
+        db.conn.execute(
+            "INSERT INTO folder_chats(folder_id, chat_id) VALUES(7, -100222)")
+        db.conn.execute(
+            "INSERT INTO folders(account_id, folder_id, title, synced_at) "
+            "VALUES('work', 7, 'F', 0)")
+        db.conn.execute(
+            "INSERT INTO folder_chats(account_id, folder_id, chat_id) "
+            "VALUES('work', 7, -100111)")
+        db.conn.commit()
+        check([c["chat_id"] for c in sources.resolve(db, "folder:7")] == [-100222],
+              "sources: folder:7 без account — дефолтный аккаунт (как раньше)")
+        check([c["chat_id"] for c in sources.resolve(db, "folder:7", account="work")]
+              == [-100111], "sources: folder:7 в аккаунте work — только его чаты")
+        check(sources.resolve(db, "folder:7", account="home") == [],
+              "sources: folder:7 в чужом аккаунте пуст")
+
+
 def test_jobs_core() -> None:
     print("=== jobs: состояния, claim, retry, отчёт ===")
     db_path = TMP / "jobs_core.sqlite"
@@ -1232,6 +1259,7 @@ def main() -> int:
     except Exception:
         pass
     test_sources()
+    test_sources_account()
     test_jobs_core()
     test_plan()
     test_run_dedup()

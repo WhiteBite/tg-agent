@@ -7,6 +7,9 @@
 Спека источников — строка через запятую:
     watch | all | folder:<id> | collection:<имя> | chat:<id | @username>
 Повторы схлопываются, итог сортирован по chat_id.
+
+`folder:<id>` резолвится в разрезе аккаунта (`resolve(..., account=...)`):
+id папки account-локальный, поэтому один номер в разных аккаунтах — разные папки.
 """
 
 from __future__ import annotations
@@ -66,7 +69,7 @@ def _chat_ref(ref: str) -> int | None:
         return None
 
 
-def resolve(db: DB, spec: str) -> list[dict]:
+def resolve(db: DB, spec: str, account: str = "default") -> list[dict]:
     """Спека источников -> [{chat_id, title}]. Неизвестный токен — ValueError."""
     out: dict[int, dict] = {}
     for tok in (spec or "").split(","):
@@ -87,8 +90,9 @@ def resolve(db: DB, spec: str) -> list[dict]:
                 raise ValueError(f"folder принимает числовой id: {tok!r}") from None
             rows = db.conn.execute(
                 "SELECT fc.chat_id, c.title FROM folder_chats fc "
-                "LEFT JOIN chats c ON c.id=fc.chat_id WHERE fc.folder_id=?",
-                (fid,)).fetchall()
+                "LEFT JOIN chats c ON c.id=fc.chat_id "
+                "WHERE fc.folder_id=? AND fc.account_id=?",
+                (fid, account)).fetchall()
         elif tok.startswith("collection:"):
             name = tok[len("collection:"):].strip()
             rows = db.conn.execute(
