@@ -23,6 +23,8 @@ os.environ["TG_ENV_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import telethon
+
 import accounts as accounts_mod
 import sync as sync_mod
 import workspace_store
@@ -105,6 +107,38 @@ class FakeClient:
 
     async def __call__(self, req):
         return []
+
+
+class WindowClient:
+    """backfill_window: чаты из known читаются, остальные недоступны аккаунту."""
+
+    def __init__(self, known: dict[int, list]):
+        self.known = known
+
+    async def __call__(self, req):
+        return []
+
+    async def iter_messages(self, cid, offset_date=None, reverse=False, limit=None, **kw):
+        if cid not in self.known:
+            raise RuntimeError("нет доступа к чату")
+        for m in self.known[cid]:
+            yield m
+
+
+class FakeTgClient:
+    """live.main: клиент без сети — обработчики регистрируются, но не зовутся."""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def start(self):
+        return None
+
+    async def run_until_disconnected(self):
+        return None
+
+    def on(self, *a, **kw):
+        return lambda f: f
 
 
 def _run_sync(db_path: Path, client: FakeClient, account: str | None = None) -> dict:
@@ -310,6 +344,124 @@ def test_boundary_documented(tmp: Path) -> None:
           "доступ к чату — отдельная таблица (задел под account-scoped группы)")
 
 
+def test_unknown_account_rejected(tmp: Path) -> None:
+    print("=== неизвестный аккаунт: ошибка, сессия не создаётся ===")
+    with env_guard(TG_ACCOUNTS="work,home", TELEGRAM_API_ID="1", TELEGRAM_API_HASH="h"):
+        raised = False
+        try:
+            accounts_mod.validate("nope")
+        except SystemExit:
+            raised = True
+        check(raised, "validate: неизвестный аккаунт -> SystemExit")
+        check(accounts_mod.validate("work") == "work",
+              "validate: известный аккаунт проходит", accounts_mod.validate("work"))
+
+        db_path = tmp / "unknown.sqlite"
+        client = FakeClient(Channel(555, "Proj", "proj"), [Msg(1, "hi", User(1, "A"))])
+        raised = False
+        try:
+            asyncio.run(sync_mod.run(db_path=str(db_path), client=client, account="nope"))
+        except SystemExit:
+            raised = True
+        check(raised, "sync.run: неизвестный аккаунт -> SystemExit")
+
+        cwd = os.getcwd()
+        os.chdir(tmp)
+        try:
+            raised = False
+            try:
+                sync_mod.make_client("nope")
+            except SystemExit:
+                raised = True
+            sessions = list(tmp.glob("*.session"))
+        finally:
+            os.chdir(cwd)
+        check(raised and sessions == [],
+              "make_client: неизвестный аккаунт -> SystemExit, сессия не создана",
+              str(sessions))
+
+
+def test_multi_requires_account(tmp: Path) -> None:
+    print("=== мультирежим без --account: ошибка, default не регистрируется ===")
+    with env_guard(TG_ACCOUNTS="work,home", TELEGRAM_API_ID="1", TELEGRAM_API_HASH="h"):
+        db_path = tmp / "multi_req.sqlite"
+        client = FakeClient(Channel(555, "Proj", "proj"), [Msg(1, "hi", User(1, "A"))])
+        raised = False
+        try:
+            asyncio.run(sync_mod.run(db_path=str(db_path), client=client))
+        except SystemExit:
+            raised = True
+        check(raised, "sync.run: мультирежим без --account -> SystemExit")
+        with DB(db_path) as db:
+            accounts = db.accounts_list()
+        check(accounts == [],
+              "мультирежим без --account: default не зарегистрирован", str(accounts))
+
+
+def test_backfill_observes_processed(tmp: Path) -> None:
+    print("=== backfill_window: наблюдение только за прочитанными чатами ===")
+    with env_guard(TG_ACCOUNTS="work,home", TELEGRAM_API_ID="1", TELEGRAM_API_HASH="h"):
+        db_path = tmp / "bf_obs.sqlite"
+        with DB(db_path) as db:
+            db.upsert_chat(-1001, "A", None, "supergroup", False, 1)
+            db.upsert_chat(-1002, "B", None, "supergroup", False, 1)
+        client = WindowClient({-1001: [Msg(1, "hi", User(1, "A"))]})
+        asyncio.run(sync_mod.run(db_path=str(db_path), client=client,
+                                 backfill_days=30, account="work"))
+        with DB(db_path) as db:
+            observed = {c["chat_id"] for c in db.chat_accounts()}
+        check(observed == {-1001},
+              "backfill: наблюдение только за прочитанным чатом", str(observed))
+
+
+def test_live_observes_touched_only(tmp: Path) -> None:
+    print("=== live: наблюдение только за тронутыми чатами ===")
+    import live as live_mod
+
+    with env_guard(TG_ACCOUNTS="work,home", TELEGRAM_API_ID="1", TELEGRAM_API_HASH="h",
+                   TG_ACCOUNT_WORK_API_ID="22", TG_ACCOUNT_WORK_API_HASH="wh"):
+        db_path = tmp / "live_obs.sqlite"
+        with DB(db_path) as db:
+            db.upsert_chat(-1001, "A", None, "supergroup", False, 1)
+        saved_db = live_mod.DB_PATH
+        saved_ids = live_mod.collect_ids
+        saved_client = telethon.TelegramClient
+        live_mod.DB_PATH = str(db_path)
+        live_mod.collect_ids = lambda *a, **kw: ({-1001}, set())
+        telethon.TelegramClient = FakeTgClient
+        try:
+            asyncio.run(live_mod.main("work"))
+        finally:
+            live_mod.DB_PATH = saved_db
+            live_mod.collect_ids = saved_ids
+            telethon.TelegramClient = saved_client
+        with DB(db_path) as db:
+            observed = db.chat_accounts()
+            accounts = {a["id"] for a in db.accounts_list()}
+        check(observed == [], "live: чаты без событий не помечены", str(observed))
+        check(accounts == {"work"}, "live: аккаунт зарегистрирован", str(accounts))
+
+
+def test_account_lock_paths(tmp: Path) -> None:
+    print("=== lock-файлы: аккаунт в пути, одиночный режим — прежний ===")
+    import proclock
+
+    db = str(tmp / "lock.sqlite")
+    p_work = proclock.lock_path(db, "live", "work")
+    p_home = proclock.lock_path(db, "live", "home")
+    p_single = proclock.lock_path(db, "live", None)
+    check(p_work == db + ".work.live.lock", "lock: путь аккаунта work", p_work)
+    check(p_work != p_home, "lock: разные аккаунты — разные пути", f"{p_work} / {p_home}")
+    check(p_single == db + ".live.lock", "lock: одиночный режим — прежний путь", p_single)
+    fh1 = proclock.acquire_instance_lock(p_work)
+    fh2 = proclock.acquire_instance_lock(p_home)
+    check(fh1 is not None and fh2 is not None, "lock: два аккаунта не конфликтуют")
+    if fh1:
+        fh1.close()
+    if fh2:
+        fh2.close()
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -323,6 +475,11 @@ def main() -> int:
         test_two_accounts_dedup(tmp)
         test_account_lens(tmp)
         test_boundary_documented(tmp)
+        test_unknown_account_rejected(tmp)
+        test_multi_requires_account(tmp)
+        test_backfill_observes_processed(tmp)
+        test_live_observes_touched_only(tmp)
+        test_account_lock_paths(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

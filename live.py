@@ -114,8 +114,19 @@ def handle_reactions(db: DB, chat_id: int, msg_id: int, items: list[dict]) -> bo
     return db.update_reactions(chat_id, msg_id, items)
 
 
+def observe_chat(db: DB, account_id: str | None, chat_id: int) -> None:
+    """Отмечает чат видимым аккаунту; в одиночном режиме — no-op."""
+    if account_id is None:
+        return
+    db.observe_chat_account(chat_id, account_id)
+    db.conn.commit()
+
+
 async def main(account: str | None = None) -> None:
-    lock = proclock.acquire_instance_lock(str(DB_PATH) + ".live.lock")
+    account_id = accounts_mod.validate(account)
+    lock_account = account_id if accounts_mod.is_multi() else None
+    lock = proclock.acquire_instance_lock(
+        proclock.lock_path(str(DB_PATH), "live", lock_account))
     if lock is None:
         raise SystemExit("live.py уже запущен (lockfile занят)")
     from telethon import TelegramClient, events
@@ -123,8 +134,7 @@ async def main(account: str | None = None) -> None:
     from telethon.tl import types as tl_types
     from telethon.utils import get_peer_id
 
-    cfg = accounts_mod.resolve(account)
-    account_id = cfg["id"]
+    cfg = accounts_mod.resolve(account_id)
     api_id = cfg["api_id"]
     api_hash = cfg["api_hash"]
     if not api_id or not api_hash:
@@ -141,10 +151,9 @@ async def main(account: str | None = None) -> None:
     state["ids"], state["forums"] = collect_ids()
     state["refreshed"] = time.monotonic()
     db = DB(DB_PATH)
-    if accounts_mod.is_multi():
+    obs_account = account_id if accounts_mod.is_multi() else None
+    if obs_account is not None:
         db.upsert_account(account_id, label=cfg["label"])
-        for cid in state["ids"]:
-            db.observe_chat_account(cid, account_id)
         db.conn.commit()
 
     print(f"live[{account_id}]: слушаю {len(state['ids'])} чатов "
@@ -167,6 +176,7 @@ async def main(account: str | None = None) -> None:
             return
         try:
             if handle_message(db, event.message, cid, cid in state["forums"]):
+                observe_chat(db, obs_account, cid)
                 print(f"  + {cid}/{event.message.id}", flush=True)
                 await alerts_mod.maybe_alert(
                     client, db, cid,
@@ -182,6 +192,7 @@ async def main(account: str | None = None) -> None:
             return
         try:
             if handle_edit(db, event.message, cid, cid in state["forums"]):
+                observe_chat(db, obs_account, cid)
                 print(f"  ~ {cid}/{event.message.id}", flush=True)
         except Exception as exc:
             print(f"  ! {cid}: {exc}", file=sys.stderr)
@@ -212,6 +223,7 @@ async def main(account: str | None = None) -> None:
         try:
             items = reaction_items(update)
             if handle_reactions(db, cid, update.msg_id, items):
+                observe_chat(db, obs_account, cid)
                 print(f"  r {cid}/{update.msg_id}", flush=True)
         except Exception as exc:
             print(f"  ! {cid}: {exc}", file=sys.stderr)

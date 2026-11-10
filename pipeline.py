@@ -93,9 +93,14 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
                skip_shiftwatch: bool = False, skip_memory: bool = False,
                client=None, until_done: bool = True,
                acquire_lock: bool = True, account: str | None = None) -> dict:
+    import accounts as accounts_mod
+
+    account_id = accounts_mod.validate(account)
+    lock_account = account_id if accounts_mod.is_multi() else None
     lock = None
     if acquire_lock:
-        lock = proclock.acquire_instance_lock(str(db_path) + ".pipeline.lock")
+        lock = proclock.acquire_instance_lock(
+            proclock.lock_path(str(db_path), "pipeline", lock_account))
         if lock is None:
             return {"already_running": True}
     budget = _step_budget()
@@ -105,7 +110,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         try:
             rep = await asyncio.wait_for(
                 sync_mod.run(db_path=db_path, client=client, watched_only=True,
-                             account=account),
+                             account=account_id),
                 timeout=budget)
             report["sync"] = {
                 "ok": True,
@@ -235,14 +240,19 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
 
 async def run_loop(db_path: str, pack_id: str | None, days_ahead: int,
                    send: bool, minutes: int, account: str | None = None) -> None:
-    lock = proclock.acquire_instance_lock(str(db_path) + ".pipeline.lock")
+    import accounts as accounts_mod
+
+    account_id = accounts_mod.validate(account)
+    lock_account = account_id if accounts_mod.is_multi() else None
+    lock = proclock.acquire_instance_lock(
+        proclock.lock_path(str(db_path), "pipeline", lock_account))
     if lock is None:
         raise SystemExit("pipeline --loop уже запущен (lockfile занят)")
     while True:
         stamp = time.strftime("%H:%M:%S")
         report = await run(db_path, pack_id=pack_id, days_ahead=days_ahead,
                            send=send, until_done=False, acquire_lock=False,
-                           account=account)
+                           account=account_id)
         for name, res in report.items():
             state = "ok" if res.get("ok") else f"FAIL {res.get('error')}"
             details = "  ".join(f"{k}={v}" for k, v in res.items()

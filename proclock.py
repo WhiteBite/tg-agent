@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import IO
 
 
+def lock_path(db_path: str | Path, kind: str, account: str | None = None) -> str:
+    """Путь lock-файла: в мультиаккаунте — с именем аккаунта, иначе прежний."""
+    if account:
+        return f"{db_path}.{account}.{kind}.lock"
+    return f"{db_path}.{kind}.lock"
+
+
 def acquire_instance_lock(path: str | Path) -> IO | None:
     """Открытый lock-файл при успешном захвате, None если блокировка занята."""
     fh = open(path, "a+")

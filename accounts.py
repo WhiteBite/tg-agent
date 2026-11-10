@@ -41,6 +41,24 @@ def configured_accounts() -> list[str]:
     return _names()
 
 
+def validate(name: str | None) -> str:
+    """Проверяет запрошенный аккаунт и возвращает его id.
+
+    Неизвестное имя или отсутствие --account при заданном TG_ACCOUNTS —
+    SystemExit: клиент не создаётся, сессия не заводится.
+    """
+    if name is None:
+        if is_multi():
+            raise SystemExit(
+                "TG_ACCOUNTS задан: укажи --account "
+                f"({', '.join(account_names())})")
+        return DEFAULT
+    if name not in account_names():
+        raise SystemExit(
+            f"неизвестный аккаунт {name!r}; доступны: {', '.join(account_names())}")
+    return name
+
+
 def _key(name: str, suffix: str) -> str:
     return f"TG_ACCOUNT_{name.upper()}_{suffix}"
 

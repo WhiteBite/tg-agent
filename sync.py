@@ -113,10 +113,11 @@ def start_kwargs() -> dict[str, str]:
 
 def make_client(account: str | None = None) -> Any:
     """TelegramClient из .env (или конфигурации аккаунта), без подключения."""
+    import accounts as accounts_mod
+
+    account = accounts_mod.validate(account)
     from telethon import TelegramClient
     from telethon.sessions import StringSession
-
-    import accounts as accounts_mod
 
     cfg = accounts_mod.resolve(account)
     api_id = cfg["api_id"]
@@ -632,6 +633,7 @@ async def backfill_window(
     forums = {r["id"] for r in db.conn.execute(
         "SELECT id FROM chats WHERE is_forum=1")}
     total_new = total_seen = 0
+    processed: list[int] = []
     for cid in chats:
         rows: list[dict[str, Any]] = []
         audio_ids: set[int] = set()
@@ -660,6 +662,7 @@ async def backfill_window(
         except Exception as exc:
             print(f"  ! {cid}: окно не прочитано ({exc})", file=sys.stderr)
             continue
+        processed.append(cid)
         if dry_run:
             print(f"  {cid}: окно {days}д — {total_seen} сообщений (dry-run)", flush=True)
             continue
@@ -683,7 +686,8 @@ async def backfill_window(
         for cid in chats:
             db.recount_topics(cid)
         db.conn.commit()
-    return {"chats": len(chats), "seen": total_seen, "new": total_new, "days": days}
+    return {"chats": len(chats), "chat_ids": processed, "seen": total_seen,
+            "new": total_new, "days": days}
 
 
 async def sync_watched(
@@ -806,13 +810,13 @@ async def run(
 ) -> dict:
     import accounts as accounts_mod
 
-    account_id = account or accounts_mod.DEFAULT
+    account_id = accounts_mod.validate(account)
     own_client = False
     folders_saved = 0
     if client is None:
         if not HAVE_TELETHON:
             raise SystemExit("нужен Telethon: pip install telethon")
-        client = make_client(account)
+        client = make_client(account_id)
         await client.start(**start_kwargs())
         own_client = True
 
@@ -838,7 +842,7 @@ async def run(
                   f"новых {rep['new']}")
             if not dry_run and accounts_mod.is_multi():
                 db.upsert_account(account_id, label=account_id)
-                for cid in (r["id"] for r in db.conn.execute("SELECT id FROM chats")):
+                for cid in rep["chat_ids"]:
                     db.observe_chat_account(cid, account_id)
                 db.conn.commit()
             if own_client:
