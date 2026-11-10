@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
@@ -28,6 +29,7 @@ from env import load_env
 
 load_env()
 
+import accounts as accounts_mod
 import alerts as alerts_mod
 import proclock
 import sync as sync_mod
@@ -112,7 +114,7 @@ def handle_reactions(db: DB, chat_id: int, msg_id: int, items: list[dict]) -> bo
     return db.update_reactions(chat_id, msg_id, items)
 
 
-async def main() -> None:
+async def main(account: str | None = None) -> None:
     lock = proclock.acquire_instance_lock(str(DB_PATH) + ".live.lock")
     if lock is None:
         raise SystemExit("live.py уже запущен (lockfile занят)")
@@ -121,13 +123,15 @@ async def main() -> None:
     from telethon.tl import types as tl_types
     from telethon.utils import get_peer_id
 
-    api_id = os.environ.get("TELEGRAM_API_ID")
-    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    cfg = accounts_mod.resolve(account)
+    account_id = cfg["id"]
+    api_id = cfg["api_id"]
+    api_hash = cfg["api_hash"]
     if not api_id or not api_hash:
         raise SystemExit("нужны TELEGRAM_API_ID / TELEGRAM_API_HASH")
-    sess = os.environ.get("TELEGRAM_SESSION_STRING")
+    sess = cfg["session_string"]
     client = TelegramClient(
-        StringSession(sess) if sess else os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session"),
+        StringSession(sess) if sess else cfg["session_name"],
         int(api_id), api_hash,
         connection_retries=None,  # None у Telethon = реконнекты без предела: обрыв связи не должен убивать демона
     )
@@ -137,8 +141,14 @@ async def main() -> None:
     state["ids"], state["forums"] = collect_ids()
     state["refreshed"] = time.monotonic()
     db = DB(DB_PATH)
+    if accounts_mod.is_multi():
+        db.upsert_account(account_id, label=cfg["label"])
+        for cid in state["ids"]:
+            db.observe_chat_account(cid, account_id)
+        db.conn.commit()
 
-    print(f"live: слушаю {len(state['ids'])} чатов ({len(state['forums'])} форумов). Ctrl-C для стопа.")
+    print(f"live[{account_id}]: слушаю {len(state['ids'])} чатов "
+          f"({len(state['forums'])} форумов). Ctrl-C для стопа.")
 
     def known(cid: int) -> bool:
         if cid in state["ids"]:
@@ -212,5 +222,13 @@ async def main() -> None:
         db.close()
 
 
+def _cli() -> None:
+    ap = argparse.ArgumentParser(description="Live-режим: новые сообщения в индекс")
+    ap.add_argument("--account", default=None,
+                    help="имя аккаунта из TG_ACCOUNTS (по умолчанию неявный default)")
+    args = ap.parse_args()
+    asyncio.run(main(args.account))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    _cli()

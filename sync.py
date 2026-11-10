@@ -111,18 +111,21 @@ def start_kwargs() -> dict[str, str]:
     return {"phone": phone} if phone else {}
 
 
-def make_client() -> Any:
-    """TelegramClient из .env, без подключения."""
+def make_client(account: str | None = None) -> Any:
+    """TelegramClient из .env (или конфигурации аккаунта), без подключения."""
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
-    api_id = os.environ.get("TELEGRAM_API_ID")
-    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    import accounts as accounts_mod
+
+    cfg = accounts_mod.resolve(account)
+    api_id = cfg["api_id"]
+    api_hash = cfg["api_hash"]
     if not api_id or not api_hash:
         raise SystemExit("нет TELEGRAM_API_ID / TELEGRAM_API_HASH — "
                          "запусти python start.py: спросит один раз и запомнит")
-    sess = os.environ.get("TELEGRAM_SESSION_STRING")
-    name = os.environ.get("TELEGRAM_SESSION_NAME", "tg_agent_session")
+    sess = cfg["session_string"]
+    name = cfg["session_name"]
     client = TelegramClient(StringSession(sess) if sess else name, int(api_id), api_hash,
                             receive_updates=False)
     try:
@@ -799,13 +802,17 @@ async def run(
     backfill_days: int = 0,
     watched_only: bool = False,
     dry_run: bool = False,
+    account: str | None = None,
 ) -> dict:
+    import accounts as accounts_mod
+
+    account_id = account or accounts_mod.DEFAULT
     own_client = False
     folders_saved = 0
     if client is None:
         if not HAVE_TELETHON:
             raise SystemExit("нужен Telethon: pip install telethon")
-        client = make_client()
+        client = make_client(account)
         await client.start(**start_kwargs())
         own_client = True
 
@@ -817,7 +824,7 @@ async def run(
             try:
                 fl = await fetch_folders(client)
                 if not dry_run:
-                    db.save_folders(fl)
+                    db.save_folders(fl, account_id=account_id)
                     folders_saved = len(fl)
                 if folder is not None:
                     folder_peers = next((f["peers"] for f in fl if f["id"] == folder), None)
@@ -829,6 +836,11 @@ async def run(
             rep = await backfill_window(client, db, backfill_days, dry_run=dry_run)
             print(f"окно-бэкфилл: чатов {rep['chats']}, просмотрено {rep['seen']}, "
                   f"новых {rep['new']}")
+            if not dry_run and accounts_mod.is_multi():
+                db.upsert_account(account_id, label=account_id)
+                for cid in (r["id"] for r in db.conn.execute("SELECT id FROM chats")):
+                    db.observe_chat_account(cid, account_id)
+                db.conn.commit()
             if own_client:
                 await client.disconnect()
             return {"backfill_window": rep, "chats": [], "dry_run": dry_run}
@@ -854,6 +866,11 @@ async def run(
                         chunk_size=backfill_chunk, dry_run=dry_run,
                     )
                 reports.append(rep)
+        if not dry_run and accounts_mod.is_multi():
+            db.upsert_account(account_id, label=account_id)
+            for rep in reports:
+                db.observe_chat_account(rep["chat_id"], account_id)
+            db.conn.commit()
         for rep in reports:
             top = rep["topics"][:8]
             parts = ", ".join(f"{t['title'] or 'без темы'}:{t['new']}" for t in top)
@@ -885,6 +902,8 @@ def main() -> None:
                          "(date-режим, без курсоров)")
     ap.add_argument("--watched", action="store_true",
                     help="синхронизировать только группы из watch-листа")
+    ap.add_argument("--account", default=None,
+                    help="имя аккаунта из TG_ACCOUNTS (по умолчанию неявный default)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -901,6 +920,7 @@ def main() -> None:
             backfill_days=args.backfill_days or 0,
             watched_only=args.watched,
             dry_run=args.dry_run,
+            account=args.account,
         )
     )
     print(json.dumps({"total_new": sum(r["new_messages"] for r in result["chats"]),

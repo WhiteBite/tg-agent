@@ -5816,7 +5816,8 @@ def main() -> int:
                   "tests_ui_projects", "tests_manage", "tests_announce",
                   "tests_workspace_api", "tests_question_signals",
                   "tests_downloads", "tests_shiftwatch", "tests_bot_ingest",
-                  "tests_export_notion", "tests_memory", "tests_pull", "tests_profile"):
+                  "tests_export_notion", "tests_memory", "tests_pull", "tests_profile",
+                  "tests_accounts"):
         rc = subprocess.run([sys.executable, "-X", "utf8",
                              str(Path(__file__).parent / f"{suite}.py")],
                             cwd=str(Path(__file__).parent)).returncode

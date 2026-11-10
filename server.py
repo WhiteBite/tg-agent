@@ -652,10 +652,13 @@ def tg_index_stats() -> str:
             "(SELECT COUNT(*) FROM topics) AS topics, "
             "(SELECT COUNT(*) FROM messages) AS messages, "
             "(SELECT COUNT(*) FROM watch) AS watched, "
+            "(SELECT COUNT(*) FROM accounts) AS accounts, "
+            "(SELECT COUNT(*) FROM chat_accounts) AS chat_accounts, "
             "(SELECT MIN(ts) FROM messages) AS first_ts, "
             "(SELECT MAX(ts) FROM messages) AS last_ts"
         ).fetchone())
     row["index_path"] = INDEX
+    row["multi_account"] = bool(os.environ.get("TG_ACCOUNTS", "").strip())
     row["period"] = [
         datetime.fromtimestamp(row[k], tz=timezone.utc).isoformat()
         if row[k] else None for k in ("first_ts", "last_ts")

@@ -4,6 +4,7 @@ from modules import workspace_routes
 from workspace_search import search
 from workspace_store import WorkspaceError, changes, entities, entity, scrub
 from workspace_views import (
+    accounts_view,
     alert_settings,
     catalog,
     chat_analysis,
@@ -41,12 +42,14 @@ def get(db, path: str, params: dict):
         case "analysis":
             return chat_analysis(db, params)
         case "projects":
-            return projects(db)
+            return projects(db, params)
         case "project":
-            item = next((p for p in projects(db)["items"] if p["name"] == params.get("project")), None)
+            item = next((p for p in projects(db, params)["items"] if p["name"] == params.get("project")), None)
             if item is None:
                 raise WorkspaceError("Проект не найден", 404)
             return item
+        case "accounts":
+            return accounts_view(db)
         case "entities":
             return entities(db, params)
         case "catalog":

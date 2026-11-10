@@ -362,6 +362,15 @@ small {
   color: var(--muted);
   width: 18px;
 }
+.account-switcher {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-pill);
+  background: var(--soft);
+  color: var(--ink);
+  padding: var(--s2) var(--s4);
+  font-size: var(--text-sm);
+  max-width: 180px;
+}
 .text-button {
   border: 0;
   background: transparent;

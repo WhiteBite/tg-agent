@@ -69,13 +69,13 @@ pipeline.py оркеструет цикл: sync → media → extract → alerts
 ## Тесты
 
 ```bash
-python test_offline.py        # 1355 офлайн-проверок, без аккаунта Telegram; так же гоняет CI
+python test_offline.py        # 1783 офлайн-проверок, без аккаунта Telegram; так же гоняет CI
 ```
 
 `test_offline.py` — не pytest, а собственный раннер: `check(cond, label, extra)`.
-Он герметичен (`TG_ENV_FILE=""`) и запускает пятнадцать сабсьютов
+Он герметичен (`TG_ENV_FILE=""`) и запускает двадцать два сабсьюта
 (`tests_db_core.py`, `tests_packs_semantics.py`, `tests_downloads.py`,
-`tests_workspace_api.py`, `tests_manage.py`, `tests_announce.py`, …) подпроцессами.
+`tests_workspace_api.py`, `tests_manage.py`, `tests_announce.py`, `tests_accounts.py`, …) подпроцессами.
 Он поднимает **настоящий `server.py` по MCP stdio** и **настоящий `ui.py`**.
 
 Правила при изменениях:

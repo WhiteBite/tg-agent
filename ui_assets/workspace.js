@@ -80,10 +80,13 @@ window.WS = (() => {
         ([, v]) => v !== undefined && v !== null && v !== "",
       ),
     ).toString();
-  const get = (path, params = {}) =>
-    api(
-      `/api/workspace/${path}${Object.keys(params).length ? "?" + query(params) : ""}`,
+  const get = (path, params = {}) => {
+    const merged =
+      account && account !== "all" ? { ...params, account } : params;
+    return api(
+      `/api/workspace/${path}${Object.keys(merged).length ? "?" + query(merged) : ""}`,
     );
+  };
   const post = (path, body) => api(`/api/workspace/${path}`, body);
   const date = (ts) =>
     ts
@@ -221,6 +224,34 @@ window.WS = (() => {
       localStorage.setItem(key, JSON.stringify(value));
     } catch {
       toast("Браузер запретил сохранять настройки");
+    }
+  }
+  let account = saved("ws:account", "all");
+  async function loadAccounts() {
+    const sel = $("#account-switcher");
+    if (!sel) return;
+    try {
+      const data = await api("/api/workspace/accounts");
+      const items = data.items || [];
+      if (items.length <= 1) {
+        sel.hidden = true;
+        return;
+      }
+      sel.hidden = false;
+      sel.innerHTML = items
+        .map(
+          (a) =>
+            `<option value="${esc(a.id)}"${a.id === account ? " selected" : ""}>${esc(a.label)}</option>`,
+        )
+        .join("");
+      sel.onchange = () => {
+        account = sel.value;
+        store("ws:account", account);
+        render();
+        refreshHealth();
+      };
+    } catch {
+      sel.hidden = true;
     }
   }
   function applyTheme(value) {
@@ -397,6 +428,7 @@ window.WS = (() => {
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") setMenu(false);
     });
+    loadAccounts();
     render();
     refreshHealth();
   });
@@ -426,8 +458,12 @@ window.WS = (() => {
     offerAddChat,
     allKinds,
     screens,
+    loadAccounts,
     get route() {
       return route;
+    },
+    get account() {
+      return account;
     },
     isCurrent: (n) => n === serial,
   };

@@ -35,6 +35,21 @@ _TITLE_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 def sanitize_title(text: str | None, cap: int = 120) -> str:
     return re.sub(r"\s+", " ", _TITLE_CTRL_RE.sub(" ", text or "")).strip()[:cap]
 
+
+# Линза аккаунта (алиас `e`): сужение выдачи UI, не изоляция доступа; сущность сохраняет один id и все источники.
+ACCOUNT_LENS_SQL = (
+    "(EXISTS(SELECT 1 FROM entity_sources es WHERE es.entity_id=e.id "
+    "AND es.chat_id IN (SELECT chat_id FROM chat_accounts WHERE account_id=? AND enabled=1)) "
+    "OR (e.chat_id IN (SELECT chat_id FROM chat_accounts WHERE account_id=? AND enabled=1) "
+    "AND NOT EXISTS(SELECT 1 FROM entity_sources es2 WHERE es2.entity_id=e.id)))")
+
+
+def account_lens(account: str | None) -> tuple[str, list]:
+    """(SQL-условие, args) линзы аккаунта; пусто для None/'all' (нулевая цена)."""
+    if not account or account == "all":
+        return "", []
+    return ACCOUNT_LENS_SQL, [account, account]
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chats (
     id          INTEGER PRIMARY KEY,
@@ -136,17 +151,38 @@ CREATE TABLE IF NOT EXISTS link_status (
     PRIMARY KEY (host, value)
 );
 
--- папки Telegram (состав лежит прямо в объекте папки)
+-- папки Telegram (состав лежит прямо в объекте папки); id папки аккаунт-локальный
 CREATE TABLE IF NOT EXISTS folders (
-    folder_id INTEGER PRIMARY KEY,
-    title     TEXT,
-    synced_at INTEGER
+    account_id TEXT NOT NULL DEFAULT 'default',
+    folder_id  INTEGER NOT NULL,
+    title      TEXT,
+    synced_at  INTEGER,
+    PRIMARY KEY (account_id, folder_id)
 );
 CREATE TABLE IF NOT EXISTS folder_chats (
-    folder_id INTEGER NOT NULL,
-    chat_id   INTEGER NOT NULL,
-    PRIMARY KEY (folder_id, chat_id)
+    account_id TEXT NOT NULL DEFAULT 'default',
+    folder_id  INTEGER NOT NULL,
+    chat_id    INTEGER NOT NULL,
+    PRIMARY KEY (account_id, folder_id, chat_id)
 );
+
+-- аккаунты ингеста: свойство сессии и доступа к чату, не измерение сущностей
+CREATE TABLE IF NOT EXISTS accounts (
+    id               TEXT PRIMARY KEY,
+    telegram_user_id INTEGER UNIQUE,
+    label            TEXT,
+    enabled          INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS chat_accounts (
+    chat_id      INTEGER NOT NULL,
+    account_id   TEXT NOT NULL,
+    enabled      INTEGER DEFAULT 1,
+    is_primary   INTEGER DEFAULT 0,
+    access_state TEXT,
+    PRIMARY KEY (chat_id, account_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_chat_primary
+    ON chat_accounts (chat_id) WHERE is_primary = 1;
 
 -- сущности, извлечённые из переписки: сами сущности, их события и прогоны экстрактора
 CREATE TABLE IF NOT EXISTS entities (
@@ -376,7 +412,7 @@ CREATE TRIGGER IF NOT EXISTS trg_ent_au AFTER UPDATE OF title, body ON entities 
 END;
 """
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 class DB:
@@ -455,6 +491,8 @@ class DB:
             self._migrate_v16()
         if version < 17:
             self._migrate_v17()
+        if version < 18:
+            self._migrate_v18()
         self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -768,6 +806,42 @@ class DB:
             "snapshot TEXT, content_hash TEXT, receipt_ts INTEGER, "
             "UNIQUE(system, external_id, revision))")
 
+    def _migrate_v18(self) -> None:
+        """Мультиаккаунт: реестр аккаунтов и доступ к чатам; папки получают
+        account_id (старые строки остаются под неявным `default`)."""
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS accounts("
+            "id TEXT PRIMARY KEY, telegram_user_id INTEGER UNIQUE, "
+            "label TEXT, enabled INTEGER DEFAULT 1)")
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS chat_accounts("
+            "chat_id INTEGER NOT NULL, account_id TEXT NOT NULL, "
+            "enabled INTEGER DEFAULT 1, is_primary INTEGER DEFAULT 0, "
+            "access_state TEXT, PRIMARY KEY (chat_id, account_id))")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_chat_primary "
+            "ON chat_accounts(chat_id) WHERE is_primary=1")
+        if "account_id" not in {r[1] for r in self.conn.execute("PRAGMA table_info(folders)")}:
+            self.conn.execute(
+                "CREATE TABLE folders_new(account_id TEXT NOT NULL DEFAULT 'default', "
+                "folder_id INTEGER NOT NULL, title TEXT, synced_at INTEGER, "
+                "PRIMARY KEY (account_id, folder_id))")
+            self.conn.execute(
+                "INSERT INTO folders_new(account_id, folder_id, title, synced_at) "
+                "SELECT 'default', folder_id, title, synced_at FROM folders")
+            self.conn.execute("DROP TABLE folders")
+            self.conn.execute("ALTER TABLE folders_new RENAME TO folders")
+        if "account_id" not in {r[1] for r in self.conn.execute("PRAGMA table_info(folder_chats)")}:
+            self.conn.execute(
+                "CREATE TABLE folder_chats_new(account_id TEXT NOT NULL DEFAULT 'default', "
+                "folder_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, "
+                "PRIMARY KEY (account_id, folder_id, chat_id))")
+            self.conn.execute(
+                "INSERT INTO folder_chats_new(account_id, folder_id, chat_id) "
+                "SELECT 'default', folder_id, chat_id FROM folder_chats")
+            self.conn.execute("DROP TABLE folder_chats")
+            self.conn.execute("ALTER TABLE folder_chats_new RENAME TO folder_chats")
+
     # ---------------- cursors (для инкрементальной синхронизации) ----------------
 
     def get_cursor(self, chat_id: int, topic_id: int = 0) -> int:
@@ -798,34 +872,79 @@ class DB:
 
     # ---------------- папки (пишет sync.py, читает ui) ----------------
 
-    def save_folders(self, folders: list[dict]) -> None:
+    def save_folders(self, folders: list[dict], account_id: str = "default") -> None:
         for f in folders:
             self.conn.execute(
-                "INSERT INTO folders(folder_id, title, synced_at) VALUES(?,?,?) "
-                "ON CONFLICT(folder_id) DO UPDATE SET title=excluded.title, "
+                "INSERT INTO folders(account_id, folder_id, title, synced_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(account_id, folder_id) DO UPDATE SET title=excluded.title, "
                 "synced_at=excluded.synced_at",
-                (f["id"], f["title"], int(time.time())),
+                (account_id, f["id"], f["title"], int(time.time())),
             )
-            self.conn.execute("DELETE FROM folder_chats WHERE folder_id=?", (f["id"],))
+            self.conn.execute("DELETE FROM folder_chats WHERE account_id=? AND folder_id=?",
+                              (account_id, f["id"]))
             self.conn.executemany(
-                "INSERT OR IGNORE INTO folder_chats(folder_id, chat_id) VALUES(?,?)",
-                [(f["id"], cid) for cid in f["peers"]],
+                "INSERT OR IGNORE INTO folder_chats(account_id, folder_id, chat_id) VALUES(?,?,?)",
+                [(account_id, f["id"], cid) for cid in f["peers"]],
             )
         self.conn.commit()
 
-    def folders_list(self) -> list[dict]:
+    def folders_list(self, account_id: str | None = None) -> list[dict]:
+        sql = "SELECT account_id, folder_id, title FROM folders"
+        args: list[Any] = []
+        if account_id is not None:
+            sql += " WHERE account_id=?"
+            args.append(account_id)
+        sql += " ORDER BY title COLLATE NOCASE"
         out = []
-        for f in self.conn.execute(
-            "SELECT folder_id, title FROM folders ORDER BY title COLLATE NOCASE"
-        ):
+        for f in self.conn.execute(sql, args):
             chats = [
                 r["chat_id"]
                 for r in self.conn.execute(
-                    "SELECT chat_id FROM folder_chats WHERE folder_id=?", (f["folder_id"],)
+                    "SELECT chat_id FROM folder_chats WHERE account_id=? AND folder_id=?",
+                    (f["account_id"], f["folder_id"]),
                 )
             ]
-            out.append({"id": f["folder_id"], "title": f["title"], "chat_ids": chats})
+            out.append({"id": f["folder_id"], "account_id": f["account_id"],
+                        "title": f["title"], "chat_ids": chats})
         return out
+
+    # ---------------- аккаунты ингеста (пишет sync/live, читает UI-линза) ----------------
+
+    def upsert_account(self, account_id: str, telegram_user_id: int | None = None,
+                       label: str | None = None, enabled: bool = True) -> None:
+        self.conn.execute(
+            "INSERT INTO accounts(id, telegram_user_id, label, enabled) VALUES(?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "telegram_user_id=COALESCE(excluded.telegram_user_id, accounts.telegram_user_id), "
+            "label=COALESCE(excluded.label, accounts.label), enabled=excluded.enabled",
+            (account_id, telegram_user_id, label, int(enabled)),
+        )
+
+    def observe_chat_account(self, chat_id: int, account_id: str,
+                             access_state: str | None = None) -> None:
+        """Отмечает, что аккаунт видит чат; первый наблюдатель становится primary
+        (частичный уникальный индекс держит не больше одного primary на чат)."""
+        has_primary = self.conn.execute(
+            "SELECT 1 FROM chat_accounts WHERE chat_id=? AND is_primary=1", (chat_id,)
+        ).fetchone()
+        self.conn.execute(
+            "INSERT INTO chat_accounts(chat_id, account_id, enabled, is_primary, access_state) "
+            "VALUES(?,?,1,?,?) "
+            "ON CONFLICT(chat_id, account_id) DO UPDATE SET enabled=1, "
+            "access_state=COALESCE(excluded.access_state, chat_accounts.access_state)",
+            (chat_id, account_id, 0 if has_primary else 1, access_state),
+        )
+
+    def accounts_list(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute("SELECT * FROM accounts ORDER BY id")]
+
+    def chat_accounts(self, chat_id: int | None = None) -> list[dict]:
+        if chat_id is None:
+            rows = self.conn.execute("SELECT * FROM chat_accounts ORDER BY chat_id, account_id")
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM chat_accounts WHERE chat_id=? ORDER BY account_id", (chat_id,))
+        return [dict(r) for r in rows]
 
     # ---------------- refs / pins (пишет sync.py, читают server/ui) ----------------
 
@@ -1957,12 +2076,17 @@ class DB:
             items.append(d)
         return {"since_ts": since_ts, "count": count, "items": items}
 
-    def project_brief(self, project: str, pack: str | None = None) -> dict:
+    def project_brief(self, project: str, pack: str | None = None,
+                      account: str | None = None) -> dict:
         where = " WHERE e.project = ?"
         args: list[Any] = [project]
         if pack is not None:
             where += " AND e.pack = ?"
             args.append(pack)
+        lens, lens_args = account_lens(account)
+        if lens:
+            where += " AND " + lens
+            args.extend(lens_args)
         now = int(time.time())
         counts = {r["status"]: r["n"] for r in self.conn.execute(
             "SELECT e.status, COUNT(*) n FROM entities e" + where + " GROUP BY e.status",

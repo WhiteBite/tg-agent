@@ -6,7 +6,7 @@ import time
 
 import engine as engine_mod
 from alerts import config as alerts_config
-from db import DB
+from db import DB, account_lens
 from workspace_store import (
     REVIEW_JOINS,
     REVIEW_STATE_SQL,
@@ -20,8 +20,15 @@ from workspace_write import autoclose_stale_trials
 
 def home(db: DB, params: dict) -> dict:
     autoclose_stale_trials(db)
-    where = "WHERE e.project=?" if params.get("project") else ""
-    args = [params["project"]] if params.get("project") else []
+    conds, args = [], []
+    if params.get("project"):
+        conds.append("e.project=?")
+        args.append(params["project"])
+    lens, lens_args = account_lens(params.get("account"))
+    if lens:
+        conds.append(lens)
+        args.extend(lens_args)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
     all_rows = db.conn.execute("SELECT e.*," + REVIEW_STATE_SQL + " AS review_state" + REVIEW_JOINS + where, args)
     now = int(time.time())
     counts = dict.fromkeys(("overdue", "upcoming", "blocked", "open_questions", "promises_missing_due",
@@ -65,7 +72,7 @@ def home(db: DB, params: dict) -> dict:
         fresh[key.replace("_ts", "_age_sec")] = max(0, now - fresh[key]) if fresh[key] else None
     recent = [dict(r) for r in db.conn.execute(
         "SELECT ev.*,e.title,e.project,e.kind FROM entity_events ev JOIN entities e ON e.id=ev.entity_id "
-        + ("WHERE e.project=? " if args else "") + "ORDER BY ev.id DESC LIMIT 10", args)]
+        + (where + " " if where else "") + "ORDER BY ev.id DESC LIMIT 10", args)]
     return {"counts": counts, "attention": attention[:30], "freshness": fresh, "recent_changes": recent}
 
 
@@ -159,6 +166,10 @@ def catalog(db: DB, params: dict) -> dict:
         like = "%" + params["q"] + "%"
         where += " AND (e.title LIKE ? OR e.body LIKE ? OR e.dedup_key LIKE ?)"
         args += [like, like, like]
+    lens, lens_args = account_lens(params.get("account"))
+    if lens:
+        where += " AND " + lens
+        args += lens_args
     rows = [dict(r) for r in db.conn.execute(
         "SELECT e.* FROM entities e " + where + " ORDER BY e.updated_ts DESC, e.id DESC", args)]
     chat_titles = {r["id"]: r["title"] for r in db.conn.execute("SELECT id,title FROM chats")}
@@ -211,13 +222,14 @@ def catalog(db: DB, params: dict) -> dict:
             "offset": offset, "limit": limit}
 
 
-def projects(db: DB) -> dict:
+def projects(db: DB, params: dict | None = None) -> dict:
+    params = params or {}
     names = [r[0] for r in db.conn.execute(
         "SELECT project FROM watch WHERE project IS NOT NULL AND project!='' UNION "
         "SELECT project FROM entities WHERE project IS NOT NULL AND project!='' ORDER BY 1")]
     items = []
     for name in names:
-        brief = db.project_brief(name)
+        brief = db.project_brief(name, account=params.get("account"))
         topics = [dict(r) for r in db.conn.execute(
             "SELECT w.chat_id,w.topic_id,w.alias,c.title AS chat_title,t.title AS topic_title "
             "FROM watch w LEFT JOIN chats c ON c.id=w.chat_id LEFT JOIN topics t "
@@ -342,6 +354,17 @@ def links(db: DB, params: dict) -> dict:
         groups = db.refs_summary(chat_ids=ids or [-1], since_ts=since, limit=limit)
     return {"groups": groups,
             "chats": [{"id": c["id"], "title": c["title"]} for c in db.chats(limit=2000)]}
+
+
+def accounts_view(db: DB) -> dict:
+    import accounts as accounts_mod
+    known = {a["id"]: a for a in db.accounts_list()}
+    items = [{"id": "all", "label": "Все аккаунты"}]
+    for name in accounts_mod.configured_accounts():
+        row = known.get(name) or {}
+        items.append({"id": name, "label": row.get("label") or name,
+                      "enabled": bool(row.get("enabled", 1))})
+    return {"items": items, "multi": accounts_mod.is_multi()}
 
 
 def media_view(db: DB) -> dict:

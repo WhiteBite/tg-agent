@@ -4,7 +4,7 @@ import json
 import time
 from datetime import datetime, timezone
 
-from db import DB, clean_text
+from db import DB, account_lens, clean_text
 
 KINDS = {"task", "promise", "question", "decision", "service", "trial", "promo", "approval"}
 STATUSES = {"open", "in_progress", "blocked", "done", "backlog"}
@@ -106,6 +106,10 @@ def entity_where(params: dict) -> tuple[str, list]:
             now = int(time.time())
             parts.append("e.due_ts <= ?" if due == "overdue" else "e.due_ts BETWEEN ? AND ?")
             args.extend([now] if due == "overdue" else [now, now + 7 * 86400])
+    lens, lens_args = account_lens(params.get("account"))
+    if lens:
+        parts.append(lens)
+        args.extend(lens_args)
     return " AND ".join(parts), args
 
 
@@ -168,6 +172,9 @@ def entity(db: DB, entity_id: int) -> dict:
                          "ts": msg["ts"] if msg else ev["ts"]})
     ext = db.conn.execute("SELECT external_id,synced_ts FROM integrations WHERE entity_id=? AND system='101'",
                           (entity_id,)).fetchone()
+    item["sources"] = [dict(r) for r in db.conn.execute(
+        "SELECT chat_id, topic_id, first_seen_ts, last_seen_ts FROM entity_sources "
+        "WHERE entity_id=? ORDER BY chat_id, topic_id", (entity_id,))]
     return {"entity": item, "revision": revision(db, entity_id), "events": events,
             "evidence": evidence, "integration": {"external_id": ext[0] if ext else None,
             "synced_cursor": ext[1] if ext else 0, "contract_verified": False,

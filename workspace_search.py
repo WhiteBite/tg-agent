@@ -29,6 +29,11 @@ def search(db: DB, params: dict) -> dict:
     if params.get("owner"):
         parts.append("m.sender_name=?")
         args.append(params["owner"])
+    account = params.get("account")
+    if account and account != "all":
+        parts.append("m.chat_id IN (SELECT chat_id FROM chat_accounts "
+                     "WHERE account_id=? AND enabled=1)")
+        args.append(account)
     for key, operator in (("created_from", ">="), ("created_to", "<=")):
         if params.get(key):
             parts.append(f"m.ts {operator} ?")

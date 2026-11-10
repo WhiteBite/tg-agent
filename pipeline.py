@@ -92,7 +92,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
                skip_media: bool = False, skip_bot: bool = False,
                skip_shiftwatch: bool = False, skip_memory: bool = False,
                client=None, until_done: bool = True,
-               acquire_lock: bool = True) -> dict:
+               acquire_lock: bool = True, account: str | None = None) -> dict:
     lock = None
     if acquire_lock:
         lock = proclock.acquire_instance_lock(str(db_path) + ".pipeline.lock")
@@ -104,7 +104,8 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         import sync as sync_mod
         try:
             rep = await asyncio.wait_for(
-                sync_mod.run(db_path=db_path, client=client, watched_only=True),
+                sync_mod.run(db_path=db_path, client=client, watched_only=True,
+                             account=account),
                 timeout=budget)
             report["sync"] = {
                 "ok": True,
@@ -233,14 +234,15 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
 
 
 async def run_loop(db_path: str, pack_id: str | None, days_ahead: int,
-                   send: bool, minutes: int) -> None:
+                   send: bool, minutes: int, account: str | None = None) -> None:
     lock = proclock.acquire_instance_lock(str(db_path) + ".pipeline.lock")
     if lock is None:
         raise SystemExit("pipeline --loop уже запущен (lockfile занят)")
     while True:
         stamp = time.strftime("%H:%M:%S")
         report = await run(db_path, pack_id=pack_id, days_ahead=days_ahead,
-                           send=send, until_done=False, acquire_lock=False)
+                           send=send, until_done=False, acquire_lock=False,
+                           account=account)
         for name, res in report.items():
             state = "ok" if res.get("ok") else f"FAIL {res.get('error')}"
             details = "  ".join(f"{k}={v}" for k, v in res.items()
@@ -266,10 +268,12 @@ def main() -> None:
                     help="пропустить шаг (sync/bot/media/shiftwatch/fuzzy/memory/export)")
     ap.add_argument("--loop", type=int, metavar="MIN",
                     help="демон: повторять цикл каждые N минут (cron не нужен)")
+    ap.add_argument("--account", default=None,
+                    help="имя аккаунта из TG_ACCOUNTS для шага sync (по умолчанию неявный default)")
     args = ap.parse_args()
     if args.loop:
         asyncio.run(run_loop(args.db, args.pack, args.days_ahead,
-                             args.send, args.loop))
+                             args.send, args.loop, account=args.account))
         return
     report = asyncio.run(run(args.db, pack_id=args.pack, days_ahead=args.days_ahead,
                              send=args.send, skip_sync="sync" in args.skip,
@@ -278,7 +282,8 @@ def main() -> None:
                              skip_shiftwatch="shiftwatch" in args.skip,
                               skip_fuzzy="fuzzy" in args.skip,
                               skip_memory="memory" in args.skip,
-                              skip_export="export" in args.skip))
+                              skip_export="export" in args.skip,
+                              account=args.account))
     if report.get("already_running"):
         print("pipeline: уже запущен другой прогон (lockfile занят) — выходим")
         return
