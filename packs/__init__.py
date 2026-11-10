@@ -1,5 +1,7 @@
 """Реестр декларативных пакетов извлечения."""
 
+import importlib.util
+import os
 from typing import NoReturn
 
 from packs.construction import PACK as CONSTRUCTION
@@ -55,5 +57,25 @@ def _validate(pack: dict) -> None:
         fail("field_policies должен быть dict")
 
 
+def _extra_packs() -> dict[str, dict]:
+    path = os.environ.get("TG_EXTRA_PACKS")
+    if not path:
+        return {}
+    spec = importlib.util.spec_from_file_location("tg_extra_packs", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"TG_EXTRA_PACKS: не py-модуль: {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return dict(mod.PACKS)
+
+
 for _pack in PACKS.values():
     _validate(_pack)
+
+EXTRA_ERROR: dict | None = None
+try:
+    for _pack in _extra_packs().values():
+        _validate(_pack)
+        PACKS[_pack["id"]] = _pack
+except Exception as exc:
+    EXTRA_ERROR = {"ok": False, "error": f"TG_EXTRA_PACKS: {exc}"}

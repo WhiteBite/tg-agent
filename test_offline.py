@@ -4127,6 +4127,35 @@ def test_pipeline(db_path: Path) -> None:
         os.environ["TG_EXPORT_PATH"] = saved_exp
 
 
+def test_pipeline_lazy_imports(db_path: Path) -> None:
+    print("=== pipeline: пропущенный шаг не импортирует свой модуль ===")
+    lazy_db = db_path.parent / "pipeline_lazy.sqlite"
+    if lazy_db.exists():
+        lazy_db.unlink()
+    # media/memory здесь не проверяются: их на импорте тянет extract.py (неотключаемый шаг)
+    code = (
+        "import asyncio, sys\n"
+        "import pipeline\n"
+        "lazy = ('sync', 'bot_ingest', 'shiftwatch', 'fuzzy_dedup', 'export')\n"
+        "leaked = [m for m in lazy if m in sys.modules]\n"
+        "assert not leaked, f'импорт pipeline тянет {leaked}'\n"
+        f"asyncio.run(pipeline.run({str(lazy_db)!r}, skip_sync=True, skip_bot=True,\n"
+        "                           skip_media=True, skip_shiftwatch=True,\n"
+        "                           skip_fuzzy=True, skip_memory=True,\n"
+        "                           skip_export=True, acquire_lock=False))\n"
+        "leaked = [m for m in lazy if m in sys.modules]\n"
+        "assert not leaked, f'пропущенные шаги импортированы: {leaked}'\n"
+        "print('OK')\n")
+    env = dict(os.environ, TG_ENV_FILE="", EXTRACT_PROVIDER="stub",
+               DIGEST_PROVIDER="stub")
+    res = subprocess.run([sys.executable, "-X", "utf8", "-c", code],
+                         capture_output=True, text=True, env=env,
+                         cwd=str(Path(__file__).parent), timeout=180)
+    check(res.returncode == 0 and "OK" in res.stdout,
+          "pipeline: пропуск шага не импортирует его модуль (sync/bot/shiftwatch/fuzzy/export)",
+          (res.stderr or res.stdout)[-300:])
+
+
 def test_extract_until_done(db_path: Path) -> None:
     print("=== extract --until-done: дожёвывает хвост раундами ===")
     ud_db = db_path.parent / "until_done.sqlite"
@@ -5758,6 +5787,7 @@ def main() -> int:
     test_checkmail(db_path)
     test_services_pack(db_path)
     test_pipeline(db_path)
+    test_pipeline_lazy_imports(db_path)
     test_extract_until_done(db_path)
     test_watch_suggest(db_path)
     test_llm_extra_body(db_path)

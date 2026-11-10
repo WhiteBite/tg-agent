@@ -872,6 +872,69 @@ def test_registry() -> None:
           "registry: выключенный модуль не создаёт свою схему",
           (res.stderr or res.stdout)[-200:])
 
+    env = {**base_env, "TG_MODULES_OFF": "downloads"}
+    res = subprocess.run(
+        [sys.executable, "-c",
+         "import sys\n"
+         "import modules\n"
+         "assert 'modules.downloads' not in sys.modules\n"
+         "assert 'telethon' not in sys.modules\n"
+         "assert 'jobs' not in sys.modules\n"
+         "print('OK')"],
+        capture_output=True, text=True, env=env, cwd=str(HERE), timeout=60)
+    check(res.returncode == 0 and "OK" in res.stdout,
+          "registry: выключенный модуль не импортируется вовсе (telethon/jobs не тянутся)",
+          (res.stderr or res.stdout)[-200:])
+
+    extra = TMP / "extra_modules.py"
+    extra.write_text(
+        "def _ping() -> str:\n"
+        "    return 'pong'\n"
+        "MODULES = {'fake': {'id': 'fake', 'version': 1,\n"
+        "                    'mcp': [{'name': 'tg_fake_ping', 'description': 'пинг',\n"
+        "                             'fn': _ping, 'gate': 'TG_ALLOW_FAKE'}]}}\n",
+        encoding="utf-8")
+    env = {**base_env, "TG_EXTRA_MODULES": str(extra)}
+    res = subprocess.run(
+        [sys.executable, "-c",
+         "import modules\n"
+         "assert set(modules.MODULES) == {'downloads', 'fake'}, modules.MODULES\n"
+         "assert modules.EXTRA_ERROR is None\n"
+         "print('OK')"],
+        capture_output=True, text=True, env=env, cwd=str(HERE), timeout=60)
+    check(res.returncode == 0 and "OK" in res.stdout,
+          "registry: TG_EXTRA_MODULES добавляет сторонний модуль поверх встроенных",
+          (res.stderr or res.stdout)[-200:])
+
+    extra_list = TMP / "extra_modules_list.py"
+    extra_list.write_text(
+        "MODULES = [{'id': 'fake', 'version': 1, 'mcp': []}]\n",
+        encoding="utf-8")
+    env = {**base_env, "TG_EXTRA_MODULES": str(extra_list),
+           "TG_MODULES_OFF": "downloads"}
+    res = subprocess.run(
+        [sys.executable, "-c",
+         "import modules\n"
+         "assert set(modules.MODULES) == {'fake'}, modules.MODULES\n"
+         "print('OK')"],
+        capture_output=True, text=True, env=env, cwd=str(HERE), timeout=60)
+    check(res.returncode == 0 and "OK" in res.stdout,
+          "registry: MODULES списком + TG_MODULES_OFF действует и на сторонние",
+          (res.stderr or res.stdout)[-200:])
+
+    env = {**base_env, "TG_EXTRA_MODULES": str(TMP / "no_such_module.py")}
+    res = subprocess.run(
+        [sys.executable, "-c",
+         "import modules\n"
+         "assert set(modules.MODULES) == {'downloads'}\n"
+         "assert modules.EXTRA_ERROR and modules.EXTRA_ERROR['ok'] is False\n"
+         "assert 'TG_EXTRA_MODULES' in modules.EXTRA_ERROR['error']\n"
+         "print('OK')"],
+        capture_output=True, text=True, env=env, cwd=str(HERE), timeout=60)
+    check(res.returncode == 0 and "OK" in res.stdout,
+          "registry: битый путь TG_EXTRA_MODULES — EXTRA_ERROR, реестр не падает",
+          (res.stderr or res.stdout)[-200:])
+
 
 def _rpc(proc, payload: dict) -> None:
     proc.stdin.write(json.dumps(payload) + "\n")
@@ -900,7 +963,7 @@ def _mcp_env(**extra: str) -> dict:
     env = {k: v for k, v in os.environ.items()
            if k not in ("TG_DB", "TG_ALLOW_MANAGE", "TG_ALLOW_LIVE", "TG_EXPOSE_SQL",
                         "TG_STRICT_WATCH", "TG_ALLOW_DOWNLOADS", "TG_ALLOW_FORWARDS",
-                        "TG_MODULES_OFF",
+                        "TG_MODULES_OFF", "TG_EXTRA_MODULES", "TG_ALLOW_FAKE",
                         "TELEGRAM_API_ID", "TELEGRAM_API_HASH",
                         "TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME")}
     # на Windows пустое значение env-переменной = её удаление, поэтому несуществующий путь
@@ -1042,6 +1105,33 @@ def test_mcp_gate() -> None:
               str(len(names5)))
     finally:
         _stop(proc5)
+
+    extra = TMP / "gate_module.py"
+    extra.write_text(
+        "def _ping() -> str:\n"
+        "    return 'pong'\n"
+        "MODULES = {'fake': {'id': 'fake', 'version': 1,\n"
+        "                    'mcp': [{'name': 'tg_fake_ping', 'description': 'пинг',\n"
+        "                             'fn': _ping, 'gate': 'TG_ALLOW_FAKE'}]}}\n",
+        encoding="utf-8")
+    proc6 = _start(_mcp_env(TG_DB=str(db_path), TG_EXTRA_MODULES=str(extra)))
+    try:
+        names6 = _init(proc6)
+        check(len(names6) == 19 and "tg_fake_ping" not in names6,
+              "MCP: произвольный гейт модуля выключен — инструмента нет (19)",
+              str(len(names6)))
+    finally:
+        _stop(proc6)
+
+    proc7 = _start(_mcp_env(TG_DB=str(db_path), TG_EXTRA_MODULES=str(extra),
+                            TG_ALLOW_FAKE="1"))
+    try:
+        names7 = _init(proc7)
+        check(len(names7) == 20 and "tg_fake_ping" in names7,
+              "MCP: произвольный гейт TG_ALLOW_FAKE=1 регистрирует инструмент модуля",
+              str(sorted(n for n in names7 if n.startswith("tg_fake"))))
+    finally:
+        _stop(proc7)
 
 
 def test_runner_spawn() -> None:

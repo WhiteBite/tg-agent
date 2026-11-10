@@ -21,6 +21,11 @@
 | `TG_EXPOSE_SQL=1` | `tg_sql` — произвольный read-only SQL | нет | `server.py` |
 | `TG_STRICT_WATCH=1` | жёсткий гейт: читалки и сущности только по темам watch-листа | нет | `server.py` (см. `_allowed` / `_denied`) |
 
+Модуль может объявить в своей MCP-спеке любой гейт: `gate` — это либо
+`"downloads"` / `"forwards"` / `"any"` (алиасы `TG_ALLOW_DOWNLOADS` /
+`TG_ALLOW_FORWARDS`), либо имя произвольной env-переменной (напр. `TG_ALLOW_X`).
+Инструмент регистрируется, когда соответствующий гейт включён.
+
 Все `tg_manage_*`, `tg_downloads_run`, `tg_downloads_forward`, `tg_send_message`
 требуют `confirm=True` в каждом вызове — без него возвращают ошибку и ничего не
 делают.
@@ -31,7 +36,9 @@
 |---|---|---|
 | `TG_ALERTS=1` | живые алерты `live.py` (слова-триггеры и упоминания → Saved Messages) | `alerts.py`, `live.py` |
 | `TG_ENTITY_ALERTS=1` | сущностные алерты после шага extract (виды из `TG_ENTITY_ALERT_KINDS`, дефолт trial,question) | `entity_alerts.py`, `pipeline.py` |
-| `TG_MODULES_OFF="downloads,…"` | убирает модуль из реестра: ни маршрутов, ни MCP-инструментов, ни схемы, ни исполнителя | `modules/__init__.py` |
+| `TG_MODULES_OFF="downloads,…"` | убирает модуль из реестра: ни маршрутов, ни MCP-инструментов, ни схемы, ни исполнителя; файл модуля не импортируется | `modules/__init__.py` |
+| `TG_EXTRA_MODULES=<путь>` | сторонний `.py` со словарём `MODULES` (или списком) — модули поверх встроенных, с той же валидацией и учётом `TG_MODULES_OFF` | `modules/__init__.py` |
+| `TG_EXTRA_PACKS=<путь>` | сторонний `.py` со словарём `PACKS` — пакеты извлечения поверх встроенных, с той же валидацией | `packs/__init__.py` |
 
 ## Сопутствующий лимит
 

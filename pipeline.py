@@ -33,20 +33,12 @@ from env import load_env
 
 load_env()
 
-import bot_ingest as bot_ingest_mod
 import digest as digest_mod
 import entity_alerts as entity_alerts_mod
-import export as export_mod
 import extract as extract_mod
-import fuzzy_dedup as fuzzy_mod
-import memory as memory_mod
 import monitor as monitor_mod
 import proclock
-import shiftwatch as shiftwatch_mod
-import sync as sync_mod
 from db import DB
-
-import media as media_mod
 
 DB_PATH = os.environ.get("TG_DB", str(HERE / "tg_index.sqlite"))
 
@@ -109,6 +101,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
     budget = _step_budget()
     report: dict[str, dict] = {}
     if not skip_sync:
+        import sync as sync_mod
         try:
             rep = await asyncio.wait_for(
                 sync_mod.run(db_path=db_path, client=client, watched_only=True),
@@ -121,6 +114,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         except Exception as exc:
             report["sync"] = _step_err(exc, budget)
     if not skip_bot:
+        import bot_ingest as bot_ingest_mod
         if os.environ.get("TG_BOT_TOKEN"):
             try:
                 bi = await asyncio.wait_for(
@@ -137,6 +131,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
             report["bot"] = {"ok": True, "skipped": True,
                              "reason": "TG_BOT_TOKEN не задан"}
     if not skip_media:
+        import media as media_mod
         try:
             med = await asyncio.wait_for(
                 media_mod.run_async(db_path, client=client), timeout=budget)
@@ -157,6 +152,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
     except Exception as exc:
         report["extract"] = _step_err(exc, budget)
     if not skip_shiftwatch:
+        import shiftwatch as shiftwatch_mod
         try:
             sw = await asyncio.wait_for(
                 _call_step(shiftwatch_mod.run, db_path), timeout=budget)
@@ -174,6 +170,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
     except Exception as exc:
         report["alerts"] = _step_err(exc, budget)
     if not skip_fuzzy:
+        import fuzzy_dedup as fuzzy_mod
         try:
             fz = await asyncio.wait_for(
                 _call_step(fuzzy_mod.run, db_path, pack=pack_id,
@@ -184,6 +181,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         except Exception as exc:
             report["fuzzy"] = _step_err(exc, budget)
     if not skip_memory:
+        import memory as memory_mod
         try:
             mem = await asyncio.wait_for(
                 _call_step(memory_mod.link, db_path), timeout=budget)
@@ -196,6 +194,7 @@ async def run(db_path: str = DB_PATH, pack_id: str | None = None,
         except Exception as exc:
             report["memory"] = _step_err(exc, budget)
     if not skip_export:
+        import export as export_mod
         try:
             ex = await asyncio.wait_for(
                 _call_step(export_mod.run, db_path, system="file"),

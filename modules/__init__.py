@@ -10,20 +10,25 @@
                живёт в самой функции модуля; gate (необяз.) — какой env-гейт
                сервера регистрирует инструмент: "downloads" (умолчание,
                TG_ALLOW_DOWNLOADS), "forwards" (TG_ALLOW_FORWARDS), "any"
-               (любой из них)
+               (любой из них) или имя произвольной env-переменной (напр.
+               TG_ALLOW_X)
   runner    — fn(job_id) -> dict, запуск фонового исполнителя задания
 
 Отключение: TG_MODULES_OFF="downloads,..." убирает модуль из реестра —
 ни маршрутов, ни инструментов, ни исполнителя; схема такого модуля
-не создаётся и задания его типа не выполняются.
+не создаётся и задания его типа не выполняются. Файл выключенного модуля
+не импортируется вовсе. TG_EXTRA_MODULES=<путь к .py-модулю со словарём
+MODULES> добавляет сторонние модули поверх встроенных.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from collections.abc import Callable
 
-from modules.downloads import MODULE as _DOWNLOADS
+_OFF = {s.strip() for s in os.environ.get("TG_MODULES_OFF", "").split(",")
+        if s.strip()}
 
 
 def _validate(module: dict) -> None:
@@ -59,19 +64,47 @@ def _validate(module: dict) -> None:
                 or not spec["name"].startswith("tg_")
                 or not isinstance(spec.get("description"), str)
                 or not spec.get("description")
-                or spec.get("gate") not in (None, "downloads", "forwards", "any")
                 or not callable(spec.get("fn"))):
             fail(f"неверный mcp-спека: {spec.get('name')!r}")
+        gate = spec.get("gate")
+        if gate is not None and (not isinstance(gate, str) or not gate.strip()):
+            fail(f"неверный gate mcp-спеки: {spec.get('name')!r}")
 
 
-_OFF = {s.strip() for s in os.environ.get("TG_MODULES_OFF", "").split(",")
-        if s.strip()}
+def _extra_modules() -> dict[str, dict]:
+    path = os.environ.get("TG_EXTRA_MODULES")
+    if not path:
+        return {}
+    spec = importlib.util.spec_from_file_location("tg_extra_modules", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"TG_EXTRA_MODULES: не py-модуль: {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    raw = getattr(mod, "MODULES", None)
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        return {m["id"]: m for m in raw}
+    raise ValueError("TG_EXTRA_MODULES: MODULES должен быть dict или list")
+
 
 MODULES: dict[str, dict] = {}
-for _mod in (_DOWNLOADS,):
-    if _mod["id"] not in _OFF:
+EXTRA_ERROR: dict | None = None
+
+if "downloads" not in _OFF:
+    from modules.downloads import MODULE as _DOWNLOADS
+
+    _validate(_DOWNLOADS)
+    MODULES[_DOWNLOADS["id"]] = _DOWNLOADS
+
+try:
+    for _mod in _extra_modules().values():
+        if _mod["id"] in _OFF:
+            continue
         _validate(_mod)
         MODULES[_mod["id"]] = _mod
+except Exception as exc:
+    EXTRA_ERROR = {"ok": False, "error": f"TG_EXTRA_MODULES: {exc}"}
 
 
 def ensure_schema(conn) -> None:

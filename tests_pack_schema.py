@@ -47,6 +47,8 @@ def expect_ok(pack: dict, label: str) -> None:
 def test_import_yields_both_packs() -> None:
     check(set(packs.PACKS) == {"construction", "services"},
           "PACKS содержит оба валидных пакета", str(sorted(packs.PACKS)))
+    check(packs.EXTRA_ERROR is None,
+          "без TG_EXTRA_PACKS реестр не тронут (EXTRA_ERROR is None)")
 
 
 def test_real_packs_pass() -> None:
@@ -123,6 +125,55 @@ def test_import_in_subprocess(root: Path) -> None:
           proc.stderr.strip()[:300])
 
 
+def test_extra_packs(root: Path) -> None:
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).parent))
+
+    def run_with(code: str, path: Path):
+        return subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", code], cwd=str(root),
+            env=dict(env, TG_EXTRA_PACKS=str(path)),
+            capture_output=True, text=True)
+
+    extra = root / "extra_packs.py"
+    extra.write_text(
+        "import copy\n"
+        "from packs.construction import PACK\n"
+        "p = copy.deepcopy(PACK)\n"
+        "p['id'] = 'extra_test'\n"
+        "PACKS = {'extra_test': p}\n",
+        encoding="utf-8")
+    proc = run_with(
+        "import packs\n"
+        "assert set(packs.PACKS) == {'construction', 'services', 'extra_test'}\n"
+        "assert packs.EXTRA_ERROR is None\n"
+        "print('OK')", extra)
+    check(proc.returncode == 0 and "OK" in proc.stdout,
+          "TG_EXTRA_PACKS: сторонний пак сливается с встроенными и проходит _validate",
+          (proc.stderr or proc.stdout).strip()[:300])
+
+    bad = root / "bad_packs.py"
+    bad.write_text("PACKS = {'broken': {'id': 'broken', 'version': 1}}\n",
+                   encoding="utf-8")
+    proc = run_with(
+        "import packs\n"
+        "assert set(packs.PACKS) == {'construction', 'services'}\n"
+        "assert packs.EXTRA_ERROR and 'broken' in packs.EXTRA_ERROR['error']\n"
+        "print('OK')", bad)
+    check(proc.returncode == 0 and "OK" in proc.stdout,
+          "TG_EXTRA_PACKS: невалидный пак — EXTRA_ERROR, встроенные целы",
+          (proc.stderr or proc.stdout).strip()[:300])
+
+    proc = run_with(
+        "import packs\n"
+        "assert set(packs.PACKS) == {'construction', 'services'}\n"
+        "assert packs.EXTRA_ERROR and packs.EXTRA_ERROR['ok'] is False\n"
+        "assert 'TG_EXTRA_PACKS' in packs.EXTRA_ERROR['error']\n"
+        "print('OK')", root / "no_such_packs.py")
+    check(proc.returncode == 0 and "OK" in proc.stdout,
+          "TG_EXTRA_PACKS: битый путь не роняет импорт, ошибка в EXTRA_ERROR",
+          (proc.stderr or proc.stdout).strip()[:300])
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="pack_schema_"))
     test_import_yields_both_packs()
@@ -131,6 +182,7 @@ def main() -> int:
     test_broken_packs_rejected()
     test_known_ops_include_defensive_extras()
     test_import_in_subprocess(root)
+    test_extra_packs(root)
     print()
     if FAILURES:
         print(f"ПРОВАЛЕНО: {len(FAILURES)} -> {FAILURES}")

@@ -1087,16 +1087,21 @@ if ALLOW_SEND:
             return _j({"error": f"send: {exc}"})
 
 
-if ALLOW_DOWNLOADS or ALLOW_FORWARDS:
+def _module_gate_on(gate: str | None) -> bool:
+    if gate in (None, "downloads"):
+        return ALLOW_DOWNLOADS
+    if gate == "forwards":
+        return ALLOW_FORWARDS
+    if gate == "any":
+        return ALLOW_DOWNLOADS or ALLOW_FORWARDS
+    return os.environ.get(gate, "").lower() in ("1", "true", "yes")
+
+
+if ALLOW_DOWNLOADS or ALLOW_FORWARDS or os.environ.get("TG_EXTRA_MODULES"):
     import modules as modules_reg
 
-    _gate_on = {
-        "downloads": ALLOW_DOWNLOADS,
-        "forwards": ALLOW_FORWARDS,
-        "any": ALLOW_DOWNLOADS or ALLOW_FORWARDS,
-    }
     for _spec in modules_reg.mcp_specs():
-        if _gate_on.get(_spec.get("gate", "downloads")):
+        if _module_gate_on(_spec.get("gate", "downloads")):
             mcp.tool(name=_spec["name"], description=_spec["description"])(_spec["fn"])
 
 
